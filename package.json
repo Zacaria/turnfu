@@ -1,0 +1,10 @@
+{
+  "name": "wakfu-turn-optimizer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test --experimental-strip-types src/**/*.test.ts",
+    "validate:openspec:huppermage": "openspec validate catalog-huppermage-spells-effects --strict --no-interactive"
+  }
+}
