@@ -1,7 +1,8 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { App } from "./App.tsx?v=center-tabs-v6";
-import "./styles.css?v=center-tabs-v6";
+import { AuraDemo } from "./AuraDemo.tsx?v=energy-no-spikes-v1";
+import { App } from "./App.tsx?v=resources-state-tracker-v2";
+import "./styles.css?v=resources-state-tracker-v2";
 
 const root = document.getElementById("root");
 
@@ -11,6 +12,6 @@ if (!root) {
 
 createRoot(root).render(
   <StrictMode>
-    <App />
+    {window.location.pathname === "/scratch/aura" ? <AuraDemo /> : <App />}
   </StrictMode>,
 );

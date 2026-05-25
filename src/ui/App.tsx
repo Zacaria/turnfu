@@ -6,6 +6,7 @@ import {
   EyeOff,
   Plus,
   Trash2,
+  X,
 } from "lucide-react";
 import {
   getHuppermagePassives,
@@ -60,12 +61,7 @@ import {
 import { createDefaultCharacter, defaultActionContext, defaultActionTarget } from "./defaults.ts";
 import { resolveDetailTarget } from "./detailSelection.ts";
 import { describeEffect, describeViolation, formatHeart, formatNumber, summarizeStats } from "./format.ts";
-import {
-  elementToRune,
-  huppermageElementChoices,
-  type HuppermageElementChoice,
-  runeToElementChoice,
-} from "./huppermageElementControls.ts";
+import { HuppermageRuneAura } from "./HuppermageRuneAura.tsx?v=demo-frame-v1";
 import { getHuppermageIconSrc } from "./icons.ts";
 import {
   getAptitudeIconSrc,
@@ -88,7 +84,8 @@ import {
   supportedLocales,
   t,
   type UiLocale,
-} from "./i18n.ts?v=responsive-panels-v5";
+} from "./i18n.ts?v=state-tracker-v12";
+import { getRuneIconSrc } from "./spellAttributeIcons.ts";
 import { getStatStep } from "./statControls.ts";
 import {
   createTimelineDropIntent,
@@ -591,8 +588,6 @@ export function App() {
                 <b>{currentSnapshot?.totalDamageSoFar ?? 0}</b>
               </div>
             </div>
-            <ResourceStrip resources={currentSnapshot?.resources ?? character.resources} />
-            <RuneStrip huppermage={currentSnapshot?.classState.huppermage} />
             <div className={simulation.valid ? "status-pill status-ok" : "status-pill status-error"}>
               {simulation.valid ? t("status.valid") : t("status.invalid")}
             </div>
@@ -600,9 +595,9 @@ export function App() {
         </section>
 
         <section className={`workspace ${centerTab !== "combos" ? "workspace-center-only" : ""}`}>
-          <aside className="panel setup-panel" aria-label={t("panel.characterConfig")}>
-            <PanelHeader title={t("panel.combatState")} subtitle={t("panel.startingPoint")} />
-            <HuppermageStateEditor character={characterConfig} onChange={setCharacterConfig} />
+          <aside className="panel setup-panel" aria-label={t("panel.stateTracker")}>
+            <PanelHeader title={t("panel.stateTracker")} />
+            <HuppermageStateTracker resources={currentSnapshot?.resources ?? character.resources} snapshot={currentSnapshot} />
           </aside>
 
           <section className="panel center-panel" aria-label={t("panel.sequenceDetails")}>
@@ -756,7 +751,7 @@ export function App() {
 
           {centerTab === "combos" ? (
             <aside className="panel library-panel" aria-label={t("panel.library")}>
-              <PanelHeader title={t("panel.library")} subtitle={t("panel.build")} />
+              <PanelHeader title={t("panel.library")} />
               <CatalogLibrary
                 activePassives={character.classState?.huppermage?.activePassives ?? []}
                 deckSpellLimit={deckSpellLimit}
@@ -1015,11 +1010,11 @@ function getTimelineLaneBounds(turnStack: HTMLDivElement | null): DOMRect[] {
     .map((element) => element.getBoundingClientRect());
 }
 
-function PanelHeader({ title, subtitle }: { title: string; subtitle: string }) {
+function PanelHeader({ title, subtitle }: { title: string; subtitle?: string }) {
   return (
     <div className="panel-header">
       <h2>{title}</h2>
-      <span>{subtitle}</span>
+      {subtitle ? <span>{subtitle}</span> : null}
     </div>
   );
 }
@@ -1157,7 +1152,7 @@ function SelectionDetail({
       <section className="detail-section">
         <h3>{t("detail.state")}</h3>
         <ResourceStrip resources={snapshot.resources} />
-        <RuneStrip huppermage={huppermage} />
+        <RuneStrip huppermage={huppermage} resources={snapshot.resources} />
       </section>
 
       {entry ? (
@@ -1213,27 +1208,46 @@ function SelectionDetail({
   );
 }
 
-function RuneStrip({ huppermage }: { huppermage: TimelineSnapshot["classState"]["huppermage"] }) {
+function RuneStrip({
+  huppermage,
+  resources,
+  showFeuFollets = true,
+}: {
+  huppermage: TimelineSnapshot["classState"]["huppermage"];
+  resources?: TimelineSnapshot["resources"];
+  showFeuFollets?: boolean;
+}) {
+  const bqPercent = huppermage?.bqMax && huppermage.bqMax > 0
+    ? clamp((resources?.bq ?? 0) / huppermage.bqMax, 0, 1)
+    : 0;
+
   return (
     <div className="rune-strip" aria-label={t("runes.huppermage")}>
       {runeOptions.map((rune) => {
         const active = huppermage?.runes.active[rune] ?? false;
         const isLast = huppermage?.runes.lastGeneratedRune === rune;
+        const element = runeToElement[rune];
         return (
-          <span
+          <HuppermageRuneAura
+            active={active}
+            activeHeart={huppermage?.activeHeart}
+            bqPercent={bqPercent}
+            className={`rune-chip ${isLast ? "last" : ""}`}
+            element={element}
             key={rune}
-            className={`rune-chip ${active ? "active" : ""} ${isLast ? "last" : ""}`}
             title={formatUiMessage("runes.activeTitle", {
               rune: formatRuneLabel(rune),
               state: active ? t("runes.active") : t("runes.inactive"),
               last: isLast ? ` - ${t("runes.last")}` : "",
             })}
           >
-            <ElementIcon element={runeToElement[rune]} />
-          </span>
+            <img className="huppermage-rune-aura-icon" alt="" src={getRuneIconSrc(rune)} />
+          </HuppermageRuneAura>
         );
       })}
-      <span className="rune-meta" title={t("runes.feuFolletsTitle")}>FF {huppermage?.feuFolletsActive ?? 0}</span>
+      {showFeuFollets ? (
+        <span className="rune-meta" title={t("runes.feuFolletsTitle")}>FF {huppermage?.feuFolletsActive ?? 0}</span>
+      ) : null}
     </div>
   );
 }
@@ -1303,8 +1317,12 @@ function CatalogLibrary({
   onToggleEntryHidden: (entry: CatalogEntry) => void;
   onTogglePassive: (passiveId: string, active: boolean) => void;
 }) {
-  const visibleSpells = getVisibleCatalogEntries(spells, hiddenEntries, showHiddenEntries);
-  const visiblePassives = getVisibleCatalogEntries(passives, hiddenEntries, showHiddenEntries);
+  const [spellSearch, setSpellSearch] = useState("");
+  const [passiveSearch, setPassiveSearch] = useState("");
+  const visibleSpells = getVisibleCatalogEntries(spells, hiddenEntries, showHiddenEntries)
+    .filter((spell) => catalogSearchMatches(spell, spellSearch));
+  const visiblePassives = getVisibleCatalogEntries(passives, hiddenEntries, showHiddenEntries)
+    .filter((passive) => catalogSearchMatches(passive, passiveSearch));
   const hiddenCount = countHiddenCatalogEntries(hiddenEntries);
   const usedDeckSpellIds = usedSpellIds.filter((spellId) => {
     const spell = spells.find((entry) => entry.id === spellId);
@@ -1314,8 +1332,29 @@ function CatalogLibrary({
   const deckFull = usedSpellCount >= deckSpellLimit;
   const activePassiveCount = activePassives.length;
   const [spellTooltip, setSpellTooltip] = useState<{ entry: CatalogEntry; left: number; top: number } | null>(null);
+  const catalogTooltipSuppressedRef = useRef(false);
+
+  useEffect(() => {
+    function releaseCatalogTooltip() {
+      catalogTooltipSuppressedRef.current = false;
+    }
+
+    window.addEventListener("blur", releaseCatalogTooltip);
+    window.addEventListener("dragend", releaseCatalogTooltip);
+    window.addEventListener("pointerup", releaseCatalogTooltip);
+
+    return () => {
+      window.removeEventListener("blur", releaseCatalogTooltip);
+      window.removeEventListener("dragend", releaseCatalogTooltip);
+      window.removeEventListener("pointerup", releaseCatalogTooltip);
+    };
+  }, []);
 
   function showSpellTooltip(event: React.MouseEvent<HTMLElement> | React.FocusEvent<HTMLElement>, entry: CatalogEntry) {
+    if (catalogTooltipSuppressedRef.current) {
+      return;
+    }
+
     const rect = event.currentTarget.getBoundingClientRect();
     const tooltipWidth = 340;
     const preferredLeft = rect.left - tooltipWidth - 14;
@@ -1329,18 +1368,41 @@ function CatalogLibrary({
     setSpellTooltip(null);
   }
 
+  function suppressSpellTooltip() {
+    catalogTooltipSuppressedRef.current = true;
+    hideSpellTooltip();
+    onHoverEntry(null);
+  }
+
+  function releaseSpellTooltip() {
+    catalogTooltipSuppressedRef.current = false;
+    hideSpellTooltip();
+    onHoverEntry(null);
+  }
+
+  function startCatalogSpellDrag(event: React.DragEvent, spellId: string, deckUnavailable: boolean) {
+    if (deckUnavailable) {
+      event.preventDefault();
+      return;
+    }
+
+    suppressSpellTooltip();
+    onDragSpell(event, spellId);
+  }
+
+  function finishCatalogSpellDrag() {
+    releaseSpellTooltip();
+    onDragEnd();
+  }
+
   return (
     <div className="catalog-library">
       <div className="catalog-library-toolbar">
-        <div className={`catalog-counter catalog-counter-inline ${deckFull ? "full" : ""}`}>
-          <span>{formatUiMessage("deck.spellCount", { used: usedSpellCount, limit: deckSpellLimit })}</span>
-          {temporaryUnlockedSpellElement ? (
-            <span>
-              <ElementIcon element={temporaryUnlockedSpellElement} />
-              {formatUiMessage("deck.temporary", { element: formatElementLabel(temporaryUnlockedSpellElement) })}
-            </span>
-          ) : null}
-        </div>
+        <CatalogSearchField
+          label={t("library.searchSpells")}
+          value={spellSearch}
+          onChange={setSpellSearch}
+        />
         <IconButton
           className={`catalog-show-hidden ${showHiddenEntries && hiddenCount > 0 ? "active" : ""}`}
           disabled={hiddenCount === 0}
@@ -1352,7 +1414,18 @@ function CatalogLibrary({
         </IconButton>
       </div>
       <section>
-        <h3>{t("library.spells")}</h3>
+        <div className="catalog-section-header">
+          <h3>{t("library.spells")}</h3>
+          <div className={`catalog-counter catalog-counter-compact ${deckFull ? "full" : ""}`}>
+            <span>{formatUiMessage("deck.spellRatio", { used: usedSpellCount, limit: deckSpellLimit })}</span>
+            {temporaryUnlockedSpellElement ? (
+              <span>
+                <ElementIcon element={temporaryUnlockedSpellElement} />
+                {formatUiMessage("deck.temporary", { element: formatElementLabel(temporaryUnlockedSpellElement) })}
+              </span>
+            ) : null}
+          </div>
+        </div>
         <div className="spell-library">
           {visibleSpells.map((spell) => {
             const hidden = isCatalogEntryHidden(hiddenEntries, spell);
@@ -1368,15 +1441,17 @@ function CatalogLibrary({
                   draggable={!hidden && !deckUnavailable}
                   type="button"
                   title={deckUnavailable ? t("deck.unavailableTitle") : temporaryAvailable ? formatUiMessage("deck.temporaryTitle", { element: formatElementLabel(temporaryUnlockedSpellElement) }) : spell.name}
-                  onClick={() => onSelectEntry(spell.id)}
-                  onDragEnd={onDragEnd}
-                  onDragStart={(event) => {
-                    if (deckUnavailable) {
-                      event.preventDefault();
-                      return;
-                    }
-                    onDragSpell(event, spell.id);
+                  onClick={() => {
+                    releaseSpellTooltip();
+                    onSelectEntry(spell.id);
                   }}
+                  onDragEnd={finishCatalogSpellDrag}
+                  onDragStart={(event) => startCatalogSpellDrag(event, spell.id, deckUnavailable)}
+                  onMouseDown={suppressSpellTooltip}
+                  onMouseUp={releaseSpellTooltip}
+                  onPointerCancel={releaseSpellTooltip}
+                  onPointerDown={suppressSpellTooltip}
+                  onPointerUp={releaseSpellTooltip}
                   onMouseEnter={(event) => {
                     onHoverEntry(spell.id);
                     showSpellTooltip(event, spell);
@@ -1412,7 +1487,17 @@ function CatalogLibrary({
       </section>
 
       <section>
-        <h3>{t("library.passives")}</h3>
+        <div className="catalog-section-header">
+          <h3>{t("library.passives")}</h3>
+          <div className={`catalog-counter catalog-counter-compact ${activePassiveCount >= passiveLimit ? "full" : ""}`}>
+            <span>{formatUiMessage("passive.ratio", { used: activePassiveCount, limit: passiveLimit })}</span>
+          </div>
+        </div>
+        <CatalogSearchField
+          label={t("library.searchPassives")}
+          value={passiveSearch}
+          onChange={setPassiveSearch}
+        />
         <div className="passive-library">
           {visiblePassives.map((passive) => {
             const active = activePassives.includes(passive.id);
@@ -1452,9 +1537,6 @@ function CatalogLibrary({
             );
           })}
         </div>
-        <div className={`catalog-counter ${activePassiveCount >= passiveLimit ? "full" : ""}`}>
-          <span>{formatUiMessage("passive.count", { used: activePassiveCount, limit: passiveLimit })}</span>
-        </div>
       </section>
       {spellTooltip ? (
         <SpellInfoTooltip
@@ -1463,6 +1545,40 @@ function CatalogLibrary({
         />
       ) : null}
     </div>
+  );
+}
+
+function CatalogSearchField({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="catalog-search">
+      <span className="sr-only">{label}</span>
+      <input
+        aria-label={label}
+        placeholder={label}
+        type="search"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+      />
+      {value ? (
+        <button
+          aria-label={t("library.clearSearch")}
+          className="catalog-search-clear"
+          title={t("library.clearSearch")}
+          type="button"
+          onClick={() => onChange("")}
+        >
+          <X size={13} />
+        </button>
+      ) : null}
+    </label>
   );
 }
 
@@ -1959,75 +2075,52 @@ function EquipmentExtraStatsEditor({
   );
 }
 
-function HuppermageStateEditor({
-  character,
-  onChange,
+function HuppermageStateTracker({
+  resources,
+  snapshot,
 }: {
-  character: SimulatedCharacter;
-  onChange: (character: SimulatedCharacter) => void;
+  resources: SimulatedCharacter["resources"];
+  snapshot: TimelineSnapshot | undefined;
 }) {
-  const huppermage = character.classState?.huppermage;
-
-  function updateHuppermage(patch: NonNullable<SimulatedCharacter["classState"]>["huppermage"]) {
-    onChange({
-      ...character,
-      classState: {
-        ...character.classState,
-        huppermage: {
-          ...huppermage,
-          ...patch,
-        },
-      },
-    });
-  }
+  const huppermage = snapshot?.classState.huppermage;
 
   return (
-    <section className="form-section">
+    <section className="form-section state-tracker">
       <h3>{t("app.className")}</h3>
-      <ElementIconPicker
-        label={t("huppermage.activeHeart")}
-        value={huppermage?.activeHeart ?? null}
-        onChange={(element) => updateHuppermage({ activeHeart: element })}
-      />
-      <ElementIconPicker
-        label={t("huppermage.lastElement")}
-        value={runeToElementChoice(huppermage?.lastGeneratedRune)}
-        onChange={(element) => updateHuppermage({
-          lastGeneratedRune: element ? elementToRune(element) : null,
-        })}
-      />
-      <NumberField
-        label={t("huppermage.feuFollets")}
-        value={huppermage?.feuFolletsActive ?? 0}
-        onChange={(value) => updateHuppermage({ feuFolletsActive: value })}
-      />
-      <NumberField
-        label={t("deck.limit")}
-        value={huppermage?.deckSpellLimit ?? 12}
-        onChange={(value) => updateHuppermage({ deckSpellLimit: value })}
-      />
-      <NumberField
-        label={t("passive.limit")}
-        value={huppermage?.passiveLimit ?? 6}
-        onChange={(value) => updateHuppermage({ passiveLimit: value })}
-      />
-      <div className="toggle-group">
-        {runeOptions.map((rune) => (
-          <label key={rune} className="toggle-row">
-            <input
-              type="checkbox"
-              checked={huppermage?.runes?.[rune] ?? false}
-              onChange={(event) => updateHuppermage({
-                runes: {
-                  ...huppermage?.runes,
-                  [rune]: event.target.checked,
-                },
-              })}
-            />
-            <span>{formatRuneLabel(rune)}</span>
-          </label>
-        ))}
+      <div className="state-resource-overview">
+        <span>{t("form.resources")}</span>
+        <ResourceStrip resources={resources} />
       </div>
+      <div className="state-rune-overview">
+        <span>{t("runes.short")}</span>
+        <RuneStrip huppermage={huppermage} resources={snapshot?.resources} showFeuFollets={false} />
+      </div>
+      <dl className="state-list state-tracker-list">
+        <div>
+          <dt>{t("inspector.heart")}</dt>
+          <dd>{formatHeart(huppermage?.activeHeart)}</dd>
+        </div>
+        <div>
+          <dt>{t("huppermage.feuFollets")}</dt>
+          <dd>{huppermage?.feuFolletsActive ?? 0}</dd>
+        </div>
+        <div>
+          <dt>{t("state.storedBq")}</dt>
+          <dd>{huppermage?.storedBq ?? 0}</dd>
+        </div>
+        <div>
+          <dt>{t("state.haloMarks")}</dt>
+          <dd>{huppermage?.haloChatoyantMarks ?? 0}</dd>
+        </div>
+        <div>
+          <dt>{t("deck.limit")}</dt>
+          <dd>{huppermage?.deckSpellLimit ?? 12}</dd>
+        </div>
+        <div>
+          <dt>{t("passive.limit")}</dt>
+          <dd>{huppermage?.passiveLimit ?? 6}</dd>
+        </div>
+      </dl>
     </section>
   );
 }
@@ -2231,15 +2324,6 @@ function DamageBreakdown({ snapshot }: { snapshot: TimelineSnapshot | undefined 
   );
 }
 
-function NumberField({ label, value, onChange }: { label: string; value: number; onChange: (value: number) => void }) {
-  return (
-    <label className="field number-field">
-      <span>{label}</span>
-      <input type="number" value={value} onChange={(event) => onChange(Number(event.target.value))} />
-    </label>
-  );
-}
-
 function StatStepper({
   element,
   icon,
@@ -2271,45 +2355,6 @@ function StatStepper({
         <button type="button" title={formatUiMessage("stat.decrementTitle", { label })} onClick={(event) => adjust(event, -1)}>-</button>
         <button type="button" title={formatUiMessage("stat.incrementTitle", { label })} onClick={(event) => adjust(event, 1)}>+</button>
       </span>
-    </div>
-  );
-}
-
-function ElementIconPicker({
-  label,
-  onChange,
-  value,
-}: {
-  label: string;
-  onChange: (element: HuppermageElementChoice | null) => void;
-  value: HuppermageElementChoice | null;
-}) {
-  return (
-    <div className="element-picker-field">
-      <span>{label}</span>
-      <div className="element-picker" role="group" aria-label={label}>
-        <button
-          aria-label={`${label}: ${t("value.nonePlural").toLowerCase()}`}
-          className={`element-choice none-choice ${value === null ? "selected" : ""}`}
-          title={t("value.none")}
-          type="button"
-          onClick={() => onChange(null)}
-        >
-          <span aria-hidden="true">-</span>
-        </button>
-        {huppermageElementChoices.map((element) => (
-          <button
-            aria-label={`${label}: ${formatElementLabel(element)}`}
-            className={`element-choice ${value === element ? "selected" : ""}`}
-            key={element}
-            title={formatElementLabel(element)}
-            type="button"
-            onClick={() => onChange(element)}
-          >
-            <ElementIcon element={element} />
-          </button>
-        ))}
-      </div>
     </div>
   );
 }
@@ -2370,6 +2415,23 @@ function entryPrimaryElement(entry: CatalogEntry): Element | undefined {
 
 function isDeckTrackedCatalogSpell(spell: CatalogEntry): boolean {
   return !nonDeckSpellIds.has(spell.id) && !spell.tags.includes("feu-follet");
+}
+
+function catalogSearchMatches(entry: CatalogEntry, query: string): boolean {
+  const normalizedQuery = normalizeCatalogSearchText(query);
+  if (!normalizedQuery) {
+    return true;
+  }
+
+  return normalizeCatalogSearchText([entry.name, entry.id, ...entry.tags].join(" ")).includes(normalizedQuery);
+}
+
+function normalizeCatalogSearchText(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
 }
 
 function firstEffectElement(effects: Effect[]): Element | undefined {

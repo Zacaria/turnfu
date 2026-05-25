@@ -1,0 +1,331 @@
+.huppermage-rune-aura {
+  --rune-aura-color: #2eb7ff;
+  --rune-aura-core: #bff8ff;
+  --rune-aura-shadow: #0a4f80;
+  --rune-aura-strength: 0.65;
+  --rune-aura-speed: 1.5s;
+  --rune-aura-size: 20px;
+  position: relative;
+  overflow: visible;
+  isolation: isolate;
+}
+
+.huppermage-rune-aura.rune-chip {
+  display: inline-grid;
+  place-items: center;
+  width: 31px;
+  height: 31px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  box-shadow: none;
+}
+
+.huppermage-rune-aura.rune-chip.active {
+  opacity: 1;
+}
+
+.huppermage-rune-aura.rune-chip.last {
+  box-shadow: none;
+}
+
+.huppermage-rune-aura-frame {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  border: 1px solid color-mix(in srgb, var(--rune-aura-core) 54%, #ffffff 12%);
+  border-radius: 8px;
+  background:
+    radial-gradient(circle at 32% 20%, rgba(255, 255, 255, 0.42), transparent 24%),
+    radial-gradient(circle at 50% 52%, color-mix(in srgb, var(--rune-aura-color) 26%, #24322a), #18231f 68%);
+  box-shadow:
+    0 4px 12px rgba(0, 0, 0, 0.36),
+    0 0 10px color-mix(in srgb, var(--rune-aura-color) 68%, transparent),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.16),
+    inset 0 -5px 8px color-mix(in srgb, var(--rune-aura-shadow) 38%, transparent);
+  transform: translateZ(0);
+  transition: box-shadow 180ms ease, transform 180ms ease;
+  z-index: 1;
+}
+
+.huppermage-rune-aura.rune-chip.last .huppermage-rune-aura-frame {
+  box-shadow:
+    0 4px 12px rgba(0, 0, 0, 0.36),
+    0 0 13px color-mix(in srgb, var(--rune-aura-core) 74%, transparent),
+    0 0 18px color-mix(in srgb, var(--rune-aura-color) 44%, transparent),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.18),
+    inset 0 -5px 8px color-mix(in srgb, var(--rune-aura-shadow) 38%, transparent);
+}
+
+.huppermage-rune-aura-inner-ring {
+  position: absolute;
+  inset: 4px;
+  border: 1px solid color-mix(in srgb, var(--rune-aura-core) 62%, transparent);
+  border-radius: 6px;
+  box-shadow: inset 0 0 8px color-mix(in srgb, var(--rune-aura-color) 44%, transparent);
+  pointer-events: none;
+  z-index: 1;
+}
+
+.huppermage-rune-aura-field {
+  position: absolute;
+  inset: calc(var(--rune-aura-size) * -1.2);
+  border-radius: 50%;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 160ms ease;
+  z-index: -1;
+}
+
+.huppermage-rune-aura.heart-active .huppermage-rune-aura-field {
+  opacity: 1;
+}
+
+.huppermage-rune-aura.heart-active {
+  filter:
+    drop-shadow(0 0 calc(var(--rune-aura-size) * 0.32) color-mix(in srgb, var(--rune-aura-core) 74%, transparent))
+    drop-shadow(0 0 calc(var(--rune-aura-size) * 0.84) color-mix(in srgb, var(--rune-aura-color) 58%, transparent));
+}
+
+.huppermage-rune-aura-field::before,
+.huppermage-rune-aura-field::after {
+  position: absolute;
+  content: "";
+  pointer-events: none;
+}
+
+.huppermage-rune-aura-field::before {
+  inset: 14%;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle, color-mix(in srgb, var(--rune-aura-core) 38%, transparent) 0 20%, transparent 48%),
+    radial-gradient(circle, color-mix(in srgb, var(--rune-aura-color) 52%, transparent) 0 36%, transparent 72%);
+  filter: blur(calc(var(--rune-aura-size) * 0.35));
+  mix-blend-mode: screen;
+  opacity: calc(0.3 + var(--rune-aura-strength) * 0.5);
+  animation: huppermage-rune-aura-pulse var(--rune-aura-speed) ease-in-out infinite;
+}
+
+.huppermage-rune-aura-field::after {
+  inset: 24%;
+  border: 1px solid color-mix(in srgb, var(--rune-aura-core) 78%, transparent);
+  border-radius: 50%;
+  box-shadow:
+    0 0 calc(var(--rune-aura-size) * 0.6) color-mix(in srgb, var(--rune-aura-color) 86%, transparent),
+    inset 0 0 calc(var(--rune-aura-size) * 0.56) color-mix(in srgb, var(--rune-aura-color) 42%, transparent);
+  opacity: calc(0.22 + var(--rune-aura-strength) * 0.38);
+  animation: huppermage-rune-aura-ring-pulse calc(var(--rune-aura-speed) * 1.25) ease-out infinite;
+}
+
+.huppermage-rune-aura-ring {
+  position: absolute;
+  inset: var(--ring-inset, 18%);
+  border-radius: 50%;
+  background:
+    conic-gradient(
+      from var(--ring-angle, 0deg),
+      transparent 0 24deg,
+      color-mix(in srgb, var(--rune-aura-core) 92%, transparent) 26deg 31deg,
+      transparent 34deg 78deg,
+      color-mix(in srgb, var(--rune-aura-color) 86%, transparent) 80deg 86deg,
+      transparent 88deg 156deg,
+      color-mix(in srgb, var(--rune-aura-core) 72%, transparent) 158deg 162deg,
+      transparent 164deg 252deg,
+      color-mix(in srgb, var(--rune-aura-color) 70%, transparent) 254deg 262deg,
+      transparent 264deg 360deg
+    );
+  filter: blur(0.4px) drop-shadow(0 0 calc(var(--rune-aura-size) * 0.42) var(--rune-aura-color));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 2px));
+  mix-blend-mode: screen;
+  opacity: calc(0.16 + var(--rune-aura-strength) * 0.34);
+  transform: rotate(var(--ring-tilt, 0deg)) scale(var(--ring-scale, 1));
+  animation:
+    huppermage-rune-aura-spin calc(var(--rune-aura-speed) * var(--ring-speed, 3.2)) linear infinite,
+    huppermage-rune-aura-breathe calc(var(--rune-aura-speed) * 1.8) ease-in-out infinite;
+}
+
+.huppermage-rune-aura-ring-1 {
+  --ring-inset: 18%;
+  --ring-scale: 0.82;
+  --ring-speed: 2.9;
+}
+
+.huppermage-rune-aura-ring-2 {
+  --ring-angle: 70deg;
+  --ring-inset: 5%;
+  --ring-scale: 1.02;
+  --ring-speed: -3.8;
+  --ring-tilt: 24deg;
+  animation-delay: -0.5s, -0.2s;
+}
+
+.huppermage-rune-aura-ring-3 {
+  --ring-angle: 145deg;
+  --ring-inset: -8%;
+  --ring-scale: 1.18;
+  --ring-speed: 4.6;
+  --ring-tilt: -18deg;
+  animation-delay: -1.1s, -0.6s;
+}
+
+.huppermage-rune-aura-ring-4 {
+  --ring-angle: 230deg;
+  --ring-inset: 30%;
+  --ring-scale: 0.64;
+  --ring-speed: -2.4;
+  --ring-tilt: 58deg;
+  filter: blur(0.2px) drop-shadow(0 0 calc(var(--rune-aura-size) * 0.55) var(--rune-aura-core));
+  animation-delay: -0.8s, -0.4s;
+}
+
+.huppermage-rune-aura-spark {
+  position: absolute;
+  bottom: 34%;
+  left: 50%;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--rune-aura-core);
+  box-shadow:
+    0 0 5px var(--rune-aura-core),
+    0 0 11px var(--rune-aura-color);
+  opacity: 0;
+  transform: translate(var(--spark-x, 0), 0) scale(0.4);
+  animation: huppermage-rune-aura-spark calc(var(--rune-aura-speed) * var(--spark-speed, 1.6)) linear infinite;
+}
+
+.huppermage-rune-aura-spark-1 { --spark-x: -22px; --spark-drift: -10px; --spark-rise: -42px; --spark-speed: 1.2; animation-delay: -0.2s; }
+.huppermage-rune-aura-spark-2 { --spark-x: -14px; --spark-drift: 6px; --spark-rise: -52px; --spark-speed: 1.7; animation-delay: -1s; }
+.huppermage-rune-aura-spark-3 { --spark-x: -5px; --spark-drift: -4px; --spark-rise: -48px; --spark-speed: 1.35; animation-delay: -0.72s; }
+.huppermage-rune-aura-spark-4 { --spark-x: 5px; --spark-drift: 9px; --spark-rise: -56px; --spark-speed: 1.55; animation-delay: -0.38s; }
+.huppermage-rune-aura-spark-5 { --spark-x: 15px; --spark-drift: -5px; --spark-rise: -44px; --spark-speed: 1.25; animation-delay: -1.2s; }
+.huppermage-rune-aura-spark-6 { --spark-x: 24px; --spark-drift: 12px; --spark-rise: -50px; --spark-speed: 1.85; animation-delay: -0.9s; }
+.huppermage-rune-aura-spark-7 { --spark-x: -30px; --spark-drift: -13px; --spark-rise: -38px; --spark-speed: 1.45; animation-delay: -1.55s; }
+.huppermage-rune-aura-spark-8 { --spark-x: 31px; --spark-drift: 13px; --spark-rise: -40px; --spark-speed: 1.5; animation-delay: -0.56s; }
+.huppermage-rune-aura-spark-9 { --spark-x: -18px; --spark-drift: 2px; --spark-rise: -62px; --spark-speed: 2; animation-delay: -1.8s; }
+.huppermage-rune-aura-spark-10 { --spark-x: 18px; --spark-drift: -7px; --spark-rise: -60px; --spark-speed: 1.9; animation-delay: -1.36s; }
+.huppermage-rune-aura-spark-11 { --spark-x: -2px; --spark-drift: 8px; --spark-rise: -66px; --spark-speed: 1.7; animation-delay: -1.7s; }
+.huppermage-rune-aura-spark-12 { --spark-x: 2px; --spark-drift: -9px; --spark-rise: -54px; --spark-speed: 1.3; animation-delay: -0.08s; }
+.huppermage-rune-aura-spark-13 { --spark-x: -36px; --spark-drift: -8px; --spark-rise: -30px; --spark-speed: 1.75; animation-delay: -1.1s; }
+.huppermage-rune-aura-spark-14 { --spark-x: 36px; --spark-drift: 8px; --spark-rise: -32px; --spark-speed: 1.65; animation-delay: -0.48s; }
+
+.huppermage-rune-aura-content {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  z-index: 2;
+}
+
+.huppermage-rune-aura-icon {
+  position: relative;
+  display: block;
+  width: 58%;
+  height: 58%;
+  object-fit: contain;
+  filter:
+    drop-shadow(0 1px 1px rgba(0, 0, 0, 0.55))
+    drop-shadow(0 0 5px color-mix(in srgb, var(--rune-aura-color) 45%, transparent));
+  z-index: 2;
+}
+
+.huppermage-rune-aura-content .element-icon {
+  position: relative;
+  width: 58%;
+  height: 58%;
+  border: 0;
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--rune-aura-core) 70%, #ffffff 12%) 0 42%, color-mix(in srgb, var(--rune-aura-color) 92%, #ffffff 4%) 42% 100%);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--rune-aura-shadow) 24%, transparent),
+    0 0 8px color-mix(in srgb, var(--rune-aura-color) 44%, transparent);
+  overflow: hidden;
+  z-index: 1;
+}
+
+.huppermage-rune-aura-content .element-icon::before {
+  position: absolute;
+  inset: 0 0 52%;
+  background: color-mix(in srgb, var(--rune-aura-core) 70%, rgba(255, 255, 255, 0.22));
+  content: "";
+  opacity: 0.8;
+}
+
+.huppermage-rune-aura-content .element-icon::after {
+  position: absolute;
+  inset: 27%;
+  background: rgba(255, 255, 255, 0.16);
+  content: "";
+  filter: blur(1px);
+}
+
+@keyframes huppermage-rune-aura-pulse {
+  0%,
+  100% {
+    opacity: calc(0.24 + var(--rune-aura-strength) * 0.42);
+    transform: translateY(2px) scaleX(0.72) scaleY(1.02);
+  }
+
+  50% {
+    opacity: calc(0.34 + var(--rune-aura-strength) * 0.56);
+    transform: translateY(-3px) scaleX(0.86) scaleY(1.22);
+  }
+}
+
+@keyframes huppermage-rune-aura-ring-pulse {
+  0% {
+    transform: scale(0.62);
+  }
+
+  72% {
+    opacity: 0;
+    transform: scale(1.14);
+  }
+
+  100% {
+    opacity: 0;
+    transform: scale(1.22);
+  }
+}
+
+@keyframes huppermage-rune-aura-spin {
+  to {
+    rotate: 360deg;
+  }
+}
+
+@keyframes huppermage-rune-aura-breathe {
+  0%,
+  100% {
+    opacity: calc(0.14 + var(--rune-aura-strength) * 0.26);
+    scale: 0.98;
+  }
+
+  50% {
+    opacity: calc(0.28 + var(--rune-aura-strength) * 0.42);
+    scale: 1.04;
+  }
+}
+
+@keyframes huppermage-rune-aura-spark {
+  0% {
+    opacity: 0;
+    transform: translate(var(--spark-x), 0) scale(0.35);
+  }
+
+  16% {
+    opacity: calc(0.54 + var(--rune-aura-strength) * 0.4);
+  }
+
+  72% {
+    opacity: calc(0.22 + var(--rune-aura-strength) * 0.28);
+  }
+
+  100% {
+    opacity: 0;
+    transform: translate(calc(var(--spark-x) + var(--spark-drift)), var(--spark-rise)) scale(0.08);
+  }
+}
