@@ -51,7 +51,7 @@ test("contains conditional effects and passive/class-mechanic entries", () => {
   assert.equal(carnage?.kind, "passive");
 });
 
-test("contains the complete Wakfuli Huppermage passive list", () => {
+test("contains the complete Huppermage passive list", () => {
   const expectedPassiveIds = [
     "evasion",
     "dynamo",

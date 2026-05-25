@@ -684,6 +684,9 @@ test("does not count third-bar Huppermage spells against the deck limit", () => 
       classState: {
         huppermage: {
           deckSpellLimit: 0,
+          runes: {
+            incandescent: true,
+          },
           lastGeneratedRune: "incandescent",
         },
       },
@@ -782,7 +785,18 @@ test("preserves initial active runes configured before turn one", () => {
 test("counts active Feu-Follets when placing and recovering them", () => {
   const result = simulateTurn({
     catalog: testCatalog,
-    character,
+    character: {
+      ...character,
+      classState: {
+        huppermage: {
+          runes: {
+            incandescent: true,
+            aquatic: true,
+          },
+          lastGeneratedRune: "incandescent",
+        },
+      },
+    },
     sequence: {
       actions: [
         { spellId: "feu-follet-test", target: { kind: "emptyCell" } },
@@ -799,6 +813,101 @@ test("counts active Feu-Follets when placing and recovering them", () => {
   assert.equal(result.breakdown[0].classStateAfter.huppermage?.feuFolletsActive, 1);
   assert.equal(result.breakdown[0].appliedEffects.at(-1)?.type, "feuFolletChanged");
   assert.deepEqual(result.breakdown.map((action) => action.classStateAfter.huppermage?.feuFolletsActive), [1, 2, 1]);
+});
+
+test("rejects placing a Feu-Follet without an active rune", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character,
+    sequence: {
+      actions: [{ spellId: "feu-follet-test", target: { kind: "emptyCell" } }],
+    },
+  });
+
+  assert.equal(result.valid, false);
+  assert.equal(result.violations[0].type, "invalidClassStateAction");
+  assert.equal(result.finalState.classState.huppermage?.feuFolletsActive, 0);
+  assert.equal(result.breakdown.length, 0);
+});
+
+test("rejects casting Feu-Follet on an entity target", () => {
+  for (const targetKind of ["fighter", "ally", "enemy"] as const) {
+    const result = simulateTurn({
+      catalog: testCatalog,
+      character: {
+        ...character,
+        classState: {
+          huppermage: {
+            runes: {
+              incandescent: true,
+            },
+            lastGeneratedRune: "incandescent",
+          },
+        },
+      },
+      sequence: {
+        actions: [{ spellId: "feu-follet-test", target: { kind: targetKind } }],
+      },
+    });
+
+    assert.equal(result.valid, false);
+    assert.equal(result.violations[0].type, "invalidClassStateAction");
+    assert.equal(result.finalState.classState.huppermage?.feuFolletsActive, 0);
+    assert.equal(result.breakdown.length, 0);
+  }
+});
+
+test("attaches an active rune to a placed Feu-Follet", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      classState: {
+        huppermage: {
+          runes: {
+            incandescent: true,
+          },
+          lastGeneratedRune: null,
+        },
+      },
+    },
+    sequence: {
+      actions: [{ spellId: "feu-follet-test", target: { kind: "emptyCell" } }],
+    },
+  });
+
+  assert.equal(result.valid, true);
+  assert.deepEqual(result.finalState.classState.huppermage?.feuFolletStoredLastRunes, ["incandescent"]);
+  assert.deepEqual(result.finalState.classState.huppermage?.feuFolletStoredRunes, [[]]);
+  assert.equal(result.finalState.classState.huppermage?.runes.active.incandescent, false);
+});
+
+test("recovers the rune transferred to a Feu-Follet", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      classState: {
+        huppermage: {
+          runes: {
+            incandescent: true,
+          },
+          lastGeneratedRune: "incandescent",
+        },
+      },
+    },
+    sequence: {
+      actions: [
+        { spellId: "feu-follet-test", target: { kind: "emptyCell" } },
+        { spellId: "feu-follet-test", target: { kind: "feuFollet" } },
+      ],
+    },
+  });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.breakdown[0].classStateAfter.huppermage?.runes.active.incandescent, false);
+  assert.equal(result.finalState.classState.huppermage?.runes.active.incandescent, true);
+  assert.deepEqual(result.finalState.classState.huppermage?.feuFolletStoredLastRunes, []);
 });
 
 test("stores and recovers missing runes with Sauvegarde Runique", () => {
@@ -825,6 +934,7 @@ test("stores and recovers missing runes with Sauvegarde Runique", () => {
   });
 
   assert.equal(result.valid, true);
+  assert.deepEqual(result.breakdown[0].classStateAfter.huppermage?.feuFolletStoredLastRunes, ["aerial"]);
   assert.deepEqual(result.breakdown[0].classStateAfter.huppermage?.feuFolletStoredRunes, [
     ["incandescent", "aquatic", "telluric"],
   ]);

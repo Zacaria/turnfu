@@ -119,6 +119,14 @@ export type ActionSequence = {
   actions: Action[];
 };
 
+export type TurnPlan = {
+  actions: Action[];
+};
+
+export type ComboPlan = {
+  turns: TurnPlan[];
+};
+
 export type SimulationViolationType =
   | "unknownSpell"
   | "insufficientResource"
@@ -282,6 +290,32 @@ export type SimulationOptions = {
   sequence: ActionSequence;
   defaultActionContext?: Partial<ActionContext>;
   includeTurnEnd?: boolean;
+};
+
+export type ComboTurnResult = {
+  turnIndex: number;
+  initialCharacter: SimulatedCharacter;
+  result: SimulationResult;
+};
+
+export type ComboSimulationViolation = SimulationViolation & {
+  turnIndex: number;
+};
+
+export type ComboSimulationResult = {
+  valid: boolean;
+  combo: ComboPlan;
+  turns: ComboTurnResult[];
+  totalDamage: number;
+  finalState: TurnState;
+  violations: ComboSimulationViolation[];
+};
+
+export type ComboSimulationOptions = {
+  catalog: CatalogEntry[];
+  character: SimulatedCharacter;
+  combo: ComboPlan;
+  defaultActionContext?: Partial<ActionContext>;
 };
 
 export type DamageFormulaBreakdown = {

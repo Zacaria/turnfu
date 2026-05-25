@@ -1,3 +1,4 @@
+export * from "./comboSimulator.ts";
 export * from "./damage.ts";
 export * from "./resources.ts";
 export * from "./simulator.ts";

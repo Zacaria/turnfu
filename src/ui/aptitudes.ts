@@ -53,6 +53,22 @@ export type AppliedAptitudeStats = {
   totals: Partial<Record<AptitudeStat, number>>;
 };
 
+export type AptitudeCodeParseError =
+  | "duplicateAptitude"
+  | "exceedsBudget"
+  | "invalidRank"
+  | "invalidSegment"
+  | "unknownAptitude";
+
+export type AptitudeCodeParseResult =
+  | { ok: true; distribution: AptitudeDistribution }
+  | {
+    ok: false;
+    error: AptitudeCodeParseError;
+    aptitudeId?: number;
+    segment?: string;
+  };
+
 export const aptitudeFamilyOrder: AptitudeFamilyId[] = ["intelligence", "strength", "agility", "chance", "major"];
 
 export const majorLevels = [25, 75, 125, 175, 225] as const;
@@ -109,6 +125,72 @@ const familyIndex: Record<AptitudeFamilyId, number> = {
 
 export function createDefaultAptitudeDistribution(level = 200): AptitudeDistribution {
   return { level, ranks: {} };
+}
+
+export function serializeAptitudeDistribution(distribution: AptitudeDistribution): string {
+  return aptitudeDefinitions
+    .map((definition) => ({ id: definition.id, rank: distribution.ranks[definition.id] ?? 0 }))
+    .filter(({ rank }) => rank > 0)
+    .map(({ id, rank }) => `${id}:${rank}`)
+    .join("-");
+}
+
+export function parseAptitudeDistributionCode(
+  code: string,
+  currentDistribution: AptitudeDistribution,
+): AptitudeCodeParseResult {
+  const trimmedCode = code.trim();
+  const nextDistribution: AptitudeDistribution = { level: currentDistribution.level, ranks: {} };
+
+  if (trimmedCode.length === 0) {
+    return { ok: true, distribution: nextDistribution };
+  }
+
+  const seenAptitudeIds = new Set<number>();
+  const definitionsById = new Map(aptitudeDefinitions.map((definition) => [definition.id, definition]));
+
+  for (const segment of trimmedCode.split("-")) {
+    const match = segment.match(/^(\d+):(\d+)$/);
+    if (!match) {
+      return { ok: false, error: "invalidSegment", segment };
+    }
+
+    const aptitudeId = Number(match[1]);
+    const rank = Number(match[2]);
+    const definition = definitionsById.get(aptitudeId);
+
+    if (!definition) {
+      return { ok: false, error: "unknownAptitude", aptitudeId, segment };
+    }
+
+    if (!Number.isSafeInteger(rank)) {
+      return { ok: false, error: "invalidRank", aptitudeId, segment };
+    }
+
+    if (seenAptitudeIds.has(aptitudeId)) {
+      return { ok: false, error: "duplicateAptitude", aptitudeId, segment };
+    }
+    seenAptitudeIds.add(aptitudeId);
+
+    if (rank > 0) {
+      nextDistribution.ranks[aptitudeId] = rank;
+    }
+  }
+
+  for (const definition of aptitudeDefinitions) {
+    const rank = nextDistribution.ranks[definition.id] ?? 0;
+    if (rank > (definition.maxRank ?? Number.POSITIVE_INFINITY)) {
+      return { ok: false, error: "exceedsBudget", aptitudeId: definition.id };
+    }
+  }
+
+  for (const family of aptitudeFamilyOrder) {
+    if (getSpentAptitudePoints(nextDistribution, family) > getAvailableAptitudePoints(nextDistribution.level, family)) {
+      return { ok: false, error: "exceedsBudget" };
+    }
+  }
+
+  return { ok: true, distribution: nextDistribution };
 }
 
 export function clampAptitudeLevel(level: number): number {

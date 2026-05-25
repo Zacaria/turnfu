@@ -22,7 +22,7 @@ const entry = spell("test-spell", {
   metadata: { status: "extracted", normalizedLevel: 200, sources: [{ kind: "manual", label: "test" }] },
 }) as CatalogEntry;
 
-test("formats catalog cost and range for Wakfuli-style spell summaries", () => {
+test("formats catalog cost and range for compact spell summaries", () => {
   assert.equal(formatCatalogCost(entry), "3 PA, 1 PW");
   assert.equal(formatCatalogRange(entry), "2-5 PO, ligne de vue, non modifiable");
 });
@@ -34,7 +34,7 @@ test("describes catalog effects and constraints for the spell tooltip", () => {
   assert.equal(describeCatalogConstraint(entry.constraints[0]), "2 lancer(s) par tour");
 });
 
-test("provides Wakfuli pictograms for tooltip cost, range, damage and runes", () => {
+test("provides pictograms for tooltip cost, range, damage and runes", () => {
   const costTokens = getCatalogCostTokens(entry);
   assert.equal(costTokens[0].text, "3");
   assert.match(costTokens[0].icon?.src ?? "", /AP\.webp/);

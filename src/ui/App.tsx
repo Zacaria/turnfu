@@ -1,6 +1,6 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Check,
+  ClipboardPaste,
   Copy,
   Eye,
   EyeOff,
@@ -14,7 +14,7 @@ import {
 import type { CatalogEntry, Effect, Element, Resource, Rune } from "../core/catalog/types.ts";
 import {
   createResources,
-  simulateTurn,
+  simulateCombo,
 } from "../core/simulation/index.ts";
 import {
   countHiddenCatalogEntries,
@@ -42,7 +42,6 @@ import type {
   SimulatedCharacter,
 } from "../core/simulation/types.ts";
 import {
-  applyAptitudesToCharacterStats,
   aptitudeDefinitions,
   aptitudeFamilies,
   aptitudeFamilyOrder,
@@ -50,6 +49,8 @@ import {
   createDefaultAptitudeDistribution,
   getAvailableAptitudePoints,
   getSpentAptitudePoints,
+  parseAptitudeDistributionCode,
+  serializeAptitudeDistribution,
   setAptitudeLevel,
   setAptitudeRank,
   type AppliedAptitudeStats,
@@ -89,16 +90,32 @@ import {
   type UiLocale,
 } from "./i18n.ts?v=responsive-panels-v5";
 import { getStatStep } from "./statControls.ts";
-import { createTimelineDropIntent, type TimelineDropIntent } from "./timelineDnd.ts";
-import { createTimelineSnapshots } from "./timelineSnapshots.ts";
+import {
+  createTimelineDropIntent,
+  shouldRemoveTimelineActionOnDragEnd,
+  type TimelineDropIntent,
+} from "./timelineDnd.ts";
+import { createTimelineCursorMarks } from "./timelineCursor.ts";
+import { createComboTimelineSnapshots } from "./timelineSnapshots.ts";
+import { createTurnRows } from "./turnRows.ts";
 
 type TimelineAction = Action & {
   uid: string;
 };
 
-type TimelineSnapshot = ReturnType<typeof createTimelineSnapshots>[number];
+type TimelineSnapshot = ReturnType<typeof createComboTimelineSnapshots>[number];
 
-type SetupTabId = "distribution" | "adjustments" | "state";
+type CenterTabId = "combos" | "aptitudes" | "equipment";
+
+type EquipmentExtraStatKey =
+  | "barrier"
+  | "equipmentKnowledge"
+  | "leadership"
+  | "lockDodge"
+  | "prospection"
+  | "wisdom";
+
+type EquipmentExtraStats = Record<EquipmentExtraStatKey, number>;
 
 type DragPayload =
   | { type: "spell"; spellId: string }
@@ -122,34 +139,48 @@ const nonDeckSpellIds = new Set(["coeur-de-lumiere", "cycle-elementaire", "feu-f
 export function App() {
   const spells = useMemo(() => getHuppermageSpells(), []);
   const passives = useMemo(() => getHuppermagePassives(), []);
-  const [character, setCharacter] = useState<SimulatedCharacter>(() => createDefaultCharacter());
+  const [characterConfig, setCharacterConfig] = useState<SimulatedCharacter>(() => createDefaultCharacter());
+  const [equipmentCharacter, setEquipmentCharacter] = useState<SimulatedCharacter>(() => createDefaultEquipmentCharacter());
+  const [equipmentExtras, setEquipmentExtras] = useState<EquipmentExtraStats>(() => createDefaultEquipmentExtraStats());
   const [locale, setLocale] = useState<UiLocale>("fr");
-  const [setupTab, setSetupTab] = useState<SetupTabId>("distribution");
+  const [centerTab, setCenterTab] = useState<CenterTabId>("combos");
   const [aptitudeDistribution, setAptitudeDistribution] = useState<AptitudeDistribution>(() => createDefaultAptitudeDistribution());
-  const [timeline, setTimeline] = useState<TimelineAction[]>(() => [
-    createTimelineAction("lueur-de-laube"),
-    createTimelineAction("coeur-de-lumiere"),
-    createTimelineAction("rayon-crepusculaire"),
-  ]);
+  const [turns, setTurns] = useState<TimelineAction[][]>(() => [createDefaultTimeline()]);
+  const [selectedTurnIndex, setSelectedTurnIndex] = useState(0);
   const [selectedStep, setSelectedStep] = useState(0);
-  const [selectedTimelineUid, setSelectedTimelineUid] = useState<string | null>(() => timeline[0]?.uid ?? null);
+  const [selectedTimelineUid, setSelectedTimelineUid] = useState<string | null>(() => turns[0]?.[0]?.uid ?? null);
   const [selectedCatalogEntryId, setSelectedCatalogEntryId] = useState<string | null>(null);
   const [hoveredCatalogEntryId, setHoveredCatalogEntryId] = useState<string | null>(null);
   const [hiddenCatalogEntries, setHiddenCatalogEntries] = useState<HiddenCatalogEntryState>(() => createHiddenCatalogEntryState());
   const [showHiddenCatalogEntries, setShowHiddenCatalogEntries] = useState(false);
   const [timelineDropIntent, setTimelineDropIntent] = useState<TimelineDropIntent | null>(null);
+  const [timelineDropTurnIndex, setTimelineDropTurnIndex] = useState<number | null>(null);
+  const activeDragPayloadRef = useRef<DragPayload | null>(null);
+  const completedTimelineDropRef = useRef(false);
+  const turnStackRef = useRef<HTMLDivElement | null>(null);
+  const character = useMemo(
+    () => createCharacterFromBuild(characterConfig, aptitudeDistribution, equipmentCharacter),
+    [aptitudeDistribution, characterConfig, equipmentCharacter],
+  );
 
-  const sequence = useMemo(
-    () => ({ actions: timeline.map(({ uid: _uid, ...action }) => action) }),
-    [timeline],
+  const timeline = turns[selectedTurnIndex] ?? [];
+  const combo = useMemo(
+    () => ({
+      turns: turns.map((turn) => ({
+        actions: turn.map(({ uid: _uid, ...action }) => action),
+      })),
+    }),
+    [turns],
   );
-  const timelineUids = useMemo(() => timeline.map((action) => action.uid), [timeline]);
   const simulation = useMemo(
-    () => simulateTurn({ catalog: [...spells, ...passives], character, sequence }),
-    [character, passives, sequence, spells],
+    () => simulateCombo({ catalog: [...spells, ...passives], character, combo }),
+    [character, combo, passives, spells],
   );
-  const snapshots = useMemo(() => createTimelineSnapshots(simulation, character), [character, simulation]);
+  const turnRows = useMemo(() => createTurnRows({ turns, turnResults: simulation.turns }), [simulation.turns, turns]);
+  const cursorMarks = useMemo(() => createTimelineCursorMarks(turns.map((turn) => turn.length)), [turns]);
+  const snapshots = useMemo(() => createComboTimelineSnapshots(simulation, character), [character, simulation]);
   const currentSnapshot = snapshots[Math.min(selectedStep, snapshots.length - 1)] ?? snapshots[0];
+  const selectedTurnResult = simulation.turns[selectedTurnIndex]?.result;
   const currentHuppermageState = currentSnapshot?.classState.huppermage;
   const deckSpellLimit = currentHuppermageState?.deckSpellLimit ?? character.classState?.huppermage?.deckSpellLimit ?? 12;
   const usedSpellIds = currentHuppermageState?.usedSpellIds ?? [];
@@ -167,13 +198,17 @@ export function App() {
   const selectedActionIndex = detailTarget.kind === "timeline" ? detailTarget.actionIndex : null;
   const selectedAction = selectedActionIndex !== null ? timeline[selectedActionIndex] : undefined;
   const selectedActionResult = selectedActionIndex !== null
-    ? simulation.breakdown.find((entry) => entry.actionIndex === selectedActionIndex)
+    ? selectedTurnResult?.breakdown.find((entry) => entry.actionIndex === selectedActionIndex)
     : undefined;
   const selectedCatalogEntry = detailTarget.kind === "catalog"
     ? [...spells, ...passives].find((entry) => entry.id === detailTarget.entryId)
     : selectedAction
       ? spells.find((entry) => entry.id === selectedAction.spellId)
       : undefined;
+  const timelineDropPreviewSpellId = getTimelineDropPreviewSpellId(timelineDropIntent, turns);
+  const timelineDropPreviewEntry = timelineDropPreviewSpellId
+    ? spells.find((entry) => entry.id === timelineDropPreviewSpellId)
+    : undefined;
 
   useEffect(() => {
     setSelectedStep((step) => Math.min(step, Math.max(0, snapshots.length - 1)));
@@ -193,26 +228,32 @@ export function App() {
   }
 
   function insertAction(spellId: string, index = timeline.length) {
-    const targetIndex = clamp(index, 0, timeline.length);
+    insertActionInTurn(selectedTurnIndex, spellId, index);
+  }
+
+  function insertActionInTurn(turnIndex: number, spellId: string, index = turns[turnIndex]?.length ?? 0) {
+    const turn = turns[turnIndex] ?? [];
+    const targetIndex = clamp(index, 0, turn.length);
     const nextAction = createTimelineAction(spellId);
-    setTimeline((actions) => {
+    updateTurn(turnIndex, (actions) => {
       return [
         ...actions.slice(0, targetIndex),
         nextAction,
         ...actions.slice(targetIndex),
       ];
     });
+    setSelectedTurnIndex(turnIndex);
     setSelectedTimelineUid(nextAction.uid);
     setSelectedCatalogEntryId(null);
-    setSelectedStep(clamp(targetIndex + 1, 1, timeline.length + 1));
+    setSelectedStep(getPlannedSnapshotIndexForAction(turns, turnIndex, targetIndex));
   }
 
   function updateAction(index: number, patch: Partial<Action>) {
-    setTimeline((actions) => actions.map((action, actionIndex) => actionIndex === index ? { ...action, ...patch } : action));
+    updateSelectedTurn((actions) => actions.map((action, actionIndex) => actionIndex === index ? { ...action, ...patch } : action));
   }
 
   function moveAction(index: number, direction: -1 | 1) {
-    setTimeline((actions) => {
+    updateSelectedTurn((actions) => {
       const targetIndex = index + direction;
       if (targetIndex < 0 || targetIndex >= actions.length) {
         return actions;
@@ -227,25 +268,54 @@ export function App() {
   }
 
   function moveActionToIndex(uid: string, targetIndex: number) {
-    const sourceIndex = timeline.findIndex((action) => action.uid === uid);
-    if (sourceIndex < 0) {
+    moveActionToTurnIndex(uid, selectedTurnIndex, targetIndex);
+  }
+
+  function moveActionToTurnIndex(uid: string, turnIndex: number, targetIndex: number) {
+    const sourceLocation = findTimelineActionLocation(turns, uid);
+    const targetTurn = turns[turnIndex] ?? [];
+    if (!sourceLocation || !targetTurn) {
       return;
     }
 
-    const adjustedIndex = sourceIndex < targetIndex ? targetIndex - 1 : targetIndex;
-    const boundedIndex = clamp(adjustedIndex, 0, timeline.length - 1);
+    const isSameTurn = sourceLocation.turnIndex === turnIndex;
+    const adjustedIndex = isSameTurn && sourceLocation.actionIndex < targetIndex ? targetIndex - 1 : targetIndex;
+    const boundedIndex = clamp(adjustedIndex, 0, isSameTurn ? targetTurn.length - 1 : targetTurn.length);
 
-    setTimeline((actions) => {
-      const nextActions = [...actions];
-      const [movedAction] = nextActions.splice(sourceIndex, 1);
-      nextActions.splice(boundedIndex, 0, movedAction);
-      return nextActions;
+    setTurns((currentTurns) => {
+      const movedAction = currentTurns[sourceLocation.turnIndex]?.[sourceLocation.actionIndex];
+      if (!movedAction) {
+        return currentTurns;
+      }
+
+      return currentTurns.map((turn, currentTurnIndex) => {
+        if (currentTurnIndex === sourceLocation.turnIndex && currentTurnIndex === turnIndex) {
+          const nextActions = [...turn];
+          const [action] = nextActions.splice(sourceLocation.actionIndex, 1);
+          nextActions.splice(boundedIndex, 0, action);
+          return nextActions;
+        }
+
+        if (currentTurnIndex === sourceLocation.turnIndex) {
+          return turn.filter((action) => action.uid !== uid);
+        }
+
+        if (currentTurnIndex === turnIndex) {
+          const nextActions = [...turn];
+          nextActions.splice(boundedIndex, 0, movedAction);
+          return nextActions;
+        }
+
+        return turn;
+      });
     });
-    setSelectedStep(boundedIndex + 1);
+    setSelectedTurnIndex(turnIndex);
+    setSelectedTimelineUid(uid);
+    setSelectedStep(getSnapshotIndexForAction(turnIndex, boundedIndex, snapshots));
   }
 
   function duplicateAction(index: number) {
-    setTimeline((actions) => {
+    updateSelectedTurn((actions) => {
       const action = actions[index];
       if (!action) {
         return actions;
@@ -258,17 +328,98 @@ export function App() {
 
   function removeAction(index: number) {
     const removedUid = timeline[index]?.uid;
-    setTimeline((actions) => actions.filter((_action, actionIndex) => actionIndex !== index));
+    updateSelectedTurn((actions) => actions.filter((_action, actionIndex) => actionIndex !== index));
     if (removedUid && removedUid === selectedTimelineUid) {
       setSelectedTimelineUid(timeline[index + 1]?.uid ?? timeline[index - 1]?.uid ?? null);
     }
     setSelectedStep((step) => Math.max(0, Math.min(step, timeline.length - 1)));
   }
 
+  function removeActionByUid(uid: string) {
+    const sourceLocation = findTimelineActionLocation(turns, uid);
+    if (!sourceLocation) {
+      return;
+    }
+
+    setTurns((currentTurns) => currentTurns.map((turn, turnIndex) => (
+      turnIndex === sourceLocation.turnIndex ? turn.filter((action) => action.uid !== uid) : turn
+    )));
+    if (selectedTimelineUid === uid) {
+      const sourceTurn = turns[sourceLocation.turnIndex] ?? [];
+      setSelectedTurnIndex(sourceLocation.turnIndex);
+      setSelectedTimelineUid(sourceTurn[sourceLocation.actionIndex + 1]?.uid ?? sourceTurn[sourceLocation.actionIndex - 1]?.uid ?? null);
+      setSelectedCatalogEntryId(null);
+      setSelectedStep(getFirstSnapshotIndexForTurn(sourceLocation.turnIndex, snapshots));
+    }
+  }
+
   function selectTimelineAction(uid: string, index: number) {
+    selectTurnTimelineAction(selectedTurnIndex, uid, index);
+  }
+
+  function selectTurnTimelineAction(turnIndex: number, uid: string, index: number) {
+    setSelectedTurnIndex(turnIndex);
     setSelectedTimelineUid(uid);
     setSelectedCatalogEntryId(null);
-    setSelectedStep(Math.min(index + 1, snapshots.length - 1));
+    setSelectedStep(getSnapshotIndexForAction(turnIndex, index, snapshots));
+  }
+
+  function updateSelectedTurn(updater: (actions: TimelineAction[]) => TimelineAction[]) {
+    updateTurn(selectedTurnIndex, updater);
+  }
+
+  function updateTurn(turnIndex: number, updater: (actions: TimelineAction[]) => TimelineAction[]) {
+    setTurns((currentTurns) => currentTurns.map((turn, currentTurnIndex) => (
+      currentTurnIndex === turnIndex ? updater(turn) : turn
+    )));
+  }
+
+  function addTurn() {
+    setTurns((currentTurns) => [...currentTurns, []]);
+    setSelectedTurnIndex(turns.length);
+    setSelectedTimelineUid(null);
+    setSelectedCatalogEntryId(null);
+  }
+
+  function removeTurn(index: number) {
+    if (turns.length <= 1) {
+      return;
+    }
+
+    const nextTurns = turns.filter((_turn, turnIndex) => turnIndex !== index);
+    setTurns(nextTurns);
+    const nextSelectedTurnIndex = clamp(index >= selectedTurnIndex ? selectedTurnIndex - 1 : selectedTurnIndex, 0, nextTurns.length - 1);
+    setSelectedTurnIndex(nextSelectedTurnIndex);
+    setSelectedTimelineUid(nextTurns[nextSelectedTurnIndex]?.[0]?.uid ?? null);
+    setSelectedCatalogEntryId(null);
+    setSelectedStep(0);
+  }
+
+  function selectTurn(index: number) {
+    const nextIndex = clamp(index, 0, turns.length - 1);
+    setSelectedTurnIndex(nextIndex);
+    setSelectedTimelineUid(turns[nextIndex]?.[0]?.uid ?? null);
+    setSelectedCatalogEntryId(null);
+    setSelectedStep(getFirstSnapshotIndexForTurn(nextIndex, snapshots));
+  }
+
+  function selectCursorStep(step: number) {
+    const nextStep = clamp(step, 0, Math.max(0, snapshots.length - 1));
+    const snapshot = snapshots[nextStep];
+    setSelectedStep(nextStep);
+
+    if (!snapshot) {
+      return;
+    }
+
+    const nextTurnIndex = clamp(snapshot.turnIndex, 0, turns.length - 1);
+    setSelectedTurnIndex(nextTurnIndex);
+    setSelectedCatalogEntryId(null);
+    setSelectedTimelineUid(
+      typeof snapshot.actionIndex === "number"
+        ? turns[nextTurnIndex]?.[snapshot.actionIndex]?.uid ?? null
+        : null,
+    );
   }
 
   function selectCatalogEntry(entryId: string) {
@@ -282,7 +433,7 @@ export function App() {
   }
 
   function togglePassive(passiveId: string, active: boolean) {
-    const huppermage = character.classState?.huppermage;
+    const huppermage = characterConfig.classState?.huppermage;
     const activePassives = new Set(huppermage?.activePassives ?? []);
     if (active) {
       const limit = huppermage?.passiveLimit ?? 6;
@@ -294,10 +445,10 @@ export function App() {
       activePassives.delete(passiveId);
     }
 
-    setCharacter({
-      ...character,
+    setCharacterConfig({
+      ...characterConfig,
       classState: {
-        ...character.classState,
+        ...characterConfig.classState,
         huppermage: {
           ...huppermage,
           activePassives: [...activePassives],
@@ -306,36 +457,70 @@ export function App() {
     });
   }
 
-  function applyAptitudeDistribution(distribution = aptitudeDistribution) {
-    const applied = applyAptitudesToCharacterStats(distribution, character.stats, character.resources);
-    setCharacter({
-      ...character,
-      resources: applied.resources,
-      stats: applied.stats,
-    });
-  }
-
   function startSpellDrag(event: React.DragEvent, spellId: string) {
-    writeDragPayload(event, { type: "spell", spellId });
+    const payload: DragPayload = { type: "spell", spellId };
+    activeDragPayloadRef.current = payload;
+    writeDragPayload(event, payload);
     event.dataTransfer.effectAllowed = "copy";
     setTimelineDropIntent(null);
   }
 
   function startTimelineDrag(event: React.DragEvent, uid: string) {
-    writeDragPayload(event, { type: "timelineAction", uid });
+    const payload: DragPayload = { type: "timelineAction", uid };
+    activeDragPayloadRef.current = payload;
+    completedTimelineDropRef.current = false;
+    writeDragPayload(event, payload);
     event.dataTransfer.effectAllowed = "move";
     setTimelineDropIntent(null);
   }
 
+  function finishTimelineDrag(event: React.DragEvent, uid: string) {
+    const timelineLaneBounds = getTimelineLaneBounds(turnStackRef.current);
+    const didDropOnTimeline = completedTimelineDropRef.current;
+    completedTimelineDropRef.current = false;
+    activeDragPayloadRef.current = null;
+
+    if (!didDropOnTimeline && timelineLaneBounds.length > 0 && shouldRemoveTimelineActionOnDragEnd(
+      event.dataTransfer.dropEffect,
+      { x: event.clientX, y: event.clientY },
+      timelineLaneBounds,
+    )) {
+      removeActionByUid(uid);
+    }
+    clearTimelineDrop();
+  }
+
+  function finishCatalogDrag() {
+    activeDragPayloadRef.current = null;
+    clearTimelineDrop();
+  }
+
   function allowTimelineDrop(event: React.DragEvent, index: number) {
+    allowTurnTimelineDrop(event, selectedTurnIndex, index);
+  }
+
+  function allowTurnTimelineDrop(event: React.DragEvent, turnIndex: number, index: number) {
+    const payload = readDragPayload(event) ?? activeDragPayloadRef.current;
+    if (!payload) {
+      return;
+    }
+
     event.preventDefault();
-    const payload = readDragPayload(event);
+    event.stopPropagation();
     event.dataTransfer.dropEffect = payload?.type === "timelineAction" ? "move" : "copy";
-    setTimelineDropIntent(payload ? createTimelineDropIntent(payload, timelineUids, index) : null);
+    const turnUids = getTurnUids(turns, turnIndex);
+    const sourceLocation = payload?.type === "timelineAction" ? findTimelineActionLocation(turns, payload.uid) : null;
+    const sourceTimelineUids = sourceLocation && sourceLocation.turnIndex !== turnIndex
+      ? getTurnUids(turns, sourceLocation.turnIndex)
+      : undefined;
+    const intent = payload ? createTimelineDropIntent(payload, turnUids, index, { sourceTimelineUids }) : null;
+    setTimelineDropIntent(intent);
+    setTimelineDropTurnIndex(intent ? turnIndex : null);
   }
 
   function clearTimelineDrop() {
     setTimelineDropIntent(null);
+    setTimelineDropTurnIndex(null);
   }
 
   function leaveTimelineDrop(event: React.DragEvent<HTMLElement>) {
@@ -346,23 +531,37 @@ export function App() {
   }
 
   function dropOnTimeline(event: React.DragEvent, index = timeline.length) {
+    dropOnTurnTimeline(event, selectedTurnIndex, index);
+  }
+
+  function dropOnTurnTimeline(event: React.DragEvent, turnIndex: number, index = turns[turnIndex]?.length ?? 0) {
     event.preventDefault();
     event.stopPropagation();
 
-    const payload = readDragPayload(event);
-    const intent = payload ? createTimelineDropIntent(payload, timelineUids, index) : null;
+    const payload = readDragPayload(event) ?? activeDragPayloadRef.current;
+    const turnUids = getTurnUids(turns, turnIndex);
+    const sourceLocation = payload?.type === "timelineAction" ? findTimelineActionLocation(turns, payload.uid) : null;
+    const sourceTimelineUids = sourceLocation && sourceLocation.turnIndex !== turnIndex
+      ? getTurnUids(turns, sourceLocation.turnIndex)
+      : undefined;
+    const intent = payload ? createTimelineDropIntent(payload, turnUids, index, { sourceTimelineUids }) : null;
     clearTimelineDrop();
     if (!payload) {
       return;
     }
 
+    if (payload.type === "timelineAction" && intent?.kind === "moveAction") {
+      completedTimelineDropRef.current = true;
+    }
+    activeDragPayloadRef.current = null;
+
     if (intent?.kind === "insertSpell") {
-      insertAction(intent.spellId, intent.insertIndex);
+      insertActionInTurn(turnIndex, intent.spellId, intent.insertIndex);
       return;
     }
 
     if (intent?.kind === "moveAction" && !intent.isNoop) {
-      moveActionToIndex(intent.uid, intent.insertIndex);
+      moveActionToTurnIndex(intent.uid, turnIndex, intent.insertIndex);
     }
   }
 
@@ -381,8 +580,8 @@ export function App() {
             <span>{t("app.className")}</span>
             <h1>{t("app.heading")}</h1>
           </div>
-          <div className="live-score-card" title={t("metric.turnDamage")}>
-            <span>{t("metric.turnDamage")}</span>
+          <div className="live-score-card" title={t("metric.comboDamage")}>
+            <span>{t("metric.comboDamage")}</span>
             <b>{simulation.totalDamage}</b>
           </div>
           <div className="live-support">
@@ -391,10 +590,6 @@ export function App() {
                 <span>{t("metric.stepDamage")}</span>
                 <b>{currentSnapshot?.totalDamageSoFar ?? 0}</b>
               </div>
-              <div>
-                <span>{t("metric.actions")}</span>
-                <b>{simulation.breakdown.length}/{timeline.length}</b>
-              </div>
             </div>
             <ResourceStrip resources={currentSnapshot?.resources ?? character.resources} />
             <RuneStrip huppermage={currentSnapshot?.classState.huppermage} />
@@ -402,118 +597,186 @@ export function App() {
               {simulation.valid ? t("status.valid") : t("status.invalid")}
             </div>
           </div>
-          <CursorControl value={selectedStep} max={Math.max(0, snapshots.length - 1)} onChange={setSelectedStep} />
         </section>
 
-        <section className="workspace">
+        <section className={`workspace ${centerTab !== "combos" ? "workspace-center-only" : ""}`}>
           <aside className="panel setup-panel" aria-label={t("panel.characterConfig")}>
-            <PanelHeader title={t("panel.initialStats")} subtitle={t("panel.startingPoint")} />
-            <SetupTabs value={setupTab} onChange={setSetupTab} />
-            {setupTab === "distribution" ? (
-              <AptitudeDistributionEditor
-                distribution={aptitudeDistribution}
-                onApply={applyAptitudeDistribution}
-                onChange={setAptitudeDistribution}
-              />
-            ) : null}
-            {setupTab === "adjustments" ? (
-              <>
-                <ResourceEditor character={character} onChange={setCharacter} />
-                <StatsEditor character={character} onChange={setCharacter} />
-              </>
-            ) : null}
-            {setupTab === "state" ? (
-              <HuppermageStateEditor character={character} onChange={setCharacter} />
-            ) : null}
+            <PanelHeader title={t("panel.combatState")} subtitle={t("panel.startingPoint")} />
+            <HuppermageStateEditor character={characterConfig} onChange={setCharacterConfig} />
           </aside>
 
           <section className="panel center-panel" aria-label={t("panel.sequenceDetails")}>
-            <PanelHeader title={t("panel.sequence")} subtitle={t("panel.actionOrder")} />
-            <div
-              className={`sequence-rack ${timeline.length === 0 ? "empty" : ""} ${timelineDropIntent ? "dragging" : ""}`}
-              onDragLeave={leaveTimelineDrop}
-              onDragOver={(event) => allowTimelineDrop(event, timeline.length)}
-              onDrop={(event) => dropOnTimeline(event, timeline.length)}
-            >
-              {timeline.map((action, index) => {
-                const spell = spells.find((entry) => entry.id === action.spellId);
-                const isFailed = simulation.violations.some((violation) => violation.actionIndex === index);
-                const isSelected = selectedTimelineUid === action.uid;
-                const isCursorStep = selectedStep === index + 1;
-                const isDragSource = timelineDropIntent?.kind === "moveAction" && timelineDropIntent.sourceIndex === index;
+            <PanelHeader
+              title={t(centerTab === "combos" ? "panel.sequence" : centerTab === "aptitudes" ? "panel.aptitudes" : "panel.equipment")}
+              subtitle={t(centerTab === "combos" ? "panel.actionOrder" : centerTab === "aptitudes" ? "panel.importFormat" : "panel.equipmentSubtitle")}
+            />
+            <CenterTabs value={centerTab} onChange={setCenterTab} />
+            {centerTab === "combos" ? (
+              <>
+                <div ref={turnStackRef} className={`turn-stack ${timelineDropIntent ? "dragging" : ""}`} aria-label={t("combo.turns")}>
+                  {turnRows.map((turnRow) => {
+                    const turnActions = turns[turnRow.turnIndex] ?? [];
+                    const turnResult = simulation.turns.find((turnResult) => turnResult.turnIndex === turnRow.turnIndex)?.result;
+                    const isActiveTurn = selectedTurnIndex === turnRow.turnIndex;
 
-                return (
-                  <Fragment key={action.uid}>
-                    <TimelineDropMarker active={isTimelineDropMarkerActive(timelineDropIntent, index)} />
-                    <button
-                      aria-label={`${index + 1}. ${spell?.name ?? t("action.unknownSpell")}`}
-                      className={`sequence-tile ${isSelected ? "selected" : ""} ${isCursorStep ? "cursor-step" : ""} ${isFailed ? "failed" : ""} ${isDragSource ? "drag-source" : ""}`}
-                      draggable
-                      type="button"
-                      onClick={() => selectTimelineAction(action.uid, index)}
-                      onDragEnd={clearTimelineDrop}
-                      onDragStart={(event) => startTimelineDrag(event, action.uid)}
-                      onDragOver={(event) => allowTimelineDrop(event, index)}
-                      onDrop={(event) => dropOnTimeline(event, index)}
-                    >
-                      <span className="tile-index">{index + 1}</span>
-                      <EntryIcon entryId={action.spellId} label={spell?.name ?? t("action.unknownSpell")} />
-                      {isFailed ? <span className="tile-warning" title={t("action.invalid")}>!</span> : null}
-                    </button>
-                  </Fragment>
-                );
-              })}
-              <TimelineDropMarker active={isTimelineDropMarkerActive(timelineDropIntent, timeline.length)} />
-              <button
-                aria-label={t("action.addToEnd")}
-                className="sequence-add"
-                type="button"
-                onDragOver={(event) => allowTimelineDrop(event, timeline.length)}
-                onDrop={(event) => dropOnTimeline(event, timeline.length)}
-                onClick={() => selectedCatalogEntry?.kind !== "passive" && selectedCatalogEntry ? insertAction(selectedCatalogEntry.id) : undefined}
-              >
-                <Plus size={18} />
-              </button>
-            </div>
+                    return (
+                      <section
+                        key={turnRow.turnIndex}
+                        className={`turn-row ${isActiveTurn ? "active" : ""} ${turnRow.valid ? "" : "invalid"}`}
+                        aria-label={turnRow.label}
+                      >
+                        <div className="turn-row-summary">
+                          <button
+                            className="turn-row-select"
+                            type="button"
+                            onClick={() => selectTurn(turnRow.turnIndex)}
+                          >
+                            <span className="turn-row-label">{turnRow.label}</span>
+                            <span className="turn-row-metric" title={formatResourceLabel("ap")}>
+                              <StatIcon src={getResourceIconSrc("ap")} label={formatResourceLabel("ap")} />
+                              <b>{turnRow.remainingAp}</b>
+                            </span>
+                            <span className="turn-row-metric" title={t("metric.turnDamage")}>
+                              <StatIcon src={getStatIconSrc("damageInflictedPercent")} label={t("metric.turnDamage")} />
+                              <b>{turnRow.totalDamage}</b>
+                            </span>
+                          </button>
+                        </div>
 
-            <section className="detail-panel" aria-label={t("panel.detailSheet")}>
-              <SelectionDetail
-                action={selectedAction}
-                actionIndex={selectedActionIndex}
-                actionResult={selectedActionResult}
-                entry={selectedCatalogEntry}
-                snapshot={currentSnapshot}
-                onAddSpell={(spellId) => insertAction(spellId, selectedTimelineIndex >= 0 ? selectedTimelineIndex + 1 : timeline.length)}
-                onDuplicateAction={selectedActionIndex !== null ? () => duplicateAction(selectedActionIndex) : undefined}
-                onRemoveAction={selectedActionIndex !== null ? () => removeAction(selectedActionIndex) : undefined}
+                        <div
+                          className={`sequence-rack ${turnActions.length === 0 ? "empty" : ""}`}
+                          onDragLeave={leaveTimelineDrop}
+                          onDragOver={(event) => allowTurnTimelineDrop(event, turnRow.turnIndex, turnActions.length)}
+                          onDrop={(event) => dropOnTurnTimeline(event, turnRow.turnIndex, turnActions.length)}
+                        >
+                          {turnActions.map((action, index) => {
+                            const spell = spells.find((entry) => entry.id === action.spellId);
+                            const isFailed = turnResult?.violations.some((violation) => violation.actionIndex === index) ?? false;
+                            const isSelected = selectedTimelineUid === action.uid;
+                            const isCursorStep = currentSnapshot?.turnIndex === turnRow.turnIndex && currentSnapshot?.actionIndex === index;
+                            const isDropTurn = timelineDropTurnIndex === turnRow.turnIndex;
+                            const isDragSource = isDropTurn && timelineDropIntent?.kind === "moveAction" && timelineDropIntent.sourceIndex === index;
+
+                            return (
+                              <Fragment key={action.uid}>
+                                <TimelineDropMarker
+                                  active={isDropTurn && isTimelineDropMarkerActive(timelineDropIntent, index)}
+                                  entry={timelineDropPreviewEntry}
+                                />
+                                <button
+                                  aria-label={`${turnRow.label}.${index + 1}. ${spell?.name ?? t("action.unknownSpell")}`}
+                                  className={`sequence-tile ${isSelected ? "selected" : ""} ${isCursorStep ? "cursor-step" : ""} ${isFailed ? "failed" : ""} ${isDragSource ? "drag-source" : ""}`}
+                                  draggable
+                                  type="button"
+                                  onClick={() => selectTurnTimelineAction(turnRow.turnIndex, action.uid, index)}
+                                  onDragEnd={(event) => finishTimelineDrag(event, action.uid)}
+                                  onDragStart={(event) => startTimelineDrag(event, action.uid)}
+                                  onDragOver={(event) => allowTurnTimelineDrop(event, turnRow.turnIndex, index)}
+                                  onDrop={(event) => dropOnTurnTimeline(event, turnRow.turnIndex, index)}
+                                >
+                                  <span className="tile-index">{index + 1}</span>
+                                  <EntryIcon entryId={action.spellId} label={spell?.name ?? t("action.unknownSpell")} />
+                                  {isFailed ? <span className="tile-warning" title={t("action.invalid")}>!</span> : null}
+                                </button>
+                              </Fragment>
+                            );
+                          })}
+                          <TimelineDropMarker
+                            active={timelineDropTurnIndex === turnRow.turnIndex && isTimelineDropMarkerActive(timelineDropIntent, turnActions.length)}
+                            entry={timelineDropPreviewEntry}
+                          />
+                          <button
+                            aria-label={t("action.addToEnd")}
+                            className="sequence-add"
+                            type="button"
+                            onDragOver={(event) => allowTurnTimelineDrop(event, turnRow.turnIndex, turnActions.length)}
+                            onDrop={(event) => dropOnTurnTimeline(event, turnRow.turnIndex, turnActions.length)}
+                            onClick={() => selectedCatalogEntry?.kind !== "passive" && selectedCatalogEntry ? insertActionInTurn(turnRow.turnIndex, selectedCatalogEntry.id) : undefined}
+                          >
+                            <Plus size={18} />
+                          </button>
+                        </div>
+                        {turns.length > 1 ? (
+                          <button
+                            aria-label={t("combo.removeTurn")}
+                            className="turn-row-remove"
+                            title={t("combo.removeTurn")}
+                            type="button"
+                            onClick={() => removeTurn(turnRow.turnIndex)}
+                          >
+                            ×
+                          </button>
+                        ) : null}
+                      </section>
+                    );
+                  })}
+                  <CursorControl
+                    marks={cursorMarks}
+                    value={selectedStep}
+                    max={Math.max(0, snapshots.length - 1)}
+                    onChange={selectCursorStep}
+                  />
+                  <button className="turn-add-row" type="button" onClick={addTurn}>
+                    <Plus size={15} />
+                    {t("combo.addTurn")}
+                  </button>
+                </div>
+
+                <section className="detail-panel" aria-label={t("panel.detailSheet")}>
+                  <SelectionDetail
+                    action={selectedAction}
+                    actionIndex={selectedActionIndex}
+                    actionResult={selectedActionResult}
+                    entry={selectedCatalogEntry}
+                    snapshot={currentSnapshot}
+                    onAddSpell={(spellId) => insertAction(spellId, selectedTimelineIndex >= 0 ? selectedTimelineIndex + 1 : timeline.length)}
+                    onDuplicateAction={selectedActionIndex !== null ? () => duplicateAction(selectedActionIndex) : undefined}
+                    onRemoveAction={selectedActionIndex !== null ? () => removeAction(selectedActionIndex) : undefined}
+                  />
+                  {selectedAction && selectedActionIndex !== null ? (
+                    <ActionEditor action={selectedAction} onChange={(patch) => updateAction(selectedActionIndex, patch)} />
+                  ) : null}
+                </section>
+              </>
+            ) : null}
+            {centerTab === "aptitudes" ? (
+              <AptitudeDistributionEditor
+                distribution={aptitudeDistribution}
+                onChange={setAptitudeDistribution}
               />
-              {selectedAction && selectedActionIndex !== null ? (
-                <ActionEditor action={selectedAction} onChange={(patch) => updateAction(selectedActionIndex, patch)} />
-              ) : null}
-            </section>
+            ) : null}
+            {centerTab === "equipment" ? (
+              <div className="equipment-tab-content">
+                <ResourceEditor character={equipmentCharacter} onChange={setEquipmentCharacter} />
+                <EquipmentExtraStatsEditor stats={equipmentExtras} onChange={setEquipmentExtras} />
+                <StatsEditor character={equipmentCharacter} onChange={setEquipmentCharacter} />
+              </div>
+            ) : null}
           </section>
 
-        <aside className="panel library-panel" aria-label={t("panel.library")}>
-          <PanelHeader title={t("panel.library")} subtitle={t("panel.build")} />
-          <CatalogLibrary
-            activePassives={character.classState?.huppermage?.activePassives ?? []}
-            deckSpellLimit={deckSpellLimit}
-            hiddenEntries={hiddenCatalogEntries}
-            passives={passives}
-            passiveLimit={passiveLimit}
-            showHiddenEntries={showHiddenCatalogEntries}
-            spells={spells}
-            temporaryUnlockedSpellElement={temporaryUnlockedSpellElement}
-            usedSpellIds={usedSpellIds}
-            onDragSpell={startSpellDrag}
-            onDragEnd={clearTimelineDrop}
-            onHoverEntry={setHoveredCatalogEntryId}
-            onSelectEntry={selectCatalogEntry}
-            onShowHiddenEntriesChange={setShowHiddenCatalogEntries}
-            onToggleEntryHidden={toggleCatalogEntryHidden}
-            onTogglePassive={togglePassive}
-          />
-        </aside>
+          {centerTab === "combos" ? (
+            <aside className="panel library-panel" aria-label={t("panel.library")}>
+              <PanelHeader title={t("panel.library")} subtitle={t("panel.build")} />
+              <CatalogLibrary
+                activePassives={character.classState?.huppermage?.activePassives ?? []}
+                deckSpellLimit={deckSpellLimit}
+                hiddenEntries={hiddenCatalogEntries}
+                passives={passives}
+                passiveLimit={passiveLimit}
+                showHiddenEntries={showHiddenCatalogEntries}
+                spells={spells}
+                temporaryUnlockedSpellElement={temporaryUnlockedSpellElement}
+                usedSpellIds={usedSpellIds}
+                onDragSpell={startSpellDrag}
+                onDragEnd={finishCatalogDrag}
+                onHoverEntry={setHoveredCatalogEntryId}
+                onSelectEntry={selectCatalogEntry}
+                onShowHiddenEntriesChange={setShowHiddenCatalogEntries}
+                onToggleEntryHidden={toggleCatalogEntryHidden}
+                onTogglePassive={togglePassive}
+              />
+            </aside>
+          ) : null}
       </section>
       </main>
     </>
@@ -522,6 +785,131 @@ export function App() {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(value, max));
+}
+
+type AdditiveStatKey = Exclude<keyof BaseStats, "elementalMastery" | "level">;
+
+const additiveStatKeys: AdditiveStatKey[] = [
+  "hitPoints",
+  "hitPointsPercent",
+  "generalMastery",
+  "meleeMastery",
+  "distanceMastery",
+  "berserkMastery",
+  "rearMastery",
+  "criticalMastery",
+  "healingMastery",
+  "damageInflictedPercent",
+  "healsPerformedPercent",
+  "healsReceivedPercent",
+  "armorReceivedPercent",
+  "armorGivenPercent",
+  "elementalResistance",
+  "rearResistance",
+  "criticalResistance",
+  "range",
+  "willpower",
+  "criticalHitPercent",
+  "parry",
+  "lock",
+  "dodge",
+  "initiative",
+  "indirectDamagePercent",
+];
+
+function createEmptyEquipmentStats(): BaseStats {
+  return {
+    level: 0,
+    hitPoints: 0,
+    hitPointsPercent: 0,
+    generalMastery: 0,
+    elementalMastery: {
+      fire: 0,
+      water: 0,
+      earth: 0,
+      air: 0,
+      light: 0,
+      neutral: 0,
+    },
+    meleeMastery: 0,
+    distanceMastery: 0,
+    berserkMastery: 0,
+    rearMastery: 0,
+    criticalMastery: 0,
+    healingMastery: 0,
+    damageInflictedPercent: 0,
+    healsPerformedPercent: 0,
+    healsReceivedPercent: 0,
+    armorReceivedPercent: 0,
+    armorGivenPercent: 0,
+    elementalResistance: 0,
+    rearResistance: 0,
+    criticalResistance: 0,
+    range: 0,
+    willpower: 0,
+    criticalHitPercent: 0,
+    parry: 0,
+    lock: 0,
+    dodge: 0,
+    initiative: 0,
+    indirectDamagePercent: 0,
+  };
+}
+
+function createDefaultEquipmentCharacter(): SimulatedCharacter {
+  return {
+    ...createDefaultCharacter(),
+    resources: createResources({ ap: 6, mp: 3, wp: 0, bq: 0 }),
+    stats: {
+      ...createEmptyEquipmentStats(),
+      generalMastery: 1000,
+    },
+  };
+}
+
+function createDefaultEquipmentExtraStats(): EquipmentExtraStats {
+  return {
+    barrier: 0,
+    equipmentKnowledge: 0,
+    leadership: 0,
+    lockDodge: 0,
+    prospection: 0,
+    wisdom: 0,
+  };
+}
+
+function createCharacterFromBuild(
+  characterConfig: SimulatedCharacter,
+  aptitudeDistribution: AptitudeDistribution,
+  equipmentCharacter: SimulatedCharacter,
+): SimulatedCharacter {
+  const aptitudeStats = computeAptitudeStats(aptitudeDistribution);
+  const stats: BaseStats = {
+    ...aptitudeStats.stats,
+    elementalMastery: {
+      fire: aptitudeStats.stats.elementalMastery.fire + equipmentCharacter.stats.elementalMastery.fire,
+      water: aptitudeStats.stats.elementalMastery.water + equipmentCharacter.stats.elementalMastery.water,
+      earth: aptitudeStats.stats.elementalMastery.earth + equipmentCharacter.stats.elementalMastery.earth,
+      air: aptitudeStats.stats.elementalMastery.air + equipmentCharacter.stats.elementalMastery.air,
+      light: aptitudeStats.stats.elementalMastery.light + equipmentCharacter.stats.elementalMastery.light,
+      neutral: aptitudeStats.stats.elementalMastery.neutral + equipmentCharacter.stats.elementalMastery.neutral,
+    },
+  };
+
+  for (const key of additiveStatKeys) {
+    stats[key] = aptitudeStats.stats[key] + equipmentCharacter.stats[key];
+  }
+
+  return {
+    ...characterConfig,
+    resources: createResources({
+      ap: aptitudeStats.resources.ap + equipmentCharacter.resources.ap,
+      mp: aptitudeStats.resources.mp + equipmentCharacter.resources.mp,
+      wp: aptitudeStats.resources.wp + equipmentCharacter.resources.wp,
+      bq: aptitudeStats.resources.bq + equipmentCharacter.resources.bq,
+    }),
+    stats,
+  };
 }
 
 function writeDragPayload(event: React.DragEvent, payload: DragPayload) {
@@ -560,6 +948,73 @@ function createTimelineAction(spellId: string): TimelineAction {
   };
 }
 
+function createDefaultTimeline(): TimelineAction[] {
+  return [
+    createTimelineAction("lueur-de-laube"),
+    createTimelineAction("coeur-de-lumiere"),
+    createTimelineAction("rayon-crepusculaire"),
+  ];
+}
+
+function getSnapshotIndexForAction(turnIndex: number, actionIndex: number, snapshots: TimelineSnapshot[]): number {
+  const snapshotIndex = snapshots.findIndex((snapshot) => snapshot.turnIndex === turnIndex && snapshot.actionIndex === actionIndex);
+  return snapshotIndex >= 0 ? snapshotIndex : Math.max(0, snapshots.length - 1);
+}
+
+function getFirstSnapshotIndexForTurn(turnIndex: number, snapshots: TimelineSnapshot[]): number {
+  if (turnIndex === 0) {
+    return 0;
+  }
+
+  const snapshotIndex = snapshots.findIndex((snapshot) => snapshot.turnIndex === turnIndex);
+  return snapshotIndex >= 0 ? snapshotIndex : Math.max(0, snapshots.length - 1);
+}
+
+function getPlannedSnapshotIndexForAction(turns: TimelineAction[][], turnIndex: number, actionIndex: number): number {
+  const previousActionCount = turns
+    .slice(0, turnIndex)
+    .reduce((total, turn) => total + turn.length, 0);
+  return previousActionCount + actionIndex + 1;
+}
+
+function getTurnUids(turns: TimelineAction[][], turnIndex: number): string[] {
+  return (turns[turnIndex] ?? []).map((action) => action.uid);
+}
+
+function findTimelineActionLocation(
+  turns: TimelineAction[][],
+  uid: string,
+): { actionIndex: number; turnIndex: number } | null {
+  for (const [turnIndex, turn] of turns.entries()) {
+    const actionIndex = turn.findIndex((action) => action.uid === uid);
+    if (actionIndex >= 0) {
+      return { actionIndex, turnIndex };
+    }
+  }
+
+  return null;
+}
+
+function getTimelineDropPreviewSpellId(intent: TimelineDropIntent | null, turns: TimelineAction[][]): string | null {
+  if (!intent) {
+    return null;
+  }
+
+  if (intent.kind === "insertSpell") {
+    return intent.spellId;
+  }
+
+  const sourceLocation = findTimelineActionLocation(turns, intent.uid);
+  return sourceLocation
+    ? turns[sourceLocation.turnIndex]?.[sourceLocation.actionIndex]?.spellId ?? null
+    : null;
+}
+
+function getTimelineLaneBounds(turnStack: HTMLDivElement | null): DOMRect[] {
+  return Array.from(turnStack?.querySelectorAll<HTMLElement>(".turn-row .sequence-rack") ?? [])
+    .map((element) => element.getBoundingClientRect());
+}
+
 function PanelHeader({ title, subtitle }: { title: string; subtitle: string }) {
   return (
     <div className="panel-header">
@@ -587,15 +1042,15 @@ function LanguageSelector({ locale, onChange }: { locale: UiLocale; onChange: (l
   );
 }
 
-function SetupTabs({ onChange, value }: { onChange: (tab: SetupTabId) => void; value: SetupTabId }) {
-  const tabs: Array<{ id: SetupTabId; label: string }> = [
-    { id: "distribution", label: t("panel.distributionTab") },
-    { id: "adjustments", label: t("panel.adjustmentsTab") },
-    { id: "state", label: t("panel.stateTab") },
+function CenterTabs({ onChange, value }: { onChange: (tab: CenterTabId) => void; value: CenterTabId }) {
+  const tabs: Array<{ id: CenterTabId; label: string }> = [
+    { id: "combos", label: t("panel.combosTab") },
+    { id: "aptitudes", label: t("panel.aptitudesTab") },
+    { id: "equipment", label: t("panel.equipmentTab") },
   ];
 
   return (
-    <div className="setup-tabs" role="tablist" aria-label={t("panel.characterConfig")}>
+    <div className="center-tabs" role="tablist" aria-label={t("panel.sequenceDetails")}>
       {tabs.map((tab) => (
         <button
           key={tab.id}
@@ -1113,8 +1568,16 @@ function CatalogInfoIconImage({ icon }: { icon: CatalogInfoIcon }) {
   );
 }
 
-function TimelineDropMarker({ active }: { active: boolean }) {
-  return <span className={`sequence-drop-marker ${active ? "active" : ""}`} aria-hidden="true" />;
+function TimelineDropMarker({ active, entry }: { active: boolean; entry: CatalogEntry | undefined }) {
+  return (
+    <span className={`sequence-drop-marker ${active ? "active" : ""}`} aria-hidden="true">
+      {active && entry ? (
+        <span className="sequence-drop-preview">
+          <EntryIcon entryId={entry.id} label={entry.name} />
+        </span>
+      ) : null}
+    </span>
+  );
 }
 
 function isTimelineDropMarkerActive(intent: TimelineDropIntent | null, index: number): boolean {
@@ -1127,14 +1590,20 @@ function isTimelineDropMarkerActive(intent: TimelineDropIntent | null, index: nu
 
 function AptitudeDistributionEditor({
   distribution,
-  onApply,
   onChange,
 }: {
   distribution: AptitudeDistribution;
-  onApply: (distribution?: AptitudeDistribution) => void;
   onChange: (distribution: AptitudeDistribution) => void;
 }) {
   const preview = useMemo(() => computeAptitudeStats(distribution), [distribution]);
+  const serializedCode = useMemo(() => serializeAptitudeDistribution(distribution), [distribution]);
+  const [draftCode, setDraftCode] = useState(serializedCode);
+  const [codeMessage, setCodeMessage] = useState<{ kind: "error" | "success"; text: string } | null>(null);
+
+  useEffect(() => {
+    setDraftCode(serializedCode);
+    setCodeMessage(null);
+  }, [serializedCode]);
 
   function updateLevel(level: number) {
     onChange(setAptitudeLevel(distribution, level));
@@ -1144,6 +1613,31 @@ function AptitudeDistributionEditor({
     onChange(setAptitudeRank(distribution, aptitudeId, rank));
   }
 
+  async function copyCode() {
+    try {
+      await navigator.clipboard.writeText(serializedCode);
+      setCodeMessage({ kind: "success", text: t("form.aptitudeCodeCopied") });
+    } catch {
+      setCodeMessage({ kind: "error", text: t("form.aptitudeCodeCopyFailed") });
+    }
+  }
+
+  function importCode(code: string) {
+    const result = parseAptitudeDistributionCode(code, distribution);
+    if (result.ok) {
+      onChange(result.distribution);
+      setDraftCode(serializeAptitudeDistribution(result.distribution));
+      setCodeMessage({ kind: "success", text: t("form.aptitudeCodeImported") });
+      return;
+    }
+
+    setCodeMessage({ kind: "error", text: formatAptitudeCodeError(result) });
+  }
+
+  function importDraftCode() {
+    importCode(draftCode);
+  }
+
   return (
     <section className="form-section aptitude-panel">
       <div className="aptitude-heading">
@@ -1151,11 +1645,30 @@ function AptitudeDistributionEditor({
           <h3>{t("form.distribution")}</h3>
           <span>{t("form.distributionSource")}</span>
         </div>
-        <button className="primary-button aptitude-apply" type="button" onClick={() => onApply(distribution)}>
-          <Check size={15} />
-          {t("form.applyDistribution")}
-        </button>
       </div>
+
+      <label className="field aptitude-code-field">
+        <span>{t("form.aptitudeCode")}</span>
+        <div className="aptitude-code-row">
+          <input
+            spellCheck={false}
+            value={draftCode}
+            onChange={(event) => {
+              setDraftCode(event.target.value);
+              setCodeMessage(null);
+            }}
+          />
+          <IconButton label={t("form.copyAptitudeCode")} onClick={copyCode}>
+            <Copy size={19} />
+          </IconButton>
+          <IconButton label={t("form.importAptitudeCode")} onClick={importDraftCode}>
+            <ClipboardPaste size={19} />
+          </IconButton>
+        </div>
+        {codeMessage ? (
+          <small className={`aptitude-code-message ${codeMessage.kind}`}>{codeMessage.text}</small>
+        ) : null}
+      </label>
 
       <label className="field aptitude-level">
         <span>{t("form.level")}</span>
@@ -1206,6 +1719,22 @@ function AptitudeDistributionEditor({
       </div>
     </section>
   );
+}
+
+function formatAptitudeCodeError(result: Exclude<ReturnType<typeof parseAptitudeDistributionCode>, { ok: true }>): string {
+  if (result.error === "unknownAptitude" && result.aptitudeId !== undefined) {
+    return formatUiMessage("form.aptitudeCodeUnknown", { id: result.aptitudeId });
+  }
+
+  if (result.error === "duplicateAptitude" && result.aptitudeId !== undefined) {
+    return formatUiMessage("form.aptitudeCodeDuplicate", { id: result.aptitudeId });
+  }
+
+  if (result.error === "exceedsBudget") {
+    return t("form.aptitudeCodeExceedsBudget");
+  }
+
+  return t("form.aptitudeCodeInvalid");
 }
 
 function AptitudePreview({ preview }: { preview: AppliedAptitudeStats }) {
@@ -1385,6 +1914,51 @@ function StatsEditor({ character, onChange }: { character: SimulatedCharacter; o
   );
 }
 
+function EquipmentExtraStatsEditor({
+  onChange,
+  stats,
+}: {
+  onChange: (stats: EquipmentExtraStats) => void;
+  stats: EquipmentExtraStats;
+}) {
+  const statControls: Array<{
+    iconKey: StatIconKey;
+    key: EquipmentExtraStatKey;
+    label: string;
+  }> = [
+    { iconKey: "barrier", key: "barrier", label: t("stat.barrier") },
+    { iconKey: "lockDodge", key: "lockDodge", label: t("stat.lockDodge") },
+    { iconKey: "equipmentKnowledge", key: "equipmentKnowledge", label: t("stat.equipmentKnowledge") },
+    { iconKey: "prospection", key: "prospection", label: t("stat.prospection") },
+    { iconKey: "wisdom", key: "wisdom", label: t("stat.wisdom") },
+    { iconKey: "leadership", key: "leadership", label: t("stat.leadership") },
+  ];
+
+  function updateExtraStat(key: EquipmentExtraStatKey, value: number) {
+    onChange({ ...stats, [key]: Math.max(0, value) });
+  }
+
+  return (
+    <section className="form-section equipment-extra-section">
+      <h3>{t("form.additionalEquipmentStats")}</h3>
+      <div className="stat-stepper-list">
+        {statControls.map((control) => {
+          const value = stats[control.key];
+          return (
+            <StatStepper
+              key={control.key}
+              icon={getStatIconSrc(control.iconKey)}
+              label={control.label}
+              value={value}
+              onChange={(delta) => updateExtraStat(control.key, value + delta)}
+            />
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 function HuppermageStateEditor({
   character,
   onChange,
@@ -1500,23 +2074,60 @@ function ActionEditor({ action, onChange }: { action: TimelineAction; onChange: 
   );
 }
 
-function CursorControl({ value, max, onChange }: { value: number; max: number; onChange: (value: number) => void }) {
+function CursorControl({
+  marks,
+  max,
+  onChange,
+  value,
+}: {
+  marks: ReturnType<typeof createTimelineCursorMarks>;
+  max: number;
+  value: number;
+  onChange: (value: number) => void;
+}) {
   return (
     <div className="cursor-control">
-      <input
-        aria-label={t("cursor.label")}
-        type="range"
-        min={0}
-        max={max}
-        value={value}
-        onChange={(event) => onChange(Number(event.target.value))}
-      />
+      <div className="cursor-track-wrap">
+        <div className="cursor-action-marks" aria-hidden="true">
+          {marks.actionSteps.map((step) => (
+            <span
+              key={step}
+              className="cursor-action-mark"
+              style={{ left: `${stepToPercent(step, max)}%` }}
+            />
+          ))}
+        </div>
+        <div className="cursor-turn-separators" aria-hidden="true">
+          {marks.turns.map((turn) => (
+            turn.actionCount > 0 ? (
+              <span
+                key={turn.turnIndex}
+                className="cursor-turn-separator"
+                style={{ left: `${stepToPercent(turn.endStep, max)}%` }}
+              />
+            ) : null
+          ))}
+        </div>
+        <input
+          aria-label={t("cursor.label")}
+          type="range"
+          min={0}
+          max={max}
+          step={1}
+          value={value}
+          onChange={(event) => onChange(Number(event.target.value))}
+        />
+      </div>
       <span>{formatUiMessage("cursor.step", { value, max })}</span>
     </div>
   );
 }
 
-function SnapshotInspector({ snapshot }: { snapshot: ReturnType<typeof createTimelineSnapshots>[number] }) {
+function stepToPercent(step: number, max: number): number {
+  return max <= 0 ? 0 : Math.max(0, Math.min(100, step / max * 100));
+}
+
+function SnapshotInspector({ snapshot }: { snapshot: TimelineSnapshot }) {
   const huppermage = snapshot.classState.huppermage;
   const summarizedStatIcons = [
     getStatIconSrc("level"),
@@ -1592,7 +2203,7 @@ function SnapshotInspector({ snapshot }: { snapshot: ReturnType<typeof createTim
   );
 }
 
-function DamageBreakdown({ snapshot }: { snapshot: ReturnType<typeof createTimelineSnapshots>[number] | undefined }) {
+function DamageBreakdown({ snapshot }: { snapshot: TimelineSnapshot | undefined }) {
   const damageEffects = snapshot?.appliedEffects.filter((effect) => effect.type === "damage") ?? [];
 
   if (!snapshot || damageEffects.length === 0) {

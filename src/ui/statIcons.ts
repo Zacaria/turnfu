@@ -1,7 +1,7 @@
 import type { Element, Resource } from "../core/catalog/types.ts";
 import type { BaseStats } from "../core/simulation/types.ts";
 
-type WakfuliStatIcon =
+type StatIconAsset =
   | "AP"
   | "MP"
   | "WP"
@@ -58,59 +58,59 @@ export type StatIconKey =
   | "wisdom"
   | "leadership";
 
-const wakfuliStatIconUrls: Record<WakfuliStatIcon, string> = {
-  AP: new URL("./assets/stats/wakfuli/AP.webp", import.meta.url).href,
-  MP: new URL("./assets/stats/wakfuli/MP.webp", import.meta.url).href,
-  WP: new URL("./assets/stats/wakfuli/WP.webp", import.meta.url).href,
-  HP: new URL("./assets/stats/wakfuli/HP.webp", import.meta.url).href,
-  HUPPERMAGE_RESOURCE: new URL("./assets/stats/wakfuli/HUPPERMAGE_RESOURCE.webp", import.meta.url).href,
-  DMG_IN_PERCENT: new URL("./assets/stats/wakfuli/DMG_IN_PERCENT.webp", import.meta.url).href,
-  DMG_FIRE_PERCENT: new URL("./assets/stats/wakfuli/DMG_FIRE_PERCENT.webp", import.meta.url).href,
-  DMG_WATER_PERCENT: new URL("./assets/stats/wakfuli/DMG_WATER_PERCENT.webp", import.meta.url).href,
-  DMG_EARTH_PERCENT: new URL("./assets/stats/wakfuli/DMG_EARTH_PERCENT.webp", import.meta.url).href,
-  DMG_AIR_PERCENT: new URL("./assets/stats/wakfuli/DMG_AIR_PERCENT.webp", import.meta.url).href,
-  DMG_LIGHT_PERCENT: new URL("./assets/stats/wakfuli/DMG_LIGHT_PERCENT.webp", import.meta.url).href,
-  FINAL_DMG_IN_PERCENT: new URL("./assets/stats/wakfuli/FINAL_DMG_IN_PERCENT.webp", import.meta.url).href,
-  MELEE_DMG: new URL("./assets/stats/wakfuli/MELEE_DMG.webp", import.meta.url).href,
-  RANGED_DMG: new URL("./assets/stats/wakfuli/RANGED_DMG.webp", import.meta.url).href,
-  BACKSTAB_BONUS: new URL("./assets/stats/wakfuli/BACKSTAB_BONUS.webp", import.meta.url).href,
-  CRITICAL_BONUS: new URL("./assets/stats/wakfuli/CRITICAL_BONUS.webp", import.meta.url).href,
-  BERSERK_DMG: new URL("./assets/stats/wakfuli/BERSERK_DMG.webp", import.meta.url).href,
-  HEAL_IN_PERCENT: new URL("./assets/stats/wakfuli/HEAL_IN_PERCENT.webp", import.meta.url).href,
-  FINAL_HEAL_IN_PERCENT: new URL("./assets/stats/wakfuli/FINAL_HEAL_IN_PERCENT.webp", import.meta.url).href,
-  ARMOR_RECEIVED: new URL("./assets/stats/wakfuli/ARMOR_RECEIVED.webp", import.meta.url).href,
-  ARMOR_GIVEN: new URL("./assets/stats/wakfuli/ARMOR_GIVEN.webp", import.meta.url).href,
-  ARMOR_PERCENT: new URL("./assets/stats/wakfuli/ARMOR_PERCENT.webp", import.meta.url).href,
-  RES_IN_PERCENT: new URL("./assets/stats/wakfuli/RES_IN_PERCENT.webp", import.meta.url).href,
-  RES_FIRE_PERCENT: new URL("./assets/stats/wakfuli/RES_FIRE_PERCENT.webp", import.meta.url).href,
-  RES_WATER_PERCENT: new URL("./assets/stats/wakfuli/RES_WATER_PERCENT.webp", import.meta.url).href,
-  RES_EARTH_PERCENT: new URL("./assets/stats/wakfuli/RES_EARTH_PERCENT.webp", import.meta.url).href,
-  RES_AIR_PERCENT: new URL("./assets/stats/wakfuli/RES_AIR_PERCENT.webp", import.meta.url).href,
-  RES_BACKSTAB: new URL("./assets/stats/wakfuli/RES_BACKSTAB.webp", import.meta.url).href,
-  CRITICAL_RES: new URL("./assets/stats/wakfuli/CRITICAL_RES.webp", import.meta.url).href,
-  RANGE: new URL("./assets/stats/wakfuli/RANGE.webp", import.meta.url).href,
-  WILLPOWER: new URL("./assets/stats/wakfuli/WILLPOWER.webp", import.meta.url).href,
-  FEROCITY: new URL("./assets/stats/wakfuli/FEROCITY.webp", import.meta.url).href,
-  BLOCK: new URL("./assets/stats/wakfuli/BLOCK.webp", import.meta.url).href,
-  TACKLE: new URL("./assets/stats/wakfuli/TACKLE.webp", import.meta.url).href,
-  DODGE: new URL("./assets/stats/wakfuli/DODGE.webp", import.meta.url).href,
-  TACKLE_DODGE: new URL("./assets/stats/wakfuli/TACKLE_DODGE.webp", import.meta.url).href,
-  INIT: new URL("./assets/stats/wakfuli/INIT.webp", import.meta.url).href,
-  INDIRECT_DMG: new URL("./assets/stats/wakfuli/INDIRECT_DMG.webp", import.meta.url).href,
-  LEADERSHIP: new URL("./assets/stats/wakfuli/LEADERSHIP.webp", import.meta.url).href,
-  PROSPECTION: new URL("./assets/stats/wakfuli/PROSPECTION.webp", import.meta.url).href,
-  WISDOM: new URL("./assets/stats/wakfuli/WISDOM.webp", import.meta.url).href,
-  EQUIPMENT_KNOWLEDGE: new URL("./assets/stats/wakfuli/EQUIPMENT_KNOWLEDGE.webp", import.meta.url).href,
+const statIconAssetUrls: Record<StatIconAsset, string> = {
+  AP: new URL("./assets/stats/game/AP.webp", import.meta.url).href,
+  MP: new URL("./assets/stats/game/MP.webp", import.meta.url).href,
+  WP: new URL("./assets/stats/game/WP.webp", import.meta.url).href,
+  HP: new URL("./assets/stats/game/HP.webp", import.meta.url).href,
+  HUPPERMAGE_RESOURCE: new URL("./assets/stats/game/HUPPERMAGE_RESOURCE.webp", import.meta.url).href,
+  DMG_IN_PERCENT: new URL("./assets/stats/game/DMG_IN_PERCENT.webp", import.meta.url).href,
+  DMG_FIRE_PERCENT: new URL("./assets/stats/game/DMG_FIRE_PERCENT.webp", import.meta.url).href,
+  DMG_WATER_PERCENT: new URL("./assets/stats/game/DMG_WATER_PERCENT.webp", import.meta.url).href,
+  DMG_EARTH_PERCENT: new URL("./assets/stats/game/DMG_EARTH_PERCENT.webp", import.meta.url).href,
+  DMG_AIR_PERCENT: new URL("./assets/stats/game/DMG_AIR_PERCENT.webp", import.meta.url).href,
+  DMG_LIGHT_PERCENT: new URL("./assets/stats/game/DMG_LIGHT_PERCENT.webp", import.meta.url).href,
+  FINAL_DMG_IN_PERCENT: new URL("./assets/stats/game/FINAL_DMG_IN_PERCENT.webp", import.meta.url).href,
+  MELEE_DMG: new URL("./assets/stats/game/MELEE_DMG.webp", import.meta.url).href,
+  RANGED_DMG: new URL("./assets/stats/game/RANGED_DMG.webp", import.meta.url).href,
+  BACKSTAB_BONUS: new URL("./assets/stats/game/BACKSTAB_BONUS.webp", import.meta.url).href,
+  CRITICAL_BONUS: new URL("./assets/stats/game/CRITICAL_BONUS.webp", import.meta.url).href,
+  BERSERK_DMG: new URL("./assets/stats/game/BERSERK_DMG.webp", import.meta.url).href,
+  HEAL_IN_PERCENT: new URL("./assets/stats/game/HEAL_IN_PERCENT.webp", import.meta.url).href,
+  FINAL_HEAL_IN_PERCENT: new URL("./assets/stats/game/FINAL_HEAL_IN_PERCENT.webp", import.meta.url).href,
+  ARMOR_RECEIVED: new URL("./assets/stats/game/ARMOR_RECEIVED.webp", import.meta.url).href,
+  ARMOR_GIVEN: new URL("./assets/stats/game/ARMOR_GIVEN.webp", import.meta.url).href,
+  ARMOR_PERCENT: new URL("./assets/stats/game/ARMOR_PERCENT.webp", import.meta.url).href,
+  RES_IN_PERCENT: new URL("./assets/stats/game/RES_IN_PERCENT.webp", import.meta.url).href,
+  RES_FIRE_PERCENT: new URL("./assets/stats/game/RES_FIRE_PERCENT.webp", import.meta.url).href,
+  RES_WATER_PERCENT: new URL("./assets/stats/game/RES_WATER_PERCENT.webp", import.meta.url).href,
+  RES_EARTH_PERCENT: new URL("./assets/stats/game/RES_EARTH_PERCENT.webp", import.meta.url).href,
+  RES_AIR_PERCENT: new URL("./assets/stats/game/RES_AIR_PERCENT.webp", import.meta.url).href,
+  RES_BACKSTAB: new URL("./assets/stats/game/RES_BACKSTAB.webp", import.meta.url).href,
+  CRITICAL_RES: new URL("./assets/stats/game/CRITICAL_RES.webp", import.meta.url).href,
+  RANGE: new URL("./assets/stats/game/RANGE.webp", import.meta.url).href,
+  WILLPOWER: new URL("./assets/stats/game/WILLPOWER.webp", import.meta.url).href,
+  FEROCITY: new URL("./assets/stats/game/FEROCITY.webp", import.meta.url).href,
+  BLOCK: new URL("./assets/stats/game/BLOCK.webp", import.meta.url).href,
+  TACKLE: new URL("./assets/stats/game/TACKLE.webp", import.meta.url).href,
+  DODGE: new URL("./assets/stats/game/DODGE.webp", import.meta.url).href,
+  TACKLE_DODGE: new URL("./assets/stats/game/TACKLE_DODGE.webp", import.meta.url).href,
+  INIT: new URL("./assets/stats/game/INIT.webp", import.meta.url).href,
+  INDIRECT_DMG: new URL("./assets/stats/game/INDIRECT_DMG.webp", import.meta.url).href,
+  LEADERSHIP: new URL("./assets/stats/game/LEADERSHIP.webp", import.meta.url).href,
+  PROSPECTION: new URL("./assets/stats/game/PROSPECTION.webp", import.meta.url).href,
+  WISDOM: new URL("./assets/stats/game/WISDOM.webp", import.meta.url).href,
+  EQUIPMENT_KNOWLEDGE: new URL("./assets/stats/game/EQUIPMENT_KNOWLEDGE.webp", import.meta.url).href,
 };
 
-const resourceIconTypes: Record<Resource, WakfuliStatIcon> = {
+const resourceIconTypes: Record<Resource, StatIconAsset> = {
   ap: "AP",
   mp: "MP",
   wp: "WP",
   bq: "HUPPERMAGE_RESOURCE",
 };
 
-const elementMasteryIconTypes: Partial<Record<Element, WakfuliStatIcon>> = {
+const elementMasteryIconTypes: Partial<Record<Element, StatIconAsset>> = {
   fire: "DMG_FIRE_PERCENT",
   water: "DMG_WATER_PERCENT",
   earth: "DMG_EARTH_PERCENT",
@@ -119,7 +119,7 @@ const elementMasteryIconTypes: Partial<Record<Element, WakfuliStatIcon>> = {
   neutral: "DMG_IN_PERCENT",
 };
 
-const statIconTypes: Record<StatIconKey, WakfuliStatIcon> = {
+const statIconTypes: Record<StatIconKey, StatIconAsset> = {
   level: "WISDOM",
   hitPoints: "HP",
   hitPointsPercent: "FINAL_HEAL_IN_PERCENT",
@@ -159,7 +159,7 @@ const statIconTypes: Record<StatIconKey, WakfuliStatIcon> = {
   leadership: "LEADERSHIP",
 };
 
-const aptitudeIconTypes: Record<number, WakfuliStatIcon> = {
+const aptitudeIconTypes: Record<number, StatIconAsset> = {
   1: "FINAL_HEAL_IN_PERCENT",
   16: "RES_IN_PERCENT",
   17: "ARMOR_PERCENT",
@@ -193,22 +193,22 @@ const aptitudeIconTypes: Record<number, WakfuliStatIcon> = {
   39: "INDIRECT_DMG",
 };
 
-function getWakfuliStatIconSrc(iconType: WakfuliStatIcon): string {
-  return wakfuliStatIconUrls[iconType];
+function getStatIconAssetSrc(iconType: StatIconAsset): string {
+  return statIconAssetUrls[iconType];
 }
 
 export function getResourceIconSrc(resource: Resource): string {
-  return getWakfuliStatIconSrc(resourceIconTypes[resource]);
+  return getStatIconAssetSrc(resourceIconTypes[resource]);
 }
 
 export function getElementMasteryIconSrc(element: Element): string {
-  return getWakfuliStatIconSrc(elementMasteryIconTypes[element] ?? "DMG_IN_PERCENT");
+  return getStatIconAssetSrc(elementMasteryIconTypes[element] ?? "DMG_IN_PERCENT");
 }
 
 export function getStatIconSrc(stat: StatIconKey): string {
-  return getWakfuliStatIconSrc(statIconTypes[stat]);
+  return getStatIconAssetSrc(statIconTypes[stat]);
 }
 
 export function getAptitudeIconSrc(aptitudeId: number): string {
-  return getWakfuliStatIconSrc(aptitudeIconTypes[aptitudeId] ?? "DMG_IN_PERCENT");
+  return getStatIconAssetSrc(aptitudeIconTypes[aptitudeId] ?? "DMG_IN_PERCENT");
 }

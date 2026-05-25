@@ -562,12 +562,24 @@ function validateHuppermageClassAction(
     };
   }
 
-  if (!isFeuFolletSpell(spell) || action.target?.kind !== "feuFollet") {
+  if (!isFeuFolletSpell(spell)) {
     return undefined;
   }
 
-  const feuFolletsActive = getHuppermageState(state.classState).feuFolletsActive;
-  if (feuFolletsActive <= 0) {
+  const targetKind = action.target?.kind;
+  const huppermageState = getHuppermageState(state.classState);
+
+  if (targetKind === "emptyCell" && getActiveRuneCount(huppermageState) <= 0) {
+    return {
+      type: "invalidClassStateAction" as const,
+      actionIndex,
+      spellId: spell.id,
+      message: `Spell '${spell.id}' cannot place a Feu-Follet without an active rune.`,
+      source: spell.metadata.sources[0],
+    };
+  }
+
+  if (targetKind === "feuFollet" && huppermageState.feuFolletsActive <= 0) {
     return {
       type: "invalidClassStateAction" as const,
       actionIndex,
@@ -577,7 +589,21 @@ function validateHuppermageClassAction(
     };
   }
 
+  if (isEntityTargetKind(targetKind)) {
+    return {
+      type: "invalidClassStateAction" as const,
+      actionIndex,
+      spellId: spell.id,
+      message: `Spell '${spell.id}' cannot target an entity.`,
+      source: spell.metadata.sources[0],
+    };
+  }
+
   return undefined;
+}
+
+function isEntityTargetKind(targetKind: SimulationOptions["sequence"]["actions"][number]["target"]["kind"] | undefined): boolean {
+  return targetKind === "fighter" || targetKind === "ally" || targetKind === "enemy";
 }
 
 function validateHuppermageDeckAction(
@@ -639,9 +665,19 @@ function applyFeuFolletAction(
   let temporaryUnlockedSpellElement = previousHuppermageState.temporaryUnlockedSpellElement;
 
   if (targetKind === "emptyCell") {
+    const storedRune = getFeuFolletStoredRune(previousHuppermageState);
     const storedRunes = getSauvegardeRuniqueStoredRunes(previousHuppermageState);
     feuFolletStoredRunes = [...feuFolletStoredRunes, storedRunes];
-    feuFolletStoredLastRunes = [...feuFolletStoredLastRunes, previousHuppermageState.runes.lastGeneratedRune];
+    feuFolletStoredLastRunes = [...feuFolletStoredLastRunes, storedRune];
+    if (storedRune) {
+      runes = {
+        ...runes,
+        active: {
+          ...runes.active,
+          [storedRune]: false,
+        },
+      };
+    }
     if (storedRunes.length > 0) {
       appliedEffects.push({
         type: "feuFolletRunesStored",
@@ -676,6 +712,15 @@ function applyFeuFolletAction(
         element: temporaryUnlockedSpellElement,
         source: "feuFollet",
       });
+    }
+    if (recoveredLastRune) {
+      runes = {
+        ...runes,
+        active: {
+          ...runes.active,
+          [recoveredLastRune]: true,
+        },
+      };
     }
   }
 
@@ -762,6 +807,15 @@ function getSauvegardeRuniqueStoredRunes(huppermageState: NonNullable<ClassTurnS
   }
 
   return RUNE_APPLICATION_ORDER.filter((rune) => rune !== activeRunes[0]);
+}
+
+function getFeuFolletStoredRune(huppermageState: NonNullable<ClassTurnState["huppermage"]>): Rune | null {
+  const lastGeneratedRune = huppermageState.runes.lastGeneratedRune;
+  if (lastGeneratedRune && huppermageState.runes.active[lastGeneratedRune]) {
+    return lastGeneratedRune;
+  }
+
+  return RUNE_APPLICATION_ORDER.find((rune) => huppermageState.runes.active[rune]) ?? null;
 }
 
 function applyRecoveredRunes(runes: HuppermageRuneState, recoveredRunes: Rune[]): HuppermageRuneState {

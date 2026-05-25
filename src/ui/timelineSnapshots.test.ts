@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { cost, damage, normalizeCatalog, resourceDelta, screenshot, spell } from "../core/catalog/index.ts";
-import { createResources, simulateTurn } from "../core/simulation/index.ts";
+import { createResources, simulateCombo, simulateTurn } from "../core/simulation/index.ts";
 import type { CatalogEntry } from "../core/catalog/types.ts";
 import type { SimulatedCharacter } from "../core/simulation/types.ts";
-import { createTimelineSnapshots } from "./timelineSnapshots.ts";
+import { createComboTimelineSnapshots, createTimelineSnapshots } from "./timelineSnapshots.ts";
 
 const source = screenshot("/tmp/timeline-snapshot-test.png", "timeline-snapshot-test");
 
@@ -77,4 +77,29 @@ test("keeps completed snapshots available when a later action is invalid", () =>
   assert.equal(snapshots[1].spellId, "spark");
   assert.equal(snapshots[1].violations.length, 1);
   assert.equal(snapshots[1].violations[0].type, "insufficientResource");
+});
+
+test("flattens multi-turn combo snapshots into a global cursor sequence", () => {
+  const result = simulateCombo({
+    catalog,
+    character,
+    combo: {
+      turns: [
+        { actions: [{ spellId: "spark" }] },
+        { actions: [{ spellId: "spark" }] },
+      ],
+    },
+  });
+
+  const snapshots = createComboTimelineSnapshots(result, character);
+
+  assert.equal(result.valid, true);
+  assert.equal(snapshots.length, 3);
+  assert.equal(snapshots[0].kind, "initial");
+  assert.equal(snapshots[1].turnIndex, 0);
+  assert.equal(snapshots[1].actionIndex, 0);
+  assert.equal(snapshots[1].totalDamageSoFar, 20);
+  assert.equal(snapshots[2].turnIndex, 1);
+  assert.equal(snapshots[2].actionIndex, 0);
+  assert.equal(snapshots[2].totalDamageSoFar, 40);
 });

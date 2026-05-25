@@ -91,17 +91,17 @@ function stablePassive(source: ReturnType<typeof screenshot>, notes: string[] = 
   };
 }
 
-const wakfuliSource = manual("Wakfuli API /api/v1/spells/huppermage, releve 2026-05-23");
+const externalCatalogSource = manual("Community API /api/v1/spells/huppermage, releve 2026-05-23");
 
-function wakfuliPassive(observedLevel: number, notes: string[] = []): CatalogMetadata {
+function communityCatalogPassive(observedLevel: number, notes: string[] = []): CatalogMetadata {
   return {
     status: "extracted",
     normalizedLevel: 200,
     observedLevel,
     valuesStableAtLevel200: true,
-    sources: [wakfuliSource],
+    sources: [externalCatalogSource],
     extractionNotes: [
-      "Passif ajoute depuis Wakfuli pour completer les scans Huppermage.",
+      "Passif ajoute depuis une API communautaire pour completer les scans Huppermage.",
       ...notes,
     ],
   };
@@ -724,7 +724,7 @@ const passiveEntries: DslEntry[] = [
     ],
     constraints: [],
     tags: ["passive", "mobility"],
-    metadata: wakfuliPassive(10),
+    metadata: communityCatalogPassive(10),
   }),
   passive("interception", {
     name: "Interception",
@@ -735,7 +735,7 @@ const passiveEntries: DslEntry[] = [
     ],
     constraints: [],
     tags: ["passive", "lock"],
-    metadata: wakfuliPassive(15),
+    metadata: communityCatalogPassive(15),
   }),
   passive("inspiration", {
     name: "Inspiration",
@@ -751,7 +751,7 @@ const passiveEntries: DslEntry[] = [
     ],
     constraints: [],
     tags: ["passive", "initiative", "damage"],
-    metadata: wakfuliPassive(25),
+    metadata: communityCatalogPassive(25),
   }),
   passive("motivation", {
     name: "Motivation",
@@ -763,7 +763,7 @@ const passiveEntries: DslEntry[] = [
     ],
     constraints: [],
     tags: ["passive", "resource", "willpower"],
-    metadata: wakfuliPassive(35),
+    metadata: communityCatalogPassive(35),
   }),
   passive("extension-des-sens", {
     name: "Extension des sens",
@@ -874,7 +874,7 @@ const passiveEntries: DslEntry[] = [
     ],
     constraints: [],
     tags: ["passive", "heal", "armor"],
-    metadata: wakfuliPassive(55),
+    metadata: communityCatalogPassive(55),
   }),
   passive("altruisme-de-lame", {
     name: "Altruisme de l'ame",
@@ -901,7 +901,7 @@ const passiveEntries: DslEntry[] = [
     ],
     constraints: [],
     tags: ["passive", "survivability"],
-    metadata: wakfuliPassive(65),
+    metadata: communityCatalogPassive(65),
   }),
   passive("essor-de-lame", {
     name: "Essor de l'ame",
@@ -911,7 +911,7 @@ const passiveEntries: DslEntry[] = [
     ],
     constraints: [],
     tags: ["passive", "heart", "resistance"],
-    metadata: wakfuliPassive(65, ["Wakfuli ne fournit pas d'effet chiffre dans display_effects pour ce passif."]),
+    metadata: communityCatalogPassive(65, ["La source communautaire ne fournit pas d'effet chiffre dans display_effects pour ce passif."]),
   }),
   passive("pulsation", {
     name: "Pulsation",
@@ -922,7 +922,7 @@ const passiveEntries: DslEntry[] = [
     ],
     constraints: [],
     tags: ["passive", "feu-follet", "movement"],
-    metadata: wakfuliPassive(70, ["Wakfuli ne fournit pas d'effet chiffre dans display_effects pour ce passif."]),
+    metadata: communityCatalogPassive(70, ["La source communautaire ne fournit pas d'effet chiffre dans display_effects pour ce passif."]),
   }),
   passive("combinaison-elementaire", {
     name: "Combinaison Elementaire",
@@ -1043,13 +1043,13 @@ const passiveEntries: DslEntry[] = [
     name: "Fluctuation",
     level: 80,
     effects: [
-      on("casterDodgesFighter", [unsupported("Applique Fluctuation; avec pertes et sans perte sont distingues par Wakfuli.")]),
+      on("casterDodgesFighter", [unsupported("Applique Fluctuation; avec pertes et sans perte sont distingues par la source communautaire.")]),
       on("casterLocksFighter", [unsupported("Applique Fluctuation.")]),
       on("fighterEndsTurnInCasterContact", [unsupported("Applique Fluctuation.")]),
     ],
     constraints: [],
     tags: ["passive", "mobility", "lock"],
-    metadata: wakfuliPassive(80),
+    metadata: communityCatalogPassive(80),
   }),
   passive("profusion-runique", {
     name: "Profusion Runique",

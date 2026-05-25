@@ -10,12 +10,12 @@ export type SpellAttributeIconKey =
   | "rune4";
 
 const spellAttributeIconUrls: Record<SpellAttributeIconKey, string> = {
-  caster: new URL("./assets/spellAttributes/wakfuli/caster.webp", import.meta.url).href,
-  enemy: new URL("./assets/spellAttributes/wakfuli/enemy.webp", import.meta.url).href,
-  rune1: new URL("./assets/spellAttributes/wakfuli/rune1.webp", import.meta.url).href,
-  rune2: new URL("./assets/spellAttributes/wakfuli/rune2.webp", import.meta.url).href,
-  rune3: new URL("./assets/spellAttributes/wakfuli/rune3.webp", import.meta.url).href,
-  rune4: new URL("./assets/spellAttributes/wakfuli/rune4.webp", import.meta.url).href,
+  caster: new URL("./assets/spellAttributes/game/caster.webp", import.meta.url).href,
+  enemy: new URL("./assets/spellAttributes/game/enemy.webp", import.meta.url).href,
+  rune1: new URL("./assets/spellAttributes/game/rune1.webp", import.meta.url).href,
+  rune2: new URL("./assets/spellAttributes/game/rune2.webp", import.meta.url).href,
+  rune3: new URL("./assets/spellAttributes/game/rune3.webp", import.meta.url).href,
+  rune4: new URL("./assets/spellAttributes/game/rune4.webp", import.meta.url).href,
 };
 
 const runeIconKeys: Record<Rune, SpellAttributeIconKey> = {
