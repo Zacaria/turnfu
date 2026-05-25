@@ -28,6 +28,12 @@ const RUNE_TO_HEART: Record<Rune, HuppermageHeart> = {
   aerial: "air",
 };
 const RUNE_TO_ELEMENT: Record<Rune, Element> = RUNE_TO_HEART;
+const OPPOSITE_RUNE: Record<Rune, Rune> = {
+  incandescent: "aquatic",
+  aquatic: "incandescent",
+  telluric: "aerial",
+  aerial: "telluric",
+};
 
 type EffectApplicationContext = {
   action: SimulationOptions["sequence"]["actions"][number];
@@ -50,6 +56,7 @@ export function simulateTurn(options: SimulationOptions): SimulationResult {
       actionIndex,
       state,
       effectiveCost,
+      action,
     }) ?? validateHuppermageClassAction(spell, action, actionIndex, state)
       ?? validateHuppermageDeckAction(spell, actionIndex, state);
 
@@ -82,6 +89,11 @@ export function simulateTurn(options: SimulationOptions): SimulationResult {
     nextResources = preparedState.resources;
     nextClassState = preparedState.classState;
     appliedEffects.push(...preparedState.appliedEffects);
+
+    const cycleElementaireApplication = applyCycleElementaire(spell, nextClassState, nextResources);
+    nextClassState = cycleElementaireApplication.classState;
+    nextResources = cycleElementaireApplication.resources;
+    appliedEffects.push(...cycleElementaireApplication.appliedEffects);
 
     const damageBonusApplication = resolveSpellDamageBonus(spell, nextResources, nextClassState, action);
     appliedEffects.push(...damageBonusApplication.appliedEffects);
@@ -134,62 +146,10 @@ export function simulateTurn(options: SimulationOptions): SimulationResult {
 
     const generatedRune = getGeneratedRuneFromElement(spell.element);
     if (generatedRune) {
-      const previousHuppermageState = getHuppermageState(nextClassState);
-      const before = previousHuppermageState.runes.active[generatedRune];
-      if (!before) {
-        const shouldGrantAp = !previousHuppermageState.runeApGainsThisTurn[generatedRune];
-        nextClassState = {
-          ...nextClassState,
-          huppermage: {
-            ...previousHuppermageState,
-            runes: {
-              active: {
-                ...previousHuppermageState.runes.active,
-                [generatedRune]: true,
-              },
-              lastGeneratedRune: generatedRune,
-            },
-            runeApGainsThisTurn: {
-              ...previousHuppermageState.runeApGainsThisTurn,
-              [generatedRune]: true,
-            },
-          },
-        };
-        appliedEffects.push({
-          type: "runeGenerated",
-          rune: generatedRune,
-          before,
-          after: true,
-          source: "elementalSpellCast",
-        });
-
-        if (shouldGrantAp) {
-          const beforeAp = nextResources.ap;
-          nextResources = addResource(nextResources, "ap", 1);
-          appliedEffects.push({
-            type: "resourceDelta",
-            resource: "ap",
-            amount: 1,
-            before: beforeAp,
-            after: nextResources.ap,
-            source: "huppermageClassMechanic",
-          });
-        }
-
-        if (getHuppermageState(nextClassState).activePassives.includes("antithese")) {
-          const beforeBq = nextResources.bq;
-          const amount = applyBqGainMultiplier(20, getHuppermageState(nextClassState));
-          nextResources = addResource(nextResources, "bq", amount);
-          appliedEffects.push({
-            type: "resourceDelta",
-            resource: "bq",
-            amount,
-            before: beforeBq,
-            after: nextResources.bq,
-            source: "huppermageClassMechanic",
-          });
-        }
-      }
+      const runeGeneration = applyGeneratedRune(nextClassState, nextResources, generatedRune, "elementalSpellCast");
+      nextClassState = runeGeneration.classState;
+      nextResources = runeGeneration.resources;
+      appliedEffects.push(...runeGeneration.appliedEffects);
     }
 
     const feuFolletApplication = applyFeuFolletAction(spell, action, nextClassState);
@@ -278,7 +238,11 @@ function applyTurnEnd(state: TurnState): TurnState {
   const storedBefore = huppermageState.storedBq;
   let nextResources = state.remainingResources;
   let nextHuppermageState = huppermageState;
+  let nextStats = state.currentStats;
+  let nextClassState = state.classState;
   let amount = 0;
+  const activeRuneCount = getActiveRuneCount(huppermageState);
+  const activeRunes = { ...huppermageState.runes.active };
 
   if (huppermageState.activeHeart) {
     nextHuppermageState = {
@@ -291,6 +255,36 @@ function applyTurnEnd(state: TurnState): TurnState {
     nextHuppermageState = {
       ...huppermageState,
       storedBq: 0,
+    };
+  }
+
+  if (huppermageState.activePassives.includes("universalite") && activeRuneCount > 0) {
+    nextStats = applyUniversaliteStats(nextStats, activeRunes);
+    nextResources = addResource(nextResources, "bq", activeRuneCount * -50);
+  }
+
+  nextClassState = {
+    ...state.classState,
+    huppermage: nextHuppermageState,
+  };
+
+  if (huppermageState.activePassives.includes("profusion-runique") && activeRuneCount > 0) {
+    const abundance = addAbundance(nextClassState, activeRuneCount * 15, "huppermageClassMechanic");
+    nextClassState = abundance.classState;
+    nextHuppermageState = getHuppermageState(nextClassState);
+  }
+
+  if (huppermageState.activePassives.includes("dynamo")) {
+    nextHuppermageState = {
+      ...nextHuppermageState,
+      runes: {
+        ...nextHuppermageState.runes,
+        active: createRuneTracker(),
+      },
+    };
+    nextClassState = {
+      ...nextClassState,
+      huppermage: nextHuppermageState,
     };
   }
 
@@ -309,12 +303,44 @@ function applyTurnEnd(state: TurnState): TurnState {
   return {
     ...state,
     remainingResources: nextResources,
-    classState: {
-      ...state.classState,
-      huppermage: nextHuppermageState,
-    },
+    classState: nextClassState,
+    currentStats: nextStats,
     turnEndEffects,
   };
+}
+
+function applyUniversaliteStats(stats: BaseStats, activeRunes: Record<Rune, boolean>): BaseStats {
+  let nextStats = stats;
+
+  if (activeRunes.incandescent) {
+    nextStats = {
+      ...nextStats,
+      damageInflictedPercent: nextStats.damageInflictedPercent + 15,
+    };
+  }
+
+  if (activeRunes.aquatic) {
+    nextStats = {
+      ...nextStats,
+      healsPerformedPercent: (nextStats.healsPerformedPercent ?? 0) + 15,
+    };
+  }
+
+  if (activeRunes.telluric) {
+    nextStats = {
+      ...nextStats,
+      elementalResistance: (nextStats.elementalResistance ?? 0) + 75,
+    };
+  }
+
+  if (activeRunes.aerial) {
+    nextStats = {
+      ...nextStats,
+      range: (nextStats.range ?? 0) + 2,
+    };
+  }
+
+  return nextStats;
 }
 
 function createClassState(character: SimulationOptions["character"]): ClassTurnState {
@@ -374,7 +400,7 @@ function applyInitialPassives(
         nextResources = addResource(nextResources, effect.resource, effect.amount);
       }
 
-      if (effect.type === "statModifier") {
+      if (effect.type === "statModifier" && shouldApplyInitialPassiveStatModifier(passive.id, effect)) {
         const modification = applyStatModifier(nextStats, effect);
         nextStats = modification?.stats ?? nextStats;
       }
@@ -382,6 +408,26 @@ function applyInitialPassives(
   }
 
   return { stats: nextStats, resources: nextResources };
+}
+
+function shouldApplyInitialPassiveStatModifier(passiveId: string, effect: StatModifierEffect): boolean {
+  if (
+    passiveId === "carnage"
+    && effect.stat === "damageInflictedPercent"
+    && effect.note === "Aux cibles ayant de l'Armure."
+  ) {
+    return false;
+  }
+
+  if (
+    passiveId === "inspiration"
+    && effect.stat === "damageInflictedPercent"
+    && effect.note === "Aux combattants ayant plus d'Initiative."
+  ) {
+    return false;
+  }
+
+  return true;
 }
 
 function createHuppermageRuneState(
@@ -579,6 +625,29 @@ function validateHuppermageClassAction(
     };
   }
 
+  if (targetKind === "emptyCell" && huppermageState.feuFolletsActive >= getFeuFolletMaximum(huppermageState)) {
+    return {
+      type: "invalidClassStateAction" as const,
+      actionIndex,
+      spellId: spell.id,
+      message: `Spell '${spell.id}' cannot place more active Feu-Follets.`,
+      source: spell.metadata.sources[0],
+    };
+  }
+
+  const feuFolletCastLimit = getFeuFolletCastLimit(huppermageState);
+  if (targetKind === "emptyCell" && feuFolletCastLimit !== undefined && (state.castsBySpellId[spell.id] ?? 0) >= feuFolletCastLimit) {
+    return {
+      type: "castLimitExceeded" as const,
+      actionIndex,
+      spellId: spell.id,
+      required: feuFolletCastLimit,
+      available: state.castsBySpellId[spell.id] ?? 0,
+      message: `Spell '${spell.id}' exceeds Feu-Follet max casts per turn (${feuFolletCastLimit}).`,
+      source: spell.metadata.sources[0],
+    };
+  }
+
   if (targetKind === "feuFollet" && huppermageState.feuFolletsActive <= 0) {
     return {
       type: "invalidClassStateAction" as const,
@@ -600,6 +669,14 @@ function validateHuppermageClassAction(
   }
 
   return undefined;
+}
+
+function getFeuFolletMaximum(huppermageState: NonNullable<ClassTurnState["huppermage"]>): number {
+  return huppermageState.activePassives.includes("nouveau-souffle") ? 1 : 2;
+}
+
+function getFeuFolletCastLimit(huppermageState: NonNullable<ClassTurnState["huppermage"]>): number | undefined {
+  return huppermageState.activePassives.includes(SAUVEGARDE_RUNIQUE_PASSIVE_ID) ? 1 : undefined;
 }
 
 function isEntityTargetKind(targetKind: SimulationOptions["sequence"]["actions"][number]["target"]["kind"] | undefined): boolean {
@@ -663,6 +740,7 @@ function applyFeuFolletAction(
   let feuFolletStoredRunes = [...previousHuppermageState.feuFolletStoredRunes.map((storedRunes) => [...storedRunes])];
   let feuFolletStoredLastRunes = [...previousHuppermageState.feuFolletStoredLastRunes];
   let temporaryUnlockedSpellElement = previousHuppermageState.temporaryUnlockedSpellElement;
+  let nextClassState = classState;
 
   if (targetKind === "emptyCell") {
     const storedRune = getFeuFolletStoredRune(previousHuppermageState);
@@ -690,9 +768,10 @@ function applyFeuFolletAction(
   if (targetKind === "feuFollet") {
     const [recoveredRunes = [], ...remainingStoredRunes] = feuFolletStoredRunes;
     const [recoveredLastRune = null, ...remainingStoredLastRunes] = feuFolletStoredLastRunes;
+    const shouldRecoverRune = !previousHuppermageState.activePassives.includes("plenitude");
     feuFolletStoredRunes = remainingStoredRunes;
     feuFolletStoredLastRunes = remainingStoredLastRunes;
-    if (recoveredRunes.length > 0) {
+    if (shouldRecoverRune && recoveredRunes.length > 0) {
       const lastGeneratedRuneBefore = runes.lastGeneratedRune;
       runes = applyRecoveredRunes(runes, recoveredRunes);
       appliedEffects.push({
@@ -704,7 +783,7 @@ function applyFeuFolletAction(
       });
     }
 
-    const unlockedRune = recoveredRunes.length > 0 ? runes.lastGeneratedRune : recoveredLastRune;
+    const unlockedRune = shouldRecoverRune && recoveredRunes.length > 0 ? runes.lastGeneratedRune : recoveredLastRune;
     if (unlockedRune) {
       temporaryUnlockedSpellElement = RUNE_TO_ELEMENT[unlockedRune];
       appliedEffects.push({
@@ -713,7 +792,7 @@ function applyFeuFolletAction(
         source: "feuFollet",
       });
     }
-    if (recoveredLastRune) {
+    if (shouldRecoverRune && recoveredLastRune) {
       runes = {
         ...runes,
         active: {
@@ -722,6 +801,30 @@ function applyFeuFolletAction(
         },
       };
     }
+
+    if (!shouldRecoverRune) {
+      nextClassState = {
+        ...nextClassState,
+        huppermage: {
+          ...previousHuppermageState,
+          runes,
+          feuFolletsActive: after,
+          feuFolletStoredRunes,
+          feuFolletStoredLastRunes,
+          temporaryUnlockedSpellElement,
+        },
+      };
+      const abundance = addAbundance(nextClassState, 25, "huppermageClassMechanic");
+      nextClassState = abundance.classState;
+      appliedEffects.push(...abundance.appliedEffects);
+    }
+  }
+
+  if (nextClassState !== classState) {
+    return {
+      classState: nextClassState,
+      appliedEffects,
+    };
   }
 
   return {
@@ -738,6 +841,131 @@ function applyFeuFolletAction(
     },
     appliedEffects,
   };
+}
+
+function applyCycleElementaire(
+  spell: ReturnType<typeof findSpell>,
+  classState: ClassTurnState,
+  resources: TurnState["remainingResources"],
+): { classState: ClassTurnState; resources: TurnState["remainingResources"]; appliedEffects: AppliedEffect[] } {
+  if (!spell || spell.id !== "cycle-elementaire") {
+    return { classState, resources, appliedEffects: [] };
+  }
+
+  const huppermageState = getHuppermageState(classState);
+  const lastGeneratedRune = huppermageState.runes.lastGeneratedRune;
+  if (!lastGeneratedRune) {
+    return { classState, resources, appliedEffects: [] };
+  }
+
+  const wasLastRuneActive = huppermageState.runes.active[lastGeneratedRune];
+  const restoredRune = wasLastRuneActive
+    ? OPPOSITE_RUNE[lastGeneratedRune]
+    : lastGeneratedRune;
+  const activeRunes = {
+    ...huppermageState.runes.active,
+  };
+
+  if (wasLastRuneActive) {
+    activeRunes[lastGeneratedRune] = false;
+  }
+
+  const preparedClassState = {
+    ...classState,
+    huppermage: {
+      ...huppermageState,
+      runes: {
+        active: activeRunes,
+        lastGeneratedRune: huppermageState.runes.lastGeneratedRune,
+      },
+    },
+  };
+  const runeGeneration = applyGeneratedRune(preparedClassState, resources, restoredRune, "cycleElementaire");
+  let nextClassState = runeGeneration.classState;
+  const appliedEffects = [...runeGeneration.appliedEffects];
+
+  if (wasLastRuneActive && huppermageState.activePassives.includes("combinaison-elementaire")) {
+    const abundance = addAbundance(nextClassState, 15, "huppermageClassMechanic");
+    nextClassState = abundance.classState;
+    appliedEffects.push(...abundance.appliedEffects);
+  }
+
+  return {
+    classState: nextClassState,
+    resources: runeGeneration.resources,
+    appliedEffects,
+  };
+}
+
+function applyGeneratedRune(
+  classState: ClassTurnState,
+  resources: TurnState["remainingResources"],
+  generatedRune: Rune,
+  source: "elementalSpellCast" | "cycleElementaire",
+): { classState: ClassTurnState; resources: TurnState["remainingResources"]; appliedEffects: AppliedEffect[] } {
+  const previousHuppermageState = getHuppermageState(classState);
+  const before = previousHuppermageState.runes.active[generatedRune];
+  if (before) {
+    return { classState, resources, appliedEffects: [] };
+  }
+
+  const shouldGrantAp = !previousHuppermageState.runeApGainsThisTurn[generatedRune];
+  let nextResources = resources;
+  let nextClassState = {
+    ...classState,
+    huppermage: {
+      ...previousHuppermageState,
+      runes: {
+        active: {
+          ...previousHuppermageState.runes.active,
+          [generatedRune]: true,
+        },
+        lastGeneratedRune: generatedRune,
+      },
+      runeApGainsThisTurn: {
+        ...previousHuppermageState.runeApGainsThisTurn,
+        [generatedRune]: true,
+      },
+    },
+  };
+  const appliedEffects: AppliedEffect[] = [
+    {
+      type: "runeGenerated",
+      rune: generatedRune,
+      before,
+      after: true,
+      source,
+    },
+  ];
+
+  if (shouldGrantAp) {
+    const beforeAp = nextResources.ap;
+    nextResources = addResource(nextResources, "ap", 1);
+    appliedEffects.push({
+      type: "resourceDelta",
+      resource: "ap",
+      amount: 1,
+      before: beforeAp,
+      after: nextResources.ap,
+      source: "huppermageClassMechanic",
+    });
+  }
+
+  if (getHuppermageState(nextClassState).activePassives.includes("antithese")) {
+    const beforeBq = nextResources.bq;
+    const amount = applyBqGainMultiplier(20, getHuppermageState(nextClassState));
+    nextResources = addResource(nextResources, "bq", amount);
+    appliedEffects.push({
+      type: "resourceDelta",
+      resource: "bq",
+      amount,
+      before: beforeBq,
+      after: nextResources.bq,
+      source: "huppermageClassMechanic",
+    });
+  }
+
+  return { classState: nextClassState, resources: nextResources, appliedEffects };
 }
 
 function isFeuFolletSpell(spell: NonNullable<ReturnType<typeof findSpell>>): boolean {

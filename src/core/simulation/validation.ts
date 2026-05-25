@@ -1,6 +1,6 @@
 import type { CatalogEntry, Resource, SpellCost } from "../catalog/types.ts";
 import { getCostAmount } from "./resources.ts";
-import type { ResourcePool, SimulationViolation, TurnState } from "./types.ts";
+import type { Action, ResourcePool, SimulationViolation, TurnState } from "./types.ts";
 
 const resources: Resource[] = ["ap", "mp", "wp", "bq"];
 
@@ -14,6 +14,7 @@ export function validateSpellAction(input: {
   actionIndex: number;
   state: TurnState;
   effectiveCost?: SpellCost;
+  action?: Action;
 }): SimulationViolation | undefined {
   if (!input.spell) {
     return {
@@ -39,7 +40,8 @@ export function validateSpellAction(input: {
     return resourceViolation;
   }
 
-  return validateCastLimit(input.spell, input.state, input.actionIndex);
+  return validateTarget(input.spell, input.action, input.actionIndex)
+    ?? validateCastLimit(input.spell, input.state, input.actionIndex);
 }
 
 function validateResources(
@@ -66,6 +68,30 @@ function validateResources(
   }
 
   return undefined;
+}
+
+function validateTarget(
+  spell: CatalogEntry,
+  action: Action | undefined,
+  actionIndex: number,
+): SimulationViolation | undefined {
+  const targetConstraint = spell.constraints.find((constraint) => constraint.type === "requiresTarget");
+  if (!targetConstraint || targetConstraint.type !== "requiresTarget") {
+    return undefined;
+  }
+
+  const actualTarget = action?.target?.kind;
+  if (actualTarget === targetConstraint.target) {
+    return undefined;
+  }
+
+  return {
+    type: "invalidTarget",
+    actionIndex,
+    spellId: spell.id,
+    message: `Spell '${spell.id}' requires target '${targetConstraint.target}'.`,
+    source: spell.metadata.sources[0],
+  };
 }
 
 function validateCastLimit(

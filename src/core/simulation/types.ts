@@ -133,6 +133,7 @@ export type SimulationViolationType =
   | "castLimitExceeded"
   | "unsupportedEntryKind"
   | "invalidClassStateAction"
+  | "invalidTarget"
   | "deckLimitExceeded";
 
 export type SimulationViolation = {
@@ -167,7 +168,7 @@ export type AppliedEffect =
       rune: Rune;
       before: boolean;
       after: boolean;
-      source: "elementalSpellCast";
+      source: "elementalSpellCast" | "cycleElementaire";
     }
   | {
       type: "runeConsumed";
