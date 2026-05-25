@@ -51,6 +51,41 @@ test("contains conditional effects and passive/class-mechanic entries", () => {
   assert.equal(carnage?.kind, "passive");
 });
 
+test("contains the complete Wakfuli Huppermage passive list", () => {
+  const expectedPassiveIds = [
+    "evasion",
+    "dynamo",
+    "antithese",
+    "interception",
+    "distension-elementaire",
+    "liaison-lumineuse",
+    "inspiration",
+    "plenitude",
+    "universalite",
+    "motivation",
+    "extension-des-sens",
+    "profusion-runique",
+    "absorption-quadramentale",
+    "refraction-elementaire",
+    "medecine",
+    "altruisme-de-lame",
+    "nouveau-souffle",
+    "rock",
+    "essor-de-lame",
+    "pulsation",
+    "carnage",
+    "sauvegarde-runique",
+    "fluctuation",
+    "initiative-de-lame",
+    "combinaison-elementaire",
+    "transcendance-runique",
+  ].sort();
+
+  const passiveIds = getHuppermagePassives().map((entry) => entry.id).sort();
+
+  assert.deepEqual(passiveIds, expectedPassiveIds);
+});
+
 test("records unsupported mechanics explicitly", () => {
   const resonance = getHuppermageEntry("resonance");
   assert.ok(

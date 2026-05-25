@@ -91,6 +91,22 @@ function stablePassive(source: ReturnType<typeof screenshot>, notes: string[] = 
   };
 }
 
+const wakfuliSource = manual("Wakfuli API /api/v1/spells/huppermage, releve 2026-05-23");
+
+function wakfuliPassive(observedLevel: number, notes: string[] = []): CatalogMetadata {
+  return {
+    status: "extracted",
+    normalizedLevel: 200,
+    observedLevel,
+    valuesStableAtLevel200: true,
+    sources: [wakfuliSource],
+    extractionNotes: [
+      "Passif ajoute depuis Wakfuli pour completer les scans Huppermage.",
+      ...notes,
+    ],
+  };
+}
+
 function runeCondition(rune: Rune) {
   return { type: "hasRune" as const, rune };
 }
@@ -393,11 +409,11 @@ const activeSpellEntries: DslEntry[] = [
     metadata: extracted(screenshots.completedDetails1),
   }),
   spell("resonance", {
-    name: "Resonance",
+    name: "Résonance",
     level: 200,
     element: "light",
     cost: cost({ ap: 4 }),
-    range: range(1, 6, { lineOfSight: true, modifiable: true }),
+    range: range(1, 3, { lineOfSight: true, modifiable: true }),
     effects: [
       damage({ element: "light", base: 100, note: "Zone." }),
       when(runeCondition("incandescent"), [zone({ shape: "unknown", note: "La zone devient l'icone affichee." })]),
@@ -418,7 +434,7 @@ const activeSpellEntries: DslEntry[] = [
     range: range(1),
     effects: [
       damage({ element: "light", base: 42, times: 2, note: "Zone." }),
-      unsupported("Par Rune: vole 30% des Dommages infliges."),
+      tag("lifeStealPercentPerRune", 30),
     ],
     constraints: [],
     tags: ["light", "life-steal"],
@@ -450,7 +466,7 @@ const activeSpellEntries: DslEntry[] = [
     effects: [
       damage({ element: "light", base: 108 }),
       when(runeCondition("incandescent"), [
-        unsupported("0.5% Dommages supplementaires par %BQ restante."),
+        tag("damageInflictedPercentPerBqPercentRemaining", 0.5),
         tag("consumeRune", "incandescent"),
       ]),
     ],
@@ -482,7 +498,7 @@ const activeSpellEntries: DslEntry[] = [
     effects: [
       damage({ element: "fire", base: 54 }),
       when(runeCondition("incandescent"), [
-        unsupported("A la fin du tour de la cible, elle subit 10% de dommages supplementaires dans l'element de la derniere rune generee (1 tour)."),
+        tag("delayedDamagePercentOfActionDamage", 10),
         tag("consumeRune", "incandescent"),
       ]),
     ],
@@ -699,6 +715,56 @@ const passiveEntries: DslEntry[] = [
     tags: ["class-mechanic", "heart", "air"],
     metadata: extracted(screenshots.coeurs, 1),
   }),
+  passive("evasion", {
+    name: "Evasion",
+    level: 10,
+    effects: [
+      unsupported("100 % du niveau en Esquive."),
+      on("casterDodgesWithLosses", [unsupported("35 % du niveau en Esquive pendant 3 tours.")]),
+    ],
+    constraints: [],
+    tags: ["passive", "mobility"],
+    metadata: wakfuliPassive(10),
+  }),
+  passive("interception", {
+    name: "Interception",
+    level: 15,
+    effects: [
+      unsupported("100 % du niveau en Tacle."),
+      on("casterLocksFighter", [unsupported("35 % du niveau en Tacle pendant 3 tours.")]),
+    ],
+    constraints: [],
+    tags: ["passive", "lock"],
+    metadata: wakfuliPassive(15),
+  }),
+  passive("inspiration", {
+    name: "Inspiration",
+    level: 25,
+    effects: [
+      unsupported("50 % du niveau en Initiative."),
+      statModifier({
+        stat: "damageInflictedPercent",
+        amount: 10,
+        target: "caster",
+        note: "Aux combattants ayant plus d'Initiative.",
+      }),
+    ],
+    constraints: [],
+    tags: ["passive", "initiative", "damage"],
+    metadata: wakfuliPassive(25),
+  }),
+  passive("motivation", {
+    name: "Motivation",
+    level: 35,
+    effects: [
+      resourceDelta({ resource: "ap", amount: 1 }),
+      statModifier({ stat: "damageInflictedPercent", amount: -20, target: "caster" }),
+      statModifier({ stat: "willpower", amount: 10, target: "caster" }),
+    ],
+    constraints: [],
+    tags: ["passive", "resource", "willpower"],
+    metadata: wakfuliPassive(35),
+  }),
   passive("extension-des-sens", {
     name: "Extension des sens",
     level: 110,
@@ -798,6 +864,18 @@ const passiveEntries: DslEntry[] = [
     tags: ["passive", "heart"],
     metadata: stablePassive(screenshots.completedDetails1),
   }),
+  passive("medecine", {
+    name: "Medecine",
+    level: 55,
+    effects: [
+      statModifier({ stat: "healsPerformedPercent", amount: 30, target: "caster" }),
+      unsupported("25 % Armure donnee."),
+      statModifier({ stat: "damageInflictedPercent", amount: -15, target: "caster" }),
+    ],
+    constraints: [],
+    tags: ["passive", "heal", "armor"],
+    metadata: wakfuliPassive(55),
+  }),
   passive("altruisme-de-lame", {
     name: "Altruisme de l'ame",
     level: 110,
@@ -811,6 +889,40 @@ const passiveEntries: DslEntry[] = [
     constraints: [],
     tags: ["passive", "heal", "heart"],
     metadata: stablePassive(screenshots.completedDetails1),
+  }),
+  passive("rock", {
+    name: "Rock",
+    level: 65,
+    effects: [
+      unsupported("60 % Points de Vie."),
+      statModifier({ stat: "healsReceivedPercent", amount: 25, target: "caster" }),
+      statModifier({ stat: "damageInflictedPercent", amount: -25, target: "caster" }),
+      statModifier({ stat: "healsPerformedPercent", amount: -50, target: "caster" }),
+    ],
+    constraints: [],
+    tags: ["passive", "survivability"],
+    metadata: wakfuliPassive(65),
+  }),
+  passive("essor-de-lame", {
+    name: "Essor de l'ame",
+    level: 65,
+    effects: [
+      unsupported("Le Coeur de Lumiere donne des resistances dans les autres elements."),
+    ],
+    constraints: [],
+    tags: ["passive", "heart", "resistance"],
+    metadata: wakfuliPassive(65, ["Wakfuli ne fournit pas d'effet chiffre dans display_effects pour ce passif."]),
+  }),
+  passive("pulsation", {
+    name: "Pulsation",
+    level: 70,
+    effects: [
+      on("summonsFeuFollet", [movement({ mode: "pull", target: "target", note: "Le Feu-Follet attire les combattants lorsqu'il est pose." })]),
+      on("consumesFeuFollet", [movement({ mode: "push", target: "target", note: "Le Feu-Follet repousse les combattants lorsqu'il est consomme." })]),
+    ],
+    constraints: [],
+    tags: ["passive", "feu-follet", "movement"],
+    metadata: wakfuliPassive(70, ["Wakfuli ne fournit pas d'effet chiffre dans display_effects pour ce passif."]),
   }),
   passive("combinaison-elementaire", {
     name: "Combinaison Elementaire",
@@ -926,6 +1038,18 @@ const passiveEntries: DslEntry[] = [
     constraints: [],
     tags: ["passive", "bq", "removal"],
     metadata: stablePassive(screenshots.passives2),
+  }),
+  passive("fluctuation", {
+    name: "Fluctuation",
+    level: 80,
+    effects: [
+      on("casterDodgesFighter", [unsupported("Applique Fluctuation; avec pertes et sans perte sont distingues par Wakfuli.")]),
+      on("casterLocksFighter", [unsupported("Applique Fluctuation.")]),
+      on("fighterEndsTurnInCasterContact", [unsupported("Applique Fluctuation.")]),
+    ],
+    constraints: [],
+    tags: ["passive", "mobility", "lock"],
+    metadata: wakfuliPassive(80),
   }),
   passive("profusion-runique", {
     name: "Profusion Runique",
