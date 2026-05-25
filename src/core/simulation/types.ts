@@ -13,11 +13,21 @@ export type HuppermageRuneState = {
 
 export type HuppermageTurnState = {
   runes: HuppermageRuneState;
+  runeApGainsThisTurn: Record<Rune, boolean>;
+  abundanceLevel: number;
   feuFolletsActive: number;
   feuFolletStoredRunes: Rune[][];
+  feuFolletStoredLastRunes: Array<Rune | null>;
+  temporaryUnlockedSpellElement: Element | null;
+  usedSpellIds: string[];
   activePassives: string[];
   activeHeart: HuppermageHeart | null;
   waterHeartLastSpellKind: HuppermageWaterHeartSpellKind | null;
+  bqMax: number;
+  storedBq: number;
+  haloChatoyantMarks: number;
+  deckSpellLimit: number;
+  passiveLimit: number;
 };
 
 export type ClassTurnState = {
@@ -42,6 +52,8 @@ export type ActionTarget = {
 
 export type BaseStats = {
   level?: number;
+  hitPoints?: number;
+  hitPointsPercent?: number;
   generalMastery: number;
   elementalMastery: Partial<Record<Element, number>>;
   meleeMastery?: number;
@@ -52,6 +64,20 @@ export type BaseStats = {
   healingMastery?: number;
   damageInflictedPercent: number;
   healsPerformedPercent?: number;
+  healsReceivedPercent?: number;
+  armorReceivedPercent?: number;
+  armorGivenPercent?: number;
+  elementalResistance?: number;
+  rearResistance?: number;
+  criticalResistance?: number;
+  range?: number;
+  willpower?: number;
+  criticalHitPercent?: number;
+  parry?: number;
+  lock?: number;
+  dodge?: number;
+  initiative?: number;
+  indirectDamagePercent?: number;
 };
 
 export type SimulatedCharacter = {
@@ -63,11 +89,22 @@ export type SimulatedCharacter = {
     huppermage?: {
       runes?: Partial<Record<Rune, boolean>>;
       lastGeneratedRune?: Rune | null;
+      runeApGainsThisTurn?: Partial<Record<Rune, boolean>>;
+      abundanceLevel?: number;
       feuFolletsActive?: number;
       feuFolletStoredRunes?: Rune[][];
+      feuFolletStoredLastRunes?: Array<Rune | null>;
+      temporaryUnlockedSpellElement?: Element | null;
+      usedSpellIds?: string[];
       activePassives?: string[];
       activeHeart?: HuppermageHeart | null;
       waterHeartLastSpellKind?: HuppermageWaterHeartSpellKind | null;
+      bqMax?: number;
+      storedBq?: number;
+      haloChatoyantMarks?: number;
+      convertWpToBq?: boolean;
+      deckSpellLimit?: number;
+      passiveLimit?: number;
     };
   };
 };
@@ -87,7 +124,8 @@ export type SimulationViolationType =
   | "insufficientResource"
   | "castLimitExceeded"
   | "unsupportedEntryKind"
-  | "invalidClassStateAction";
+  | "invalidClassStateAction"
+  | "deckLimitExceeded";
 
 export type SimulationViolation = {
   type: SimulationViolationType;
@@ -114,7 +152,7 @@ export type AppliedEffect =
       amount: number;
       before: number;
       after: number;
-      source: "spellEffect";
+      source: "spellEffect" | "huppermageClassMechanic";
     }
   | {
       type: "runeGenerated";
@@ -122,6 +160,28 @@ export type AppliedEffect =
       before: boolean;
       after: boolean;
       source: "elementalSpellCast";
+    }
+  | {
+      type: "runeConsumed";
+      runes: Rune[];
+      source: "spellEffect";
+    }
+  | {
+      type: "abundanceChanged";
+      amount: number;
+      before: number;
+      after: number;
+      source: "huppermageClassMechanic" | "spellEffect";
+    }
+  | {
+      type: "heartChanged";
+      heart: HuppermageHeart;
+      source: "coeurDeLumiere";
+    }
+  | {
+      type: "temporarySpellElementUnlocked";
+      element: Element;
+      source: "feuFollet";
     }
   | {
       type: "feuFolletChanged";
@@ -158,6 +218,29 @@ export type AppliedEffect =
       before: number;
       after: number;
       source: "spellEffect";
+    }
+  | {
+      type: "lifeSteal";
+      amount: number;
+      percent: number;
+      sourceDamage: number;
+      source: "spellEffect";
+    }
+  | {
+      type: "haloMarksChanged";
+      before: number;
+      after: number;
+      triggered: number;
+      source: "spellEffect";
+    }
+  | {
+      type: "turnEndBq";
+      amount: number;
+      before: number;
+      after: number;
+      storedBefore: number;
+      storedAfter: number;
+      source: "huppermageClassMechanic";
     };
 
 export type ActionResult = {
@@ -167,6 +250,8 @@ export type ActionResult = {
   damage: number;
   resourceBefore: ResourcePool;
   resourceAfter: ResourcePool;
+  statsBefore: BaseStats;
+  statsAfter: BaseStats;
   classStateBefore: ClassTurnState;
   classStateAfter: ClassTurnState;
   appliedEffects: AppliedEffect[];
@@ -179,6 +264,7 @@ export type TurnState = {
   castsBySpellId: Record<string, number>;
   totalDamage: number;
   actionLog: ActionResult[];
+  turnEndEffects: AppliedEffect[];
 };
 
 export type SimulationResult = {
@@ -195,6 +281,7 @@ export type SimulationOptions = {
   character: SimulatedCharacter;
   sequence: ActionSequence;
   defaultActionContext?: Partial<ActionContext>;
+  includeTurnEnd?: boolean;
 };
 
 export type DamageFormulaBreakdown = {

@@ -1,4 +1,4 @@
-import type { CatalogEntry, Resource } from "../catalog/types.ts";
+import type { CatalogEntry, Resource, SpellCost } from "../catalog/types.ts";
 import { getCostAmount } from "./resources.ts";
 import type { ResourcePool, SimulationViolation, TurnState } from "./types.ts";
 
@@ -13,6 +13,7 @@ export function validateSpellAction(input: {
   spellId: string;
   actionIndex: number;
   state: TurnState;
+  effectiveCost?: SpellCost;
 }): SimulationViolation | undefined {
   if (!input.spell) {
     return {
@@ -33,7 +34,7 @@ export function validateSpellAction(input: {
     };
   }
 
-  const resourceViolation = validateResources(input.spell, input.state.remainingResources, input.actionIndex);
+  const resourceViolation = validateResources(input.spell, input.effectiveCost ?? input.spell.cost, input.state.remainingResources, input.actionIndex);
   if (resourceViolation) {
     return resourceViolation;
   }
@@ -43,11 +44,12 @@ export function validateSpellAction(input: {
 
 function validateResources(
   spell: CatalogEntry,
+  cost: SpellCost | undefined,
   remainingResources: ResourcePool,
   actionIndex: number,
 ): SimulationViolation | undefined {
   for (const resource of resources) {
-    const required = getCostAmount(spell.cost, resource);
+    const required = getCostAmount(cost, resource);
     const available = remainingResources[resource];
     if (required > available) {
       return {

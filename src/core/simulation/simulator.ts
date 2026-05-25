@@ -1,6 +1,6 @@
-import type { Effect, Element, Rune, StatModifierEffect } from "../catalog/types.ts";
+import type { CatalogEntry, DamageEffect, Effect, Element, Resource, Rune, SpellCost, StatModifierEffect } from "../catalog/types.ts";
 import { computeRawDamage, resolveActionContext, roundDamage } from "./damage.ts";
-import { addResource, cloneResources, payCost } from "./resources.ts";
+import { addResource, cloneResources, getCostAmount, payCost } from "./resources.ts";
 import { findSpell, validateSpellAction } from "./validation.ts";
 import type {
   ActionContext,
@@ -19,18 +19,39 @@ import type {
 const RUNE_APPLICATION_ORDER: Rune[] = ["incandescent", "aquatic", "telluric", "aerial"];
 const SAUVEGARDE_RUNIQUE_PASSIVE_ID = "sauvegarde-runique";
 const EXTENSION_DES_SENS_PASSIVE_ID = "extension-des-sens";
+const DEFAULT_DECK_SPELL_LIMIT = 12;
+const DEFAULT_PASSIVE_LIMIT = 6;
+const RUNE_TO_HEART: Record<Rune, HuppermageHeart> = {
+  incandescent: "fire",
+  aquatic: "water",
+  telluric: "earth",
+  aerial: "air",
+};
+const RUNE_TO_ELEMENT: Record<Rune, Element> = RUNE_TO_HEART;
+
+type EffectApplicationContext = {
+  action: SimulationOptions["sequence"]["actions"][number];
+  actionContext: ActionContext;
+  classState: ClassTurnState;
+  damageInflictedBonusPercent: number;
+  resources: TurnState["remainingResources"];
+  spell: CatalogEntry;
+};
 
 export function simulateTurn(options: SimulationOptions): SimulationResult {
-  let state = createInitialTurnState(options.character);
+  let state = createInitialTurnState(options.character, options.catalog);
 
   for (const [actionIndex, action] of options.sequence.actions.entries()) {
     const spell = findSpell(options.catalog, action.spellId);
+    const effectiveCost = spell ? resolveEffectiveCost(spell, state, action) : undefined;
     const violation = validateSpellAction({
       spell,
       spellId: action.spellId,
       actionIndex,
       state,
-    }) ?? validateHuppermageClassAction(spell, action, actionIndex, state);
+      effectiveCost,
+    }) ?? validateHuppermageClassAction(spell, action, actionIndex, state)
+      ?? validateHuppermageDeckAction(spell, actionIndex, state);
 
     if (violation || !spell) {
       return {
@@ -45,7 +66,8 @@ export function simulateTurn(options: SimulationOptions): SimulationResult {
 
     const resourceBefore = cloneResources(state.remainingResources);
     const classStateBefore = cloneClassState(state.classState);
-    let nextResources = payCost(state.remainingResources, spell.cost);
+    const statsBefore = cloneStats(state.currentStats);
+    let nextResources = payCost(state.remainingResources, effectiveCost);
     let nextStats = cloneStats(state.currentStats);
     let nextClassState = cloneClassState(state.classState);
     const actionContext = resolveActionContext({
@@ -55,48 +77,133 @@ export function simulateTurn(options: SimulationOptions): SimulationResult {
     const appliedEffects: AppliedEffect[] = [];
     let actionDamage = 0;
 
+    const preparedState = applyPreSpellState(spell, nextStats, nextResources, nextClassState, actionIndex);
+    nextStats = preparedState.stats;
+    nextResources = preparedState.resources;
+    nextClassState = preparedState.classState;
+    appliedEffects.push(...preparedState.appliedEffects);
+
+    const damageBonusApplication = resolveSpellDamageBonus(spell, nextResources, nextClassState, action);
+    appliedEffects.push(...damageBonusApplication.appliedEffects);
+
+    const effectContext = {
+      action,
+      actionContext,
+      classState: nextClassState,
+      damageInflictedBonusPercent: damageBonusApplication.damageInflictedBonusPercent,
+      resources: nextResources,
+      spell,
+    };
+
     for (const effect of spell.effects) {
-      const effectApplication = applySupportedEffect(effect, nextStats, nextResources, actionContext);
+      const effectApplication = applySupportedEffect(effect, nextStats, nextResources, actionContext, effectContext);
       nextResources = effectApplication.resources;
       nextStats = effectApplication.stats;
       actionDamage = roundDamage(actionDamage + effectApplication.damage);
       appliedEffects.push(...effectApplication.appliedEffects);
     }
 
-    const extensionApplication = applyExtensionDesSens(spell, nextClassState, nextResources);
+    if (spell.id === "orbes-luisants") {
+      const abundance = addAbundance(nextClassState, getActiveRuneCount(getHuppermageState(nextClassState)) * 10, "spellEffect");
+      nextClassState = abundance.classState;
+      appliedEffects.push(...abundance.appliedEffects);
+    }
+
+    const spellDamageMechanics = applySpellDamageMechanics(spell, actionDamage, nextStats, nextResources, nextClassState, actionContext, action);
+    actionDamage = roundDamage(actionDamage + spellDamageMechanics.damage);
+    nextClassState = spellDamageMechanics.classState;
+    appliedEffects.push(...spellDamageMechanics.appliedEffects);
+
+    const removalBqApplication = applyAbsorptionQuadramentale(spell, action, nextClassState, nextResources);
+    nextResources = removalBqApplication.resources;
+    appliedEffects.push(...removalBqApplication.appliedEffects);
+
+    const extensionApplication = applyExtensionDesSens(spell, effectiveCost, nextClassState, nextResources);
     nextResources = extensionApplication.resources;
     nextClassState = extensionApplication.classState;
     appliedEffects.push(...extensionApplication.appliedEffects);
+
+    const runeConsumption = applyRuneConsumption(spell.effects, nextClassState);
+    nextClassState = runeConsumption.classState;
+    appliedEffects.push(...runeConsumption.appliedEffects);
+    if (runeConsumption.consumedRunes.length > 0) {
+      const abundance = addAbundance(nextClassState, runeConsumption.consumedRunes.length * 15, "huppermageClassMechanic");
+      nextClassState = abundance.classState;
+      appliedEffects.push(...abundance.appliedEffects);
+    }
 
     const generatedRune = getGeneratedRuneFromElement(spell.element);
     if (generatedRune) {
       const previousHuppermageState = getHuppermageState(nextClassState);
       const before = previousHuppermageState.runes.active[generatedRune];
-      nextClassState = {
-        ...nextClassState,
-        huppermage: {
-          ...previousHuppermageState,
-          runes: {
-            active: {
-              ...previousHuppermageState.runes.active,
+      if (!before) {
+        const shouldGrantAp = !previousHuppermageState.runeApGainsThisTurn[generatedRune];
+        nextClassState = {
+          ...nextClassState,
+          huppermage: {
+            ...previousHuppermageState,
+            runes: {
+              active: {
+                ...previousHuppermageState.runes.active,
+                [generatedRune]: true,
+              },
+              lastGeneratedRune: generatedRune,
+            },
+            runeApGainsThisTurn: {
+              ...previousHuppermageState.runeApGainsThisTurn,
               [generatedRune]: true,
             },
-            lastGeneratedRune: generatedRune,
           },
-        },
-      };
-      appliedEffects.push({
-        type: "runeGenerated",
-        rune: generatedRune,
-        before,
-        after: true,
-        source: "elementalSpellCast",
-      });
+        };
+        appliedEffects.push({
+          type: "runeGenerated",
+          rune: generatedRune,
+          before,
+          after: true,
+          source: "elementalSpellCast",
+        });
+
+        if (shouldGrantAp) {
+          const beforeAp = nextResources.ap;
+          nextResources = addResource(nextResources, "ap", 1);
+          appliedEffects.push({
+            type: "resourceDelta",
+            resource: "ap",
+            amount: 1,
+            before: beforeAp,
+            after: nextResources.ap,
+            source: "huppermageClassMechanic",
+          });
+        }
+
+        if (getHuppermageState(nextClassState).activePassives.includes("antithese")) {
+          const beforeBq = nextResources.bq;
+          const amount = applyBqGainMultiplier(20, getHuppermageState(nextClassState));
+          nextResources = addResource(nextResources, "bq", amount);
+          appliedEffects.push({
+            type: "resourceDelta",
+            resource: "bq",
+            amount,
+            before: beforeBq,
+            after: nextResources.bq,
+            source: "huppermageClassMechanic",
+          });
+        }
+      }
     }
 
     const feuFolletApplication = applyFeuFolletAction(spell, action, nextClassState);
     nextClassState = feuFolletApplication.classState;
     appliedEffects.push(...feuFolletApplication.appliedEffects);
+
+    const huppermageAfterAction = getHuppermageState(nextClassState);
+    nextClassState = {
+      ...nextClassState,
+      huppermage: {
+        ...huppermageAfterAction,
+        usedSpellIds: addUsedSpellId(huppermageAfterAction.usedSpellIds, spell, huppermageAfterAction),
+      },
+    };
 
     const actionResult: ActionResult = {
       actionIndex,
@@ -105,6 +212,8 @@ export function simulateTurn(options: SimulationOptions): SimulationResult {
       damage: actionDamage,
       resourceBefore,
       resourceAfter: cloneResources(nextResources),
+      statsBefore,
+      statsAfter: cloneStats(nextStats),
       classStateBefore,
       classStateAfter: cloneClassState(nextClassState),
       appliedEffects,
@@ -120,27 +229,91 @@ export function simulateTurn(options: SimulationOptions): SimulationResult {
       },
       totalDamage: roundDamage(state.totalDamage + actionDamage),
       actionLog: [...state.actionLog, actionResult],
+      turnEndEffects: state.turnEndEffects,
     };
   }
+
+  const finalizedState = options.includeTurnEnd ? applyTurnEnd(state) : state;
 
   return {
     valid: true,
     sequence: options.sequence,
-    totalDamage: state.totalDamage,
-    finalState: state,
-    breakdown: state.actionLog,
+    totalDamage: finalizedState.totalDamage,
+    finalState: finalizedState,
+    breakdown: finalizedState.actionLog,
     violations: [],
   };
 }
 
-function createInitialTurnState(character: SimulationOptions["character"]): TurnState {
+function createInitialTurnState(character: SimulationOptions["character"], catalog: CatalogEntry[]): TurnState {
+  const initialResources = character.classState?.huppermage?.convertWpToBq
+    ? addResource(character.resources, "bq", character.resources.wp * 75)
+    : cloneResources(character.resources);
+  const baseClassState = createClassState({ ...character, resources: initialResources });
+  const initialPassiveState = applyInitialPassives(
+    catalog,
+    getHuppermageState(baseClassState).activePassives,
+    cloneStats(character.stats),
+    initialResources,
+  );
+
   return {
-    remainingResources: cloneResources(character.resources),
-    classState: createClassState(character),
-    currentStats: cloneStats(character.stats),
+    remainingResources: initialPassiveState.resources,
+    classState: baseClassState,
+    currentStats: initialPassiveState.stats,
     castsBySpellId: {},
     totalDamage: 0,
     actionLog: [],
+    turnEndEffects: [],
+  };
+}
+
+function applyTurnEnd(state: TurnState): TurnState {
+  const huppermageState = getHuppermageState(state.classState);
+  if (!state.classState.huppermage) {
+    return state;
+  }
+
+  const before = state.remainingResources.bq;
+  const storedBefore = huppermageState.storedBq;
+  let nextResources = state.remainingResources;
+  let nextHuppermageState = huppermageState;
+  let amount = 0;
+
+  if (huppermageState.activeHeart) {
+    nextHuppermageState = {
+      ...huppermageState,
+      storedBq: huppermageState.storedBq + 75,
+    };
+  } else {
+    amount = applyBqGainMultiplier(100 + huppermageState.storedBq, huppermageState);
+    nextResources = addResource(state.remainingResources, "bq", amount);
+    nextHuppermageState = {
+      ...huppermageState,
+      storedBq: 0,
+    };
+  }
+
+  const turnEndEffects: AppliedEffect[] = [
+    {
+      type: "turnEndBq",
+      amount,
+      before,
+      after: nextResources.bq,
+      storedBefore,
+      storedAfter: nextHuppermageState.storedBq,
+      source: "huppermageClassMechanic",
+    },
+  ];
+
+  return {
+    ...state,
+    remainingResources: nextResources,
+    classState: {
+      ...state.classState,
+      huppermage: nextHuppermageState,
+    },
+    turnEndEffects,
   };
 }
 
@@ -155,16 +328,60 @@ function createClassState(character: SimulationOptions["character"]): ClassTurnS
         character.classState?.huppermage?.runes,
         character.classState?.huppermage?.lastGeneratedRune,
       ),
+      runeApGainsThisTurn: createRuneTracker(character.classState?.huppermage?.runeApGainsThisTurn),
+      abundanceLevel: character.classState?.huppermage?.abundanceLevel ?? 0,
       feuFolletsActive: character.classState?.huppermage?.feuFolletsActive ?? 0,
       feuFolletStoredRunes: normalizeFeuFolletStoredRunes(
         character.classState?.huppermage?.feuFolletsActive ?? 0,
         character.classState?.huppermage?.feuFolletStoredRunes,
       ),
+      feuFolletStoredLastRunes: normalizeFeuFolletStoredLastRunes(
+        character.classState?.huppermage?.feuFolletsActive ?? 0,
+        character.classState?.huppermage?.feuFolletStoredLastRunes,
+      ),
+      temporaryUnlockedSpellElement: character.classState?.huppermage?.temporaryUnlockedSpellElement ?? null,
+      usedSpellIds: character.classState?.huppermage?.usedSpellIds ?? [],
       activePassives: character.classState?.huppermage?.activePassives ?? [],
       activeHeart: character.classState?.huppermage?.activeHeart ?? null,
       waterHeartLastSpellKind: character.classState?.huppermage?.waterHeartLastSpellKind ?? null,
+      bqMax: character.classState?.huppermage?.bqMax
+        ?? Math.max(character.resources.bq, character.resources.wp * 75),
+      storedBq: character.classState?.huppermage?.storedBq ?? 0,
+      haloChatoyantMarks: character.classState?.huppermage?.haloChatoyantMarks ?? 0,
+      deckSpellLimit: character.classState?.huppermage?.deckSpellLimit ?? DEFAULT_DECK_SPELL_LIMIT,
+      passiveLimit: character.classState?.huppermage?.passiveLimit ?? DEFAULT_PASSIVE_LIMIT,
     },
   };
+}
+
+function applyInitialPassives(
+  catalog: CatalogEntry[],
+  activePassiveIds: string[],
+  stats: BaseStats,
+  resources: TurnState["remainingResources"],
+): { stats: BaseStats; resources: TurnState["remainingResources"] } {
+  let nextStats = stats;
+  let nextResources = resources;
+
+  for (const passiveId of activePassiveIds) {
+    const passive = catalog.find((entry) => entry.id === passiveId && entry.kind === "passive");
+    if (!passive) {
+      continue;
+    }
+
+    for (const effect of passive.effects) {
+      if (effect.type === "resourceDelta" && (!effect.target || effect.target === "caster")) {
+        nextResources = addResource(nextResources, effect.resource, effect.amount);
+      }
+
+      if (effect.type === "statModifier") {
+        const modification = applyStatModifier(nextStats, effect);
+        nextStats = modification?.stats ?? nextStats;
+      }
+    }
+  }
+
+  return { stats: nextStats, resources: nextResources };
 }
 
 function createHuppermageRuneState(
@@ -185,11 +402,21 @@ function createHuppermageRuneState(
 function getHuppermageState(classState: ClassTurnState): NonNullable<ClassTurnState["huppermage"]> {
   return classState.huppermage ?? {
     runes: createHuppermageRuneState(),
+    runeApGainsThisTurn: createRuneTracker(),
+    abundanceLevel: 0,
     feuFolletsActive: 0,
     feuFolletStoredRunes: [],
+    feuFolletStoredLastRunes: [],
+    temporaryUnlockedSpellElement: null,
+    usedSpellIds: [],
     activePassives: [],
     activeHeart: null,
     waterHeartLastSpellKind: null,
+    bqMax: 0,
+    storedBq: 0,
+    haloChatoyantMarks: 0,
+    deckSpellLimit: DEFAULT_DECK_SPELL_LIMIT,
+    passiveLimit: DEFAULT_PASSIVE_LIMIT,
   };
 }
 
@@ -198,13 +425,32 @@ function cloneClassState(classState: ClassTurnState): ClassTurnState {
     huppermage: classState.huppermage
         ? {
           runes: cloneHuppermageRuneState(classState.huppermage.runes),
+          runeApGainsThisTurn: { ...classState.huppermage.runeApGainsThisTurn },
+          abundanceLevel: classState.huppermage.abundanceLevel,
           feuFolletsActive: classState.huppermage.feuFolletsActive,
           feuFolletStoredRunes: classState.huppermage.feuFolletStoredRunes.map((storedRunes) => [...storedRunes]),
+          feuFolletStoredLastRunes: [...classState.huppermage.feuFolletStoredLastRunes],
+          temporaryUnlockedSpellElement: classState.huppermage.temporaryUnlockedSpellElement,
+          usedSpellIds: [...classState.huppermage.usedSpellIds],
           activePassives: [...classState.huppermage.activePassives],
           activeHeart: classState.huppermage.activeHeart,
           waterHeartLastSpellKind: classState.huppermage.waterHeartLastSpellKind,
+          bqMax: classState.huppermage.bqMax,
+          storedBq: classState.huppermage.storedBq,
+          haloChatoyantMarks: classState.huppermage.haloChatoyantMarks,
+          deckSpellLimit: classState.huppermage.deckSpellLimit,
+          passiveLimit: classState.huppermage.passiveLimit,
         }
       : undefined,
+  };
+}
+
+function createRuneTracker(runes: Partial<Record<Rune, boolean>> = {}): Record<Rune, boolean> {
+  return {
+    incandescent: runes.incandescent ?? false,
+    aquatic: runes.aquatic ?? false,
+    telluric: runes.telluric ?? false,
+    aerial: runes.aerial ?? false,
   };
 }
 
@@ -235,13 +481,88 @@ function getGeneratedRuneFromElement(element: Element | undefined): Rune | undef
   return undefined;
 }
 
+function resolveEffectiveCost(
+  spell: CatalogEntry,
+  state: TurnState,
+  action: SimulationOptions["sequence"]["actions"][number],
+): SpellCost {
+  const huppermageState = getHuppermageState(state.classState);
+  const activeRuneCount = getActiveRuneCount(huppermageState);
+  const cost = { ...(spell.cost ?? {}) };
+
+  for (const effect of spell.effects) {
+    applyCostTags(effect, cost, huppermageState, action);
+  }
+
+  if (cost.ap !== undefined) {
+    cost.ap = Math.max(0, cost.ap);
+  }
+  if (cost.mp !== undefined) {
+    cost.mp = Math.max(0, cost.mp);
+  }
+  if (cost.wp !== undefined) {
+    cost.wp = Math.max(0, cost.wp);
+  }
+  if (cost.bq !== undefined) {
+    cost.bq = Math.max(0, cost.bq);
+  }
+
+  function applyCostTags(
+    effect: Effect,
+    mutableCost: SpellCost,
+    currentHuppermageState: NonNullable<ClassTurnState["huppermage"]>,
+    currentAction: SimulationOptions["sequence"]["actions"][number],
+  ) {
+    if (effect.type === "tag" && effect.tag === "dynamicBqCostPerRune" && typeof effect.value === "number") {
+      mutableCost.bq = getCostAmount(mutableCost, "bq") + activeRuneCount * effect.value;
+    }
+
+    if (effect.type === "tag" && effect.tag === "additionalBqCostPerRune" && typeof effect.value === "number") {
+      mutableCost.bq = getCostAmount(mutableCost, "bq") + activeRuneCount * effect.value;
+    }
+
+    if (effect.type === "tag" && effect.tag === "increasingBqCostPerUseThisTurn" && typeof effect.value === "number") {
+      mutableCost.bq = getCostAmount(mutableCost, "bq") + (state.castsBySpellId[spell.id] ?? 0) * effect.value;
+    }
+
+    if (effect.type === "tag" && effect.tag === "costDelta" && typeof effect.value === "string") {
+      const [resource, amount] = effect.value.split(":") as [Resource, string];
+      if (resource === "ap" || resource === "mp" || resource === "wp" || resource === "bq") {
+        mutableCost[resource] = getCostAmount(mutableCost, resource) + Number(amount);
+      }
+    }
+
+    if (effect.type === "conditional" && isConditionMet(effect.condition, currentHuppermageState, currentAction)) {
+      for (const nestedEffect of effect.effects) {
+        applyCostTags(nestedEffect, mutableCost, currentHuppermageState, currentAction);
+      }
+    }
+  }
+
+  return cost;
+}
+
 function validateHuppermageClassAction(
   spell: ReturnType<typeof findSpell>,
   action: SimulationOptions["sequence"]["actions"][number],
   actionIndex: number,
   state: TurnState,
 ) {
-  if (!spell || !isFeuFolletSpell(spell) || action.target?.kind !== "feuFollet") {
+  if (!spell) {
+    return undefined;
+  }
+
+  if (spell.id === "coeur-de-lumiere" && !getHuppermageState(state.classState).runes.lastGeneratedRune) {
+    return {
+      type: "invalidClassStateAction" as const,
+      actionIndex,
+      spellId: spell.id,
+      message: `Spell '${spell.id}' requires a last generated rune.`,
+      source: spell.metadata.sources[0],
+    };
+  }
+
+  if (!isFeuFolletSpell(spell) || action.target?.kind !== "feuFollet") {
     return undefined;
   }
 
@@ -257,6 +578,31 @@ function validateHuppermageClassAction(
   }
 
   return undefined;
+}
+
+function validateHuppermageDeckAction(
+  spell: ReturnType<typeof findSpell>,
+  actionIndex: number,
+  state: TurnState,
+) {
+  if (!spell || spell.kind !== "spell") {
+    return undefined;
+  }
+
+  const huppermageState = getHuppermageState(state.classState);
+  if (isSpellAvailableFromDeck(spell, huppermageState)) {
+    return undefined;
+  }
+
+  return {
+    type: "deckLimitExceeded" as const,
+    actionIndex,
+    spellId: spell.id,
+    required: huppermageState.deckSpellLimit,
+    available: getDeckTrackedUsedSpellIds(huppermageState.usedSpellIds).length,
+    message: `Spell '${spell.id}' is not in the current deck and the deck limit is reached.`,
+    source: spell.metadata.sources[0],
+  };
 }
 
 function applyFeuFolletAction(
@@ -289,10 +635,13 @@ function applyFeuFolletAction(
 
   let runes = previousHuppermageState.runes;
   let feuFolletStoredRunes = [...previousHuppermageState.feuFolletStoredRunes.map((storedRunes) => [...storedRunes])];
+  let feuFolletStoredLastRunes = [...previousHuppermageState.feuFolletStoredLastRunes];
+  let temporaryUnlockedSpellElement = previousHuppermageState.temporaryUnlockedSpellElement;
 
   if (targetKind === "emptyCell") {
     const storedRunes = getSauvegardeRuniqueStoredRunes(previousHuppermageState);
     feuFolletStoredRunes = [...feuFolletStoredRunes, storedRunes];
+    feuFolletStoredLastRunes = [...feuFolletStoredLastRunes, previousHuppermageState.runes.lastGeneratedRune];
     if (storedRunes.length > 0) {
       appliedEffects.push({
         type: "feuFolletRunesStored",
@@ -304,7 +653,9 @@ function applyFeuFolletAction(
 
   if (targetKind === "feuFollet") {
     const [recoveredRunes = [], ...remainingStoredRunes] = feuFolletStoredRunes;
+    const [recoveredLastRune = null, ...remainingStoredLastRunes] = feuFolletStoredLastRunes;
     feuFolletStoredRunes = remainingStoredRunes;
+    feuFolletStoredLastRunes = remainingStoredLastRunes;
     if (recoveredRunes.length > 0) {
       const lastGeneratedRuneBefore = runes.lastGeneratedRune;
       runes = applyRecoveredRunes(runes, recoveredRunes);
@@ -314,6 +665,16 @@ function applyFeuFolletAction(
         lastGeneratedRuneBefore,
         lastGeneratedRuneAfter: runes.lastGeneratedRune,
         source: "sauvegardeRuniquePassive",
+      });
+    }
+
+    const unlockedRune = recoveredRunes.length > 0 ? runes.lastGeneratedRune : recoveredLastRune;
+    if (unlockedRune) {
+      temporaryUnlockedSpellElement = RUNE_TO_ELEMENT[unlockedRune];
+      appliedEffects.push({
+        type: "temporarySpellElementUnlocked",
+        element: temporaryUnlockedSpellElement,
+        source: "feuFollet",
       });
     }
   }
@@ -326,6 +687,8 @@ function applyFeuFolletAction(
         runes,
         feuFolletsActive: after,
         feuFolletStoredRunes,
+        feuFolletStoredLastRunes,
+        temporaryUnlockedSpellElement,
       },
     },
     appliedEffects,
@@ -336,8 +699,56 @@ function isFeuFolletSpell(spell: NonNullable<ReturnType<typeof findSpell>>): boo
   return spell.id === "feu-follet" || spell.tags.includes("feu-follet");
 }
 
+function isSpellAvailableFromDeck(
+  spell: NonNullable<ReturnType<typeof findSpell>>,
+  huppermageState: NonNullable<ClassTurnState["huppermage"]>,
+): boolean {
+  if (!isDeckTrackedSpell(spell)) {
+    return true;
+  }
+
+  const deckUsedSpellIds = getDeckTrackedUsedSpellIds(huppermageState.usedSpellIds);
+  return huppermageState.usedSpellIds.includes(spell.id)
+    || deckUsedSpellIds.length < huppermageState.deckSpellLimit
+    || (huppermageState.temporaryUnlockedSpellElement !== null && spell.element === huppermageState.temporaryUnlockedSpellElement);
+}
+
+function addUsedSpellId(
+  usedSpellIds: string[],
+  spell: NonNullable<ReturnType<typeof findSpell>>,
+  huppermageState: NonNullable<ClassTurnState["huppermage"]>,
+): string[] {
+  if (!isDeckTrackedSpell(spell) || usedSpellIds.includes(spell.id)) {
+    return usedSpellIds;
+  }
+
+  if (getDeckTrackedUsedSpellIds(usedSpellIds).length >= huppermageState.deckSpellLimit && huppermageState.temporaryUnlockedSpellElement) {
+    return usedSpellIds;
+  }
+
+  return [...usedSpellIds, spell.id];
+}
+
+function isDeckTrackedSpell(spell: NonNullable<ReturnType<typeof findSpell>>): boolean {
+  return spell.id !== "coeur-de-lumiere"
+    && spell.id !== "cycle-elementaire"
+    && !isFeuFolletSpell(spell);
+}
+
+function getDeckTrackedUsedSpellIds(usedSpellIds: string[]): string[] {
+  return usedSpellIds.filter((spellId) =>
+    spellId !== "coeur-de-lumiere"
+    && spellId !== "cycle-elementaire"
+    && spellId !== "feu-follet"
+  );
+}
+
 function normalizeFeuFolletStoredRunes(feuFolletsActive: number, storedRunes: Rune[][] = []): Rune[][] {
   return Array.from({ length: feuFolletsActive }, (_, index) => storedRunes[index] ? [...storedRunes[index]] : []);
+}
+
+function normalizeFeuFolletStoredLastRunes(feuFolletsActive: number, storedRunes: Array<Rune | null> = []): Array<Rune | null> {
+  return Array.from({ length: feuFolletsActive }, (_, index) => storedRunes[index] ?? null);
 }
 
 function getSauvegardeRuniqueStoredRunes(huppermageState: NonNullable<ClassTurnState["huppermage"]>): Rune[] {
@@ -375,8 +786,429 @@ function sortRunesForApplication(runes: Rune[]): Rune[] {
   return RUNE_APPLICATION_ORDER.filter((rune) => runes.includes(rune));
 }
 
+function resolveSpellDamageBonus(
+  spell: CatalogEntry,
+  resources: TurnState["remainingResources"],
+  classState: ClassTurnState,
+  action: SimulationOptions["sequence"]["actions"][number],
+): { damageInflictedBonusPercent: number; appliedEffects: AppliedEffect[] } {
+  const huppermageState = getHuppermageState(classState);
+  let damageInflictedBonusPercent = 0;
+  const appliedEffects: AppliedEffect[] = [];
+
+  for (const value of getSatisfiedTagValues(spell.effects, "damageInflictedPercentPerBqPercentRemaining", huppermageState, action)) {
+    if (typeof value !== "number") {
+      continue;
+    }
+
+    const before = damageInflictedBonusPercent;
+    const bqPercentRemaining = huppermageState.bqMax > 0
+      ? Math.max(0, resources.bq) / huppermageState.bqMax * 100
+      : 0;
+    damageInflictedBonusPercent = roundDamage(damageInflictedBonusPercent + value * bqPercentRemaining);
+    appliedEffects.push({
+      type: "statModifier",
+      stat: "damageInflictedPercent",
+      amount: damageInflictedBonusPercent - before,
+      before,
+      after: damageInflictedBonusPercent,
+      source: "spellEffect",
+    });
+  }
+
+  return { damageInflictedBonusPercent, appliedEffects };
+}
+
+function applySpellDamageMechanics(
+  spell: CatalogEntry,
+  actionDamage: number,
+  stats: BaseStats,
+  resources: TurnState["remainingResources"],
+  classState: ClassTurnState,
+  actionContext: ActionContext,
+  action: SimulationOptions["sequence"]["actions"][number],
+): { damage: number; classState: ClassTurnState; appliedEffects: AppliedEffect[] } {
+  let extraDamage = 0;
+  let nextClassState = classState;
+  const appliedEffects: AppliedEffect[] = [];
+  const huppermageState = getHuppermageState(nextClassState);
+
+  for (const value of getSatisfiedTagValues(spell.effects, "delayedDamagePercentOfActionDamage", huppermageState, action)) {
+    if (typeof value !== "number" || actionDamage <= 0) {
+      continue;
+    }
+
+    const element = huppermageState.runes.lastGeneratedRune
+      ? RUNE_TO_ELEMENT[huppermageState.runes.lastGeneratedRune]
+      : spell.element ?? "light";
+    const delayedDamage = roundDamage(actionDamage * value / 100);
+    extraDamage = roundDamage(extraDamage + delayedDamage);
+    appliedEffects.push(createDerivedDamageEffect(element, delayedDamage));
+  }
+
+  const lifeStealPercent = getSatisfiedTagValues(spell.effects, "lifeStealPercentPerRune", huppermageState, action)
+    .reduce((total, value) => total + (typeof value === "number" ? value : 0), 0);
+  if (lifeStealPercent > 0 && actionDamage > 0) {
+    const percent = lifeStealPercent * getActiveRuneCount(huppermageState);
+    const amount = roundDamage(actionDamage * percent / 100);
+    if (amount > 0) {
+      appliedEffects.push({
+        type: "lifeSteal",
+        amount,
+        percent,
+        sourceDamage: actionDamage,
+        source: "spellEffect",
+      });
+    }
+  }
+
+  if (spell.id === "halo-chatoyant") {
+    const haloApplication = applyHaloChatoyant(huppermageState, stats, actionContext);
+    extraDamage = roundDamage(extraDamage + haloApplication.damage);
+    nextClassState = {
+      ...nextClassState,
+      huppermage: haloApplication.huppermageState,
+    };
+    appliedEffects.push(...haloApplication.appliedEffects);
+  }
+
+  return { damage: extraDamage, classState: nextClassState, appliedEffects };
+}
+
+function applyHaloChatoyant(
+  huppermageState: NonNullable<ClassTurnState["huppermage"]>,
+  stats: BaseStats,
+  actionContext: ActionContext,
+): { damage: number; huppermageState: NonNullable<ClassTurnState["huppermage"]>; appliedEffects: AppliedEffect[] } {
+  const before = huppermageState.haloChatoyantMarks;
+  const triggersExistingMark = before > 0;
+  const triggersCurrentMark = huppermageState.runes.active.aerial;
+  const triggerCount = (triggersExistingMark ? 1 : 0) + (triggersCurrentMark ? 1 : 0);
+  const after = triggersCurrentMark ? 0 : 1;
+  const appliedEffects: AppliedEffect[] = [
+    {
+      type: "haloMarksChanged",
+      before,
+      after,
+      triggered: triggerCount,
+      source: "spellEffect",
+    },
+  ];
+
+  if (triggerCount === 0) {
+    return {
+      damage: 0,
+      huppermageState: { ...huppermageState, haloChatoyantMarks: after },
+      appliedEffects,
+    };
+  }
+
+  const damageEffect: DamageEffect = { type: "damage", element: "light", base: 81, times: triggerCount };
+  const formula = computeRawDamage(stats, damageEffect, actionContext);
+  appliedEffects.push({
+    type: "damage",
+    amount: formula.result,
+    element: "light",
+    source: "spellEffect",
+    formula,
+  });
+
+  return {
+    damage: formula.result,
+    huppermageState: { ...huppermageState, haloChatoyantMarks: after },
+    appliedEffects,
+  };
+}
+
+function createDerivedDamageEffect(element: Element, amount: number): AppliedEffect {
+  return {
+    type: "damage",
+    amount,
+    element,
+    source: "spellEffect",
+    formula: {
+      baseDamage: amount,
+      times: 1,
+      elementalMastery: 0,
+      extraMastery: 0,
+      masteryMultiplier: 1,
+      criticalMultiplier: 1,
+      positionMultiplier: 1,
+      finalMultiplier: 1,
+      blockMultiplier: 1,
+      result: amount,
+    },
+  };
+}
+
+function applyPreSpellState(
+  spell: CatalogEntry,
+  stats: BaseStats,
+  resources: TurnState["remainingResources"],
+  classState: ClassTurnState,
+  actionIndex: number,
+): {
+  stats: BaseStats;
+  resources: TurnState["remainingResources"];
+  classState: ClassTurnState;
+  appliedEffects: AppliedEffect[];
+} {
+  let nextStats = stats;
+  let nextResources = resources;
+  let nextClassState = classState;
+  const appliedEffects: AppliedEffect[] = [];
+  const huppermageState = getHuppermageState(nextClassState);
+
+  if (spell.id === "coeur-de-lumiere" && huppermageState.runes.lastGeneratedRune) {
+    const heart = RUNE_TO_HEART[huppermageState.runes.lastGeneratedRune];
+    const heartApplication = applyHeartState(heart, nextStats, nextClassState);
+    nextStats = heartApplication.stats;
+    nextClassState = heartApplication.classState;
+    appliedEffects.push(...heartApplication.appliedEffects);
+
+    if (actionIndex === 0 && huppermageState.activePassives.includes("initiative-de-lame")) {
+      const before = nextResources.ap;
+      nextResources = addResource(nextResources, "ap", 2);
+      appliedEffects.push({
+        type: "resourceDelta",
+        resource: "ap",
+        amount: 2,
+        before,
+        after: nextResources.ap,
+        source: "huppermageClassMechanic",
+      });
+    }
+  }
+
+  const stateAfterHeart = getHuppermageState(nextClassState);
+  if (spell.element === "light" && stateAfterHeart.abundanceLevel > 0) {
+    const before = stateAfterHeart.abundanceLevel;
+    nextStats = {
+      ...nextStats,
+      damageInflictedPercent: nextStats.damageInflictedPercent + before,
+      healsPerformedPercent: (nextStats.healsPerformedPercent ?? 0) + before,
+    };
+    nextClassState = {
+      ...nextClassState,
+      huppermage: {
+        ...stateAfterHeart,
+        abundanceLevel: 0,
+      },
+    };
+    appliedEffects.push({
+      type: "abundanceChanged",
+      amount: -before,
+      before,
+      after: 0,
+      source: "huppermageClassMechanic",
+    });
+  }
+
+  if (spell.element && isElementalSpell(spell.element) && getHuppermageState(nextClassState).activePassives.includes("antithese")) {
+    const before = nextStats.damageInflictedPercent;
+    nextStats = { ...nextStats, damageInflictedPercent: before - 10 };
+    appliedEffects.push({
+      type: "statModifier",
+      stat: "damageInflictedPercent",
+      amount: -10,
+      before,
+      after: nextStats.damageInflictedPercent,
+      source: "spellEffect",
+    });
+  }
+
+  if (spell.element === "light" && getHuppermageState(nextClassState).activePassives.includes("absorption-quadramentale")) {
+    const before = nextStats.damageInflictedPercent;
+    nextStats = { ...nextStats, damageInflictedPercent: before - 10 };
+    appliedEffects.push({
+      type: "statModifier",
+      stat: "damageInflictedPercent",
+      amount: -10,
+      before,
+      after: nextStats.damageInflictedPercent,
+      source: "spellEffect",
+    });
+  }
+
+  return { stats: nextStats, resources: nextResources, classState: nextClassState, appliedEffects };
+}
+
+function applyHeartState(
+  heart: HuppermageHeart,
+  stats: BaseStats,
+  classState: ClassTurnState,
+): { stats: BaseStats; classState: ClassTurnState; appliedEffects: AppliedEffect[] } {
+  const huppermageState = getHuppermageState(classState);
+  const activePassives = huppermageState.activePassives;
+  const bestElementalMastery = Math.max(0, ...Object.values(stats.elementalMastery).map((value) => value ?? 0));
+  const heartMastery = Math.floor(bestElementalMastery * 1.2);
+  const shouldApplyMastery = !activePassives.includes("refraction-elementaire");
+  const shouldApplyDamage = !activePassives.includes("altruisme-de-lame");
+  const healBonus = activePassives.includes("altruisme-de-lame") ? 30 : 15;
+  let nextStats = {
+    ...stats,
+    damageInflictedPercent: stats.damageInflictedPercent + (shouldApplyDamage ? 30 : 0),
+    healsPerformedPercent: (stats.healsPerformedPercent ?? 0) + healBonus,
+    elementalMastery: shouldApplyMastery
+      ? {
+        ...stats.elementalMastery,
+        [heart]: heartMastery,
+      }
+      : { ...stats.elementalMastery },
+  };
+
+  if (activePassives.includes("initiative-de-lame")) {
+    nextStats = {
+      ...nextStats,
+      elementalMastery: {
+        fire: heart === "fire" ? nextStats.elementalMastery.fire : 0,
+        water: heart === "water" ? nextStats.elementalMastery.water : 0,
+        earth: heart === "earth" ? nextStats.elementalMastery.earth : 0,
+        air: heart === "air" ? nextStats.elementalMastery.air : 0,
+        light: nextStats.elementalMastery.light,
+        neutral: nextStats.elementalMastery.neutral,
+      },
+    };
+  }
+
+  return {
+    stats: nextStats,
+    classState: {
+      ...classState,
+      huppermage: {
+        ...huppermageState,
+        activeHeart: heart,
+      },
+    },
+    appliedEffects: [
+      {
+        type: "heartChanged",
+        heart,
+        source: "coeurDeLumiere",
+      },
+    ],
+  };
+}
+
+function addAbundance(
+  classState: ClassTurnState,
+  amount: number,
+  source: "huppermageClassMechanic" | "spellEffect",
+): { classState: ClassTurnState; appliedEffects: AppliedEffect[] } {
+  if (amount === 0) {
+    return { classState, appliedEffects: [] };
+  }
+
+  const huppermageState = getHuppermageState(classState);
+  const before = huppermageState.abundanceLevel;
+  const limit = huppermageState.activePassives.includes("combinaison-elementaire") ? 60 : Number.POSITIVE_INFINITY;
+  const after = Math.min(limit, Math.max(0, before + amount));
+  return {
+    classState: {
+      ...classState,
+      huppermage: {
+        ...huppermageState,
+        abundanceLevel: after,
+      },
+    },
+    appliedEffects: [
+      {
+        type: "abundanceChanged",
+        amount: after - before,
+        before,
+        after,
+        source,
+      },
+    ],
+  };
+}
+
+function applyRuneConsumption(
+  effects: Effect[],
+  classState: ClassTurnState,
+): { classState: ClassTurnState; appliedEffects: AppliedEffect[]; consumedRunes: Rune[] } {
+  const huppermageState = getHuppermageState(classState);
+  const consumedRunes = getConsumedRunesFromEffects(effects, huppermageState);
+  if (consumedRunes.length === 0) {
+    return { classState, appliedEffects: [], consumedRunes };
+  }
+
+  const nextRunes = {
+    ...huppermageState.runes,
+    active: consumedRunes.reduce(
+      (activeRunes, rune) => ({
+        ...activeRunes,
+        [rune]: false,
+      }),
+      { ...huppermageState.runes.active },
+    ),
+  };
+
+  return {
+    classState: {
+      ...classState,
+      huppermage: {
+        ...huppermageState,
+        runes: nextRunes,
+      },
+    },
+    appliedEffects: [
+      {
+        type: "runeConsumed",
+        runes: consumedRunes,
+        source: "spellEffect",
+      },
+    ],
+    consumedRunes,
+  };
+}
+
+function getConsumedRunesFromEffects(
+  effects: Effect[],
+  huppermageState: NonNullable<ClassTurnState["huppermage"]>,
+): Rune[] {
+  const consumedRunes = new Set<Rune>();
+
+  for (const effect of effects) {
+    if (effect.type === "tag" && effect.tag === "consumesRunes" && effect.value === true) {
+      for (const rune of RUNE_APPLICATION_ORDER) {
+        if (huppermageState.runes.active[rune]) {
+          consumedRunes.add(rune);
+        }
+      }
+    }
+
+    if (effect.type === "tag" && effect.tag === "consumeAllRunes" && effect.value === true) {
+      for (const rune of RUNE_APPLICATION_ORDER) {
+        if (huppermageState.runes.active[rune]) {
+          consumedRunes.add(rune);
+        }
+      }
+    }
+
+    if (effect.type === "tag" && effect.tag === "consumeRune" && isRune(effect.value)) {
+      if (huppermageState.runes.active[effect.value]) {
+        consumedRunes.add(effect.value);
+      }
+    }
+
+    if (effect.type === "conditional" && isConditionMet(effect.condition, huppermageState)) {
+      for (const rune of getConsumedRunesFromEffects(effect.effects, huppermageState)) {
+        consumedRunes.add(rune);
+      }
+    }
+  }
+
+  return sortRunesForApplication([...consumedRunes]);
+}
+
+function isRune(value: unknown): value is Rune {
+  return typeof value === "string" && RUNE_APPLICATION_ORDER.includes(value as Rune);
+}
+
 function applyExtensionDesSens(
   spell: NonNullable<ReturnType<typeof findSpell>>,
+  effectiveCost: SpellCost,
   classState: ClassTurnState,
   resources: TurnState["remainingResources"],
 ): { classState: ClassTurnState; resources: TurnState["remainingResources"]; appliedEffects: AppliedEffect[] } {
@@ -385,7 +1217,7 @@ function applyExtensionDesSens(
     return { classState, resources, appliedEffects: [] };
   }
 
-  const apCost = spell.cost?.ap ?? 0;
+  const apCost = effectiveCost.ap ?? 0;
   const regeneration = getExtensionDesSensRegeneration(spell, huppermageState.activeHeart, huppermageState, apCost);
   const nextHuppermageState = {
     ...huppermageState,
@@ -401,7 +1233,8 @@ function applyExtensionDesSens(
   }
 
   const before = resources.bq;
-  const nextResources = addResource(resources, "bq", regeneration.amount);
+  const amount = applyBqGainMultiplier(regeneration.amount, huppermageState);
+  const nextResources = addResource(resources, "bq", amount);
 
   return {
     classState: nextClassState,
@@ -409,7 +1242,7 @@ function applyExtensionDesSens(
     appliedEffects: [
       {
         type: "bqRegeneration",
-        amount: regeneration.amount,
+        amount,
         before,
         after: nextResources.bq,
         source: "extensionDesSensPassive",
@@ -470,6 +1303,77 @@ function isElementalSpell(element: Element | undefined): boolean {
   return element === "fire" || element === "water" || element === "earth" || element === "air";
 }
 
+function getActiveRuneCount(huppermageState: NonNullable<ClassTurnState["huppermage"]>): number {
+  return RUNE_APPLICATION_ORDER.filter((rune) => huppermageState.runes.active[rune]).length;
+}
+
+function applyBqGainMultiplier(amount: number, huppermageState: NonNullable<ClassTurnState["huppermage"]>): number {
+  let multiplier = 1;
+  if (huppermageState.activePassives.includes("transcendance-runique")) {
+    multiplier *= getActiveRuneCount(huppermageState) === RUNE_APPLICATION_ORDER.length ? 2 : 0.5;
+  }
+  if (huppermageState.activePassives.includes("profusion-runique")) {
+    multiplier *= 0.8;
+  }
+  return Math.round(amount * multiplier);
+}
+
+function applyAbsorptionQuadramentale(
+  spell: CatalogEntry,
+  action: SimulationOptions["sequence"]["actions"][number],
+  classState: ClassTurnState,
+  resources: TurnState["remainingResources"],
+): { resources: TurnState["remainingResources"]; appliedEffects: AppliedEffect[] } {
+  const huppermageState = getHuppermageState(classState);
+  if (!huppermageState.activePassives.includes("absorption-quadramentale")) {
+    return { resources, appliedEffects: [] };
+  }
+
+  const triggerCount = countRemovalEvents(spell.effects, huppermageState, action);
+  if (triggerCount === 0) {
+    return { resources, appliedEffects: [] };
+  }
+
+  const amount = applyBqGainMultiplier(triggerCount * 20, huppermageState);
+  const before = resources.bq;
+  const nextResources = addResource(resources, "bq", amount);
+  return {
+    resources: nextResources,
+    appliedEffects: [
+      {
+        type: "resourceDelta",
+        resource: "bq",
+        amount,
+        before,
+        after: nextResources.bq,
+        source: "huppermageClassMechanic",
+      },
+    ],
+  };
+}
+
+function countRemovalEvents(
+  effects: Effect[],
+  huppermageState: NonNullable<ClassTurnState["huppermage"]>,
+  action: SimulationOptions["sequence"]["actions"][number],
+): number {
+  return effects.reduce((count, effect) => {
+    if (effect.type === "resourceDelta" && effect.target === "target" && effect.amount < 0 && (effect.resource === "ap" || effect.resource === "mp")) {
+      return count + 1;
+    }
+
+    if (effect.type === "statModifier" && effect.target === "target" && effect.stat === "range" && effect.amount < 0) {
+      return count + 1;
+    }
+
+    if (effect.type === "conditional" && isConditionMet(effect.condition, huppermageState, action)) {
+      return count + countRemovalEvents(effect.effects, huppermageState, action);
+    }
+
+    return count;
+  }, 0);
+}
+
 function getWaterHeartSpellKind(element: Element | undefined): HuppermageWaterHeartSpellKind | null {
   if (element === "light") {
     return "light";
@@ -503,6 +1407,7 @@ function countMovementEvents(effects: Effect[], huppermageState: NonNullable<Cla
 function isConditionMet(
   condition: Extract<Effect, { type: "conditional" }>["condition"],
   huppermageState: NonNullable<ClassTurnState["huppermage"]>,
+  action?: SimulationOptions["sequence"]["actions"][number],
 ): boolean {
   if (condition.type === "hasRune") {
     return huppermageState.runes.active[condition.rune];
@@ -520,7 +1425,44 @@ function isConditionMet(
     return RUNE_APPLICATION_ORDER.every((rune) => huppermageState.runes.active[rune]);
   }
 
+  if (condition.type === "targetIs") {
+    return action?.target?.kind === condition.value;
+  }
+
+  if (condition.type === "inState" && condition.target === "caster") {
+    return condition.state === "Coeur de Lumiere" && huppermageState.activeHeart !== null;
+  }
+
+  if (condition.type === "event") {
+    return false;
+  }
+
   return false;
+}
+
+function getSatisfiedTagValues(
+  effects: Effect[],
+  tagName: string,
+  huppermageState: NonNullable<ClassTurnState["huppermage"]>,
+  action?: SimulationOptions["sequence"]["actions"][number],
+): Array<string | number | boolean | undefined> {
+  const values: Array<string | number | boolean | undefined> = [];
+
+  for (const effect of effects) {
+    if (effect.type === "tag" && effect.tag === tagName) {
+      values.push(effect.value);
+    }
+
+    if (effect.type === "conditional" && isConditionMet(effect.condition, huppermageState, action)) {
+      values.push(...getSatisfiedTagValues(effect.effects, tagName, huppermageState, action));
+    }
+
+    if (effect.type === "trigger") {
+      values.push(...getSatisfiedTagValues(effect.effects, tagName, huppermageState, action));
+    }
+  }
+
+  return values;
 }
 
 function applySupportedEffect(
@@ -528,14 +1470,51 @@ function applySupportedEffect(
   stats: SimulationOptions["character"]["stats"],
   resources: TurnState["remainingResources"],
   context: ActionContext,
+  effectContext: EffectApplicationContext,
 ): {
   resources: TurnState["remainingResources"];
   stats: BaseStats;
   damage: number;
   appliedEffects: AppliedEffect[];
 } {
+  if (effect.type === "conditional") {
+    if (!isConditionMet(effect.condition, getHuppermageState(effectContext.classState), effectContext.action)) {
+      return {
+        resources,
+        stats,
+        damage: 0,
+        appliedEffects: [],
+      };
+    }
+
+    return effect.effects.reduce(
+      (current, nestedEffect) => {
+        const nestedApplication = applySupportedEffect(
+          nestedEffect,
+          current.stats,
+          current.resources,
+          context,
+          { ...effectContext, resources: current.resources },
+        );
+        return {
+          resources: nestedApplication.resources,
+          stats: nestedApplication.stats,
+          damage: roundDamage(current.damage + nestedApplication.damage),
+          appliedEffects: [...current.appliedEffects, ...nestedApplication.appliedEffects],
+        };
+      },
+      { resources, stats, damage: 0, appliedEffects: [] as AppliedEffect[] },
+    );
+  }
+
   if (effect.type === "damage") {
-    const formula = computeRawDamage(stats, effect, context);
+    const formula = computeRawDamage(
+      effectContext.damageInflictedBonusPercent === 0
+        ? stats
+        : { ...stats, damageInflictedPercent: stats.damageInflictedPercent + effectContext.damageInflictedBonusPercent },
+      effect,
+      context,
+    );
     return {
       resources,
       stats,
@@ -553,8 +1532,20 @@ function applySupportedEffect(
   }
 
   if (effect.type === "resourceDelta") {
+    if (effect.target && effect.target !== "caster") {
+      return {
+        resources,
+        stats,
+        damage: 0,
+        appliedEffects: [],
+      };
+    }
+
     const before = resources[effect.resource];
-    const nextResources = addResource(resources, effect.resource, effect.amount);
+    const amount = effect.resource === "bq" && effect.amount > 0
+      ? applyBqGainMultiplier(effect.amount, getHuppermageState(effectContext.classState))
+      : effect.amount;
+    const nextResources = addResource(resources, effect.resource, amount);
     return {
       resources: nextResources,
       stats,
@@ -563,7 +1554,7 @@ function applySupportedEffect(
         {
           type: "resourceDelta",
           resource: effect.resource,
-          amount: effect.amount,
+          amount,
           before,
           after: nextResources[effect.resource],
           source: "spellEffect",
@@ -654,6 +1645,28 @@ function applyStatModifier(
           [effect.element]: after,
         },
       },
+      before,
+      after,
+    };
+  }
+
+  const supportedNumericStats = new Set<StatModifierEffect["stat"]>([
+    "healsReceivedPercent",
+    "armorReceivedPercent",
+    "elementalResistance",
+    "range",
+    "willpower",
+    "criticalHitPercent",
+    "parry",
+    "damageReceivedPercent",
+  ]);
+
+  if (supportedNumericStats.has(effect.stat)) {
+    const key = effect.stat as keyof BaseStats;
+    const before = typeof stats[key] === "number" ? stats[key] : 0;
+    const after = before + effect.amount;
+    return {
+      stats: { ...stats, [key]: after },
       before,
       after,
     };

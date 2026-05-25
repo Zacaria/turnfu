@@ -38,6 +38,28 @@ The system SHALL process each valid spell cast by validating constraints, paying
 - **WHEN** a valid spell costs AP and has a BQ generation effect
 - **THEN** the action breakdown shows AP reduced and BQ increased according to the deterministic processing order
 
+### Requirement: Simulator resolves Huppermage dynamic costs
+The system SHALL resolve dynamic Huppermage costs before resource validation and cost payment.
+
+#### Scenario: Rune-dependent costs are paid before effects
+- **GIVEN** a Huppermage has active runes
+- **WHEN** a spell declares BQ cost per active rune, additional BQ cost per active rune, increasing per-use BQ cost, or a satisfied AP cost delta
+- **THEN** the simulator validates and pays the resolved effective cost for that action
+
+### Requirement: Simulator applies supported conditional effects
+The system SHALL apply supported effects nested under satisfied rune, last-rune, exact-rune-count, all-runes, target, and caster-state conditions.
+
+#### Scenario: Rune condition applies a caster modifier before damage
+- **GIVEN** the required rune condition is satisfied
+- **WHEN** a conditional caster stat modifier appears before a damage effect
+- **THEN** the damage effect uses the modified current turn stats
+
+#### Scenario: All active runes are consumed
+- **GIVEN** a spell declares a satisfied `consumeAllRunes` effect
+- **WHEN** the spell is simulated
+- **THEN** every active Huppermage rune is removed
+- **AND** the consumed runes are recorded in the action breakdown
+
 ### Requirement: Simulator computes damage without target resistance
 The system SHALL compute spell damage using base damage, applicable elemental mastery, applicable contextual masteries, critical multiplier, position multiplier, damage inflicted percentage, and block multiplier, while excluding target resistance from this change.
 
@@ -45,12 +67,37 @@ The system SHALL compute spell damage using base damage, applicable elemental ma
 - **WHEN** a spell with base damage is cast by a character with applicable stats and action context
 - **THEN** the simulator records the computed damage and formula breakdown for that action and includes it in total damage
 
+#### Scenario: Huppermage spell-specific damage mechanics are applied
+- **WHEN** Rayon Crepusculaire is cast with the Fire rune condition satisfied
+- **THEN** the spell damage includes 0.5 percent damage inflicted per percent of BQ remaining
+- **WHEN** Lueur de l'Aube consumes the Fire rune
+- **THEN** the simulator adds the delayed damage contribution to the action and turn total
+- **WHEN** Halo Chatoyant is cast on an already marked target or with the Air rune condition satisfied
+- **THEN** the mark damage is triggered and recorded in the action breakdown
+
+#### Scenario: Huppermage life steal mechanics are recorded
+- **WHEN** Epee de Lumiere deals damage while the Huppermage owns active runes
+- **THEN** the simulator records life steal equal to 30 percent of dealt damage per active rune
+
 ### Requirement: Simulator evolves caster stats during the turn
 The system SHALL keep current turn stats in simulation state and SHALL apply supported caster stat modifier effects before later actions are evaluated.
 
 #### Scenario: Damage bonus is gained before next spell
 - **WHEN** a first action applies a caster damage inflicted modifier and a later action deals damage
 - **THEN** the later action uses the updated damage inflicted value from the current turn state
+
+### Requirement: Simulator applies selected passive modifiers
+The system SHALL apply selected passive resource and caster stat modifiers to the initial turn state or to matching supported Huppermage events.
+
+#### Scenario: Static passive modifies initial turn state
+- **GIVEN** a selected passive grants AP, Willpower, or caster damage/healing modifiers
+- **WHEN** the turn simulation starts
+- **THEN** the first action sees the modified resources and stats
+
+#### Scenario: BQ passives modify BQ gains
+- **GIVEN** selected Huppermage passives alter BQ gains
+- **WHEN** the Huppermage gains BQ from supported rune or heart regeneration events
+- **THEN** the simulator applies the passive multiplier before recording the gain
 
 ### Requirement: Simulator tracks Huppermage class state
 The system SHALL track Huppermage-specific state under `classState.huppermage` without placing class-specific fields at the root of the generic turn state.
@@ -65,6 +112,25 @@ The system SHALL update Huppermage active runes and last generated rune when ele
 #### Scenario: Elemental spells generate runes
 - **WHEN** a Huppermage casts fire and water elemental spells during a turn
 - **THEN** the Huppermage class state marks Incandescent and Aquatic runes active and records Aquatic as the last generated rune
+
+### Requirement: Simulator grants Huppermage AP from first rune generations
+The system SHALL grant the Huppermage 1 AP the first time each distinct rune is generated during a turn, and SHALL only treat a rune as generated when it was not already active immediately before the spell resolved.
+
+#### Scenario: First rune generation grants AP once per rune per turn
+- **WHEN** a Huppermage generates Fire, Fire, then Water runes during the same turn
+- **THEN** the first Fire generation grants 1 AP
+- **AND** the second Fire generation grants no AP
+- **AND** the first Water generation grants 1 AP
+- **AND** the Huppermage class state records which runes already granted AP during the turn
+
+#### Scenario: Initially active rune must be consumed before generation
+- **GIVEN** the Fire rune is active before the turn starts
+- **WHEN** the Huppermage casts a Fire spell without consuming the Fire rune first
+- **THEN** the Fire rune is not considered generated
+- **AND** the Huppermage gains no AP from rune generation
+- **WHEN** the Huppermage consumes the Fire rune and later casts a Fire spell
+- **THEN** the Fire rune is generated
+- **AND** the Huppermage gains 1 AP if Fire has not already granted AP during the turn
 
 ### Requirement: Simulator tracks active Feu-Follets
 The system SHALL represent Feu-Follet state as a count of active Feu-Follets and SHALL use action target kind to distinguish placing a new Feu-Follet from recovering an active one.
@@ -107,6 +173,66 @@ The system SHALL support simplified `extension-des-sens` BQ regeneration from th
 - **WHEN** a neutral spell occurs between the elemental and Light spell
 - **THEN** the neutral spell breaks the alternation and the Light spell does not receive the alternation BQ gain
 
+### Requirement: Simulator applies global Huppermage BQ rules
+The system SHALL support Huppermage BQ conversion and optional end-of-turn BQ resolution for simulations that need a transition toward a following turn.
+
+#### Scenario: PW is converted into initial BQ
+- **GIVEN** the Huppermage class state enables PW-to-BQ conversion
+- **WHEN** the turn simulation starts
+- **THEN** the initial BQ includes 75 BQ per configured PW
+- **AND** the Huppermage BQ maximum reference is initialized from the converted BQ
+
+#### Scenario: End-of-turn BQ is regenerated outside Coeur de Lumiere
+- **GIVEN** end-of-turn resolution is enabled
+- **AND** the Huppermage is not in Coeur de Lumiere
+- **WHEN** the turn simulation completes
+- **THEN** the Huppermage regains 100 BQ plus stored BQ
+- **AND** BQ gain multipliers such as Transcendance Runique and Profusion Runique are applied
+
+#### Scenario: End-of-turn BQ is stored under Coeur de Lumiere
+- **GIVEN** end-of-turn resolution is enabled
+- **AND** the Huppermage is in Coeur de Lumiere
+- **WHEN** the turn simulation completes
+- **THEN** 75 BQ is stored for a later turn
+- **AND** natural BQ regeneration is not applied immediately
+
+### Requirement: Simulator applies Coeur de Lumiere and Abondance
+The system SHALL activate the Huppermage heart from the last generated rune and SHALL apply supported Coeur de Lumiere stat evolution and Abondance bonuses.
+
+#### Scenario: Coeur de Lumiere activates a heart
+- **GIVEN** the Huppermage has a last generated rune
+- **WHEN** Coeur de Lumiere is cast
+- **THEN** the matching heart becomes active
+- **AND** supported damage, healing, and elemental mastery bonuses are applied to later actions
+
+#### Scenario: Coeur de Lumiere requires a last generated rune
+- **GIVEN** the Huppermage has no last generated rune
+- **WHEN** Coeur de Lumiere is cast
+- **THEN** the simulator rejects the action as invalid for the current Huppermage class state
+
+#### Scenario: Abondance is consumed by a Light spell
+- **GIVEN** the Huppermage has Abondance
+- **WHEN** the next Light spell is simulated
+- **THEN** the Abondance value increases that Light spell's damage and healing modifiers
+- **AND** Abondance is reset afterward
+
+### Requirement: Simulator enforces Huppermage deck availability
+The system SHALL track distinct deck spell ids used in a planning sequence and SHALL reject new deck spell ids after the configured deck limit unless a Feu-Follet recovery temporarily unlocks the spell element.
+
+The system SHALL NOT count third-bar Huppermage utility spells, including Coeur de Lumiere, Cycle elementaire, and Feu-Follet, against the configured deck limit.
+
+#### Scenario: Feu-Follet recovery unlocks a temporary element
+- **GIVEN** the configured deck limit is already reached
+- **WHEN** the Huppermage recovers a Feu-Follet storing a rune
+- **THEN** spells matching the recovered rune element are temporarily available
+- **AND** non-deck spells of other elements remain unavailable
+
+#### Scenario: Third-bar utility spells do not consume deck slots
+- **GIVEN** the configured deck limit is reached
+- **WHEN** the Huppermage casts Coeur de Lumiere, Cycle elementaire, or Feu-Follet
+- **THEN** the action is not rejected by deck availability
+- **AND** the spell id is not added to the tracked used deck spell ids
+
 ### Requirement: Simulator returns detailed invalid results
 The system SHALL return invalid simulation results with structured violations and the state reached before the failed action.
 
@@ -120,4 +246,3 @@ The system SHALL expose simulation behavior independently from GUI components an
 #### Scenario: Optimizer calls simulator
 - **WHEN** an optimizer evaluates candidate sequences
 - **THEN** it can call the simulator without importing GUI modules or duplicating spell rule calculations
-

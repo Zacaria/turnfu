@@ -7,10 +7,12 @@ import {
   maxCastsPerTurn,
   movement,
   normalizeCatalog,
+  passive,
   resourceDelta,
   screenshot,
   spell,
   statModifier,
+  tag,
   when,
 } from "../catalog/index.ts";
 import { createResources, roundDamage, simulateTurn } from "./index.ts";
@@ -156,6 +158,138 @@ const testCatalog = normalizeCatalog([
     tags: ["feu-follet"],
     metadata: { status: "extracted", sources: [source] },
   }),
+  spell("consume-runes-test", {
+    name: "Consume Runes Test",
+    level: 200,
+    effects: [tag("consumesRunes", true)],
+    constraints: [],
+    metadata: { status: "extracted", sources: [source] },
+  }),
+  spell("consume-all-runes-test", {
+    name: "Consume All Runes Test",
+    level: 200,
+    effects: [
+      when({ type: "exactRuneCount", count: 2 }, [tag("consumeAllRunes", true)]),
+    ],
+    constraints: [],
+    metadata: { status: "extracted", sources: [source] },
+  }),
+  spell("rayon-crepusculaire", {
+    name: "Rayon Crepusculaire Test",
+    level: 200,
+    element: "light",
+    effects: [
+      damage({ element: "light", base: 100 }),
+      when({ type: "hasRune", rune: "incandescent" }, [
+        tag("damageInflictedPercentPerBqPercentRemaining", 0.5),
+        tag("consumeRune", "incandescent"),
+      ]),
+    ],
+    constraints: [],
+    metadata: { status: "extracted", sources: [source] },
+  }),
+  spell("epee-de-lumiere", {
+    name: "Epee de Lumiere Test",
+    level: 200,
+    element: "light",
+    effects: [
+      damage({ element: "light", base: 100 }),
+      tag("lifeStealPercentPerRune", 30),
+    ],
+    constraints: [],
+    metadata: { status: "extracted", sources: [source] },
+  }),
+  spell("lueur-de-laube", {
+    name: "Lueur de l'Aube Test",
+    level: 200,
+    element: "fire",
+    effects: [
+      damage({ element: "fire", base: 100 }),
+      when({ type: "hasRune", rune: "incandescent" }, [
+        tag("delayedDamagePercentOfActionDamage", 10),
+        tag("consumeRune", "incandescent"),
+      ]),
+    ],
+    constraints: [],
+    metadata: { status: "extracted", sources: [source] },
+  }),
+  spell("halo-chatoyant", {
+    name: "Halo Chatoyant Test",
+    level: 200,
+    element: "light",
+    effects: [
+      when({ type: "hasRune", rune: "aerial" }, [
+        tag("triggerMarkImmediately", true),
+        tag("consumeRune", "aerial"),
+      ]),
+    ],
+    constraints: [],
+    metadata: { status: "extracted", sources: [source] },
+  }),
+  spell("runification-test", {
+    name: "Runification Test",
+    level: 200,
+    cost: cost({ wp: 1 }),
+    effects: [
+      tag("dynamicBqCostPerRune", 40),
+      tag("consumesRunes", true),
+    ],
+    constraints: [],
+    metadata: { status: "extracted", sources: [source] },
+  }),
+  spell("resonance-cost-test", {
+    name: "Resonance Cost Test",
+    level: 200,
+    element: "light",
+    cost: cost({ ap: 4 }),
+    effects: [
+      damage({ element: "light", base: 10 }),
+      when({ type: "hasRune", rune: "aquatic" }, [tag("costDelta", "ap:-1")]),
+      tag("additionalBqCostPerRune", 25),
+    ],
+    constraints: [],
+    metadata: { status: "extracted", sources: [source] },
+  }),
+  spell("conditional-caster-buff-test", {
+    name: "Conditional Caster Buff Test",
+    level: 200,
+    cost: cost({ ap: 1 }),
+    effects: [
+      when({ type: "hasRune", rune: "incandescent" }, [
+        statModifier({ stat: "damageInflictedPercent", amount: 10, target: "caster" }),
+      ]),
+      damage({ element: "light", base: 10 }),
+    ],
+    constraints: [],
+    metadata: { status: "extracted", sources: [source] },
+  }),
+  spell("coeur-de-lumiere", {
+    name: "Coeur de Lumiere Test",
+    level: 200,
+    cost: cost({}),
+    effects: [],
+    constraints: [],
+    metadata: { status: "extracted", sources: [source] },
+  }),
+  spell("cycle-elementaire", {
+    name: "Cycle Elementaire Test",
+    level: 200,
+    cost: cost({ ap: 1 }),
+    effects: [],
+    constraints: [],
+    metadata: { status: "extracted", sources: [source] },
+  }),
+  passive("motivation", {
+    name: "Motivation Test",
+    level: 35,
+    effects: [
+      resourceDelta({ resource: "ap", amount: 1 }),
+      statModifier({ stat: "damageInflictedPercent", amount: -20, target: "caster" }),
+      statModifier({ stat: "willpower", amount: 10, target: "caster" }),
+    ],
+    constraints: [],
+    metadata: { status: "extracted", sources: [source] },
+  }),
 ]) as CatalogEntry[];
 
 const character: SimulatedCharacter = {
@@ -255,6 +389,361 @@ test("updates active runes and last generated rune during the turn", () => {
   assert.equal(result.breakdown[1].classStateAfter.huppermage?.runes.lastGeneratedRune, "aquatic");
 });
 
+test("grants 1 AP the first time each rune is generated during the turn", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character,
+    sequence: {
+      actions: [
+        { spellId: "fire-rune-test" },
+        { spellId: "fire-rune-test" },
+        { spellId: "water-rune-test" },
+      ],
+    },
+  });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.finalState.remainingResources.ap, 5);
+  assert.equal(result.breakdown[0].resourceAfter.ap, 6);
+  assert.equal(result.breakdown[1].resourceAfter.ap, 5);
+  assert.equal(result.breakdown[2].resourceAfter.ap, 5);
+  assert.deepEqual(result.finalState.classState.huppermage?.runeApGainsThisTurn, {
+    incandescent: true,
+    aquatic: true,
+    telluric: false,
+    aerial: false,
+  });
+
+  const apGainEffects = result.breakdown.flatMap((action) =>
+    action.appliedEffects.filter((effect) => effect.type === "resourceDelta" && effect.resource === "ap")
+  );
+  assert.equal(apGainEffects.length, 2);
+  assert.equal(apGainEffects[0].source, "huppermageClassMechanic");
+  assert.equal(apGainEffects[1].source, "huppermageClassMechanic");
+});
+
+test("does not grant rune AP or update last generated rune when the rune is already active", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      classState: {
+        huppermage: {
+          runes: {
+            incandescent: true,
+          },
+          lastGeneratedRune: null,
+        },
+      },
+    },
+    sequence: { actions: [{ spellId: "fire-rune-test" }] },
+  });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.breakdown[0].classStateBefore.huppermage?.runes.active.incandescent, true);
+  assert.equal(result.breakdown[0].resourceAfter.ap, 5);
+  assert.equal(result.finalState.classState.huppermage?.runes.lastGeneratedRune, null);
+  assert.equal(result.finalState.classState.huppermage?.runeApGainsThisTurn.incandescent, false);
+  assert.equal(result.breakdown[0].appliedEffects.some((effect) => effect.type === "runeGenerated"), false);
+});
+
+test("allows rune AP after an initially active rune is consumed then generated", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      classState: {
+        huppermage: {
+          runes: {
+            incandescent: true,
+          },
+          lastGeneratedRune: "incandescent",
+        },
+      },
+    },
+    sequence: {
+      actions: [
+        { spellId: "consume-runes-test" },
+        { spellId: "fire-rune-test" },
+      ],
+    },
+  });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.breakdown[0].classStateAfter.huppermage?.runes.active.incandescent, false);
+  assert.equal(result.breakdown[0].appliedEffects.some((effect) => effect.type === "runeConsumed"), true);
+  assert.equal(result.breakdown[1].resourceAfter.ap, 6);
+  assert.equal(result.breakdown[1].classStateAfter.huppermage?.runes.lastGeneratedRune, "incandescent");
+  assert.equal(result.finalState.classState.huppermage?.runeApGainsThisTurn.incandescent, true);
+});
+
+test("consumes all active runes from consumeAllRunes tags", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      classState: {
+        huppermage: {
+          runes: {
+            incandescent: true,
+            aquatic: true,
+          },
+        },
+      },
+    },
+    sequence: { actions: [{ spellId: "consume-all-runes-test" }] },
+  });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.finalState.classState.huppermage?.runes.active.incandescent, false);
+  assert.equal(result.finalState.classState.huppermage?.runes.active.aquatic, false);
+  const consumed = result.breakdown[0].appliedEffects.find((effect) => effect.type === "runeConsumed");
+  assert.ok(consumed && consumed.type === "runeConsumed");
+  assert.deepEqual(consumed.runes, ["incandescent", "aquatic"]);
+});
+
+test("applies dynamic costs from active runes before paying spell cost", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      resources: createResources({ ap: 6, mp: 3, wp: 2, bq: 200 }),
+      classState: {
+        huppermage: {
+          runes: {
+            incandescent: true,
+            aquatic: true,
+          },
+        },
+      },
+    },
+    sequence: { actions: [{ spellId: "runification-test" }] },
+  });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.breakdown[0].resourceAfter.bq, 120);
+  assert.equal(result.finalState.classState.huppermage?.runes.active.incandescent, false);
+  assert.equal(result.finalState.classState.huppermage?.runes.active.aquatic, false);
+});
+
+test("applies conditional cost deltas and additional BQ costs", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      resources: createResources({ ap: 6, mp: 3, wp: 1, bq: 50 }),
+      classState: {
+        huppermage: {
+          runes: {
+            aquatic: true,
+          },
+        },
+      },
+    },
+    sequence: { actions: [{ spellId: "resonance-cost-test" }] },
+  });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.breakdown[0].resourceAfter.ap, 3);
+  assert.equal(result.breakdown[0].resourceAfter.bq, 25);
+});
+
+test("applies conditional caster effects before damage", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      classState: {
+        huppermage: {
+          runes: {
+            incandescent: true,
+          },
+        },
+      },
+    },
+    sequence: { actions: [{ spellId: "conditional-caster-buff-test" }] },
+  });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.breakdown[0].damage, 48);
+  assert.equal(result.breakdown[0].statsAfter.damageInflictedPercent, 20);
+});
+
+test("applies selected passive initial stat and resource modifiers", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      classState: {
+        huppermage: {
+          activePassives: ["motivation"],
+        },
+      },
+    },
+    sequence: { actions: [{ spellId: "lueur-test" }] },
+  });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.breakdown[0].resourceBefore.ap, 7);
+  assert.equal(result.breakdown[0].statsBefore.damageInflictedPercent, -10);
+  assert.equal(result.breakdown[0].statsBefore.willpower, 10);
+});
+
+test("activates Coeur de Lumiere from last rune and evolves stats", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      classState: {
+        huppermage: {
+          lastGeneratedRune: "incandescent",
+        },
+      },
+    },
+    sequence: {
+      actions: [
+        { spellId: "coeur-de-lumiere" },
+        { spellId: "lueur-test" },
+      ],
+    },
+  });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.breakdown[0].classStateAfter.huppermage?.activeHeart, "fire");
+  assert.equal(result.breakdown[1].statsBefore.damageInflictedPercent, 40);
+  assert.equal(result.breakdown[1].statsBefore.healsPerformedPercent, 15);
+  assert.equal(result.breakdown[1].statsBefore.elementalMastery.fire, 240);
+});
+
+test("rejects Coeur de Lumiere before any rune has been generated", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character,
+    sequence: {
+      actions: [{ spellId: "coeur-de-lumiere" }],
+    },
+  });
+
+  assert.equal(result.valid, false);
+  assert.equal(result.violations[0].type, "invalidClassStateAction");
+});
+
+test("enforces deck spell limit unless a Feu-Follet temporary element unlock applies", () => {
+  const blocked = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      classState: {
+        huppermage: {
+          deckSpellLimit: 1,
+        },
+      },
+    },
+    sequence: {
+      actions: [
+        { spellId: "fire-rune-test" },
+        { spellId: "water-rune-test" },
+      ],
+    },
+  });
+
+  assert.equal(blocked.valid, false);
+  assert.equal(blocked.violations[0].type, "deckLimitExceeded");
+
+  const unlocked = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      classState: {
+        huppermage: {
+          deckSpellLimit: 1,
+          usedSpellIds: ["fire-rune-test"],
+          feuFolletsActive: 1,
+          feuFolletStoredLastRunes: ["aquatic"],
+        },
+      },
+    },
+    sequence: {
+      actions: [
+        { spellId: "feu-follet-test", target: { kind: "feuFollet" } },
+        { spellId: "water-rune-test" },
+      ],
+    },
+  });
+
+  assert.equal(unlocked.valid, true);
+  assert.equal(unlocked.breakdown[0].classStateAfter.huppermage?.temporaryUnlockedSpellElement, "water");
+});
+
+test("does not count third-bar Huppermage spells against the deck limit", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      resources: createResources({ ap: 6, mp: 3, wp: 1, bq: 0 }),
+      classState: {
+        huppermage: {
+          deckSpellLimit: 0,
+          lastGeneratedRune: "incandescent",
+        },
+      },
+    },
+    sequence: {
+      actions: [
+        { spellId: "cycle-elementaire" },
+        { spellId: "feu-follet-test", target: { kind: "emptyCell" } },
+        { spellId: "coeur-de-lumiere" },
+      ],
+    },
+  });
+
+  assert.equal(result.valid, true);
+  assert.deepEqual(result.finalState.classState.huppermage?.usedSpellIds, []);
+
+  const trackedSpell = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      classState: {
+        huppermage: {
+          deckSpellLimit: 0,
+        },
+      },
+    },
+    sequence: { actions: [{ spellId: "fire-rune-test" }] },
+  });
+
+  assert.equal(trackedSpell.valid, false);
+  assert.equal(trackedSpell.violations[0].type, "deckLimitExceeded");
+});
+
+test("unlocks temporary spell element from the recovered Feu-Follet rune", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      classState: {
+        huppermage: {
+          runes: {
+            incandescent: true,
+          },
+          lastGeneratedRune: "incandescent",
+          feuFolletsActive: 1,
+          feuFolletStoredLastRunes: ["aquatic"],
+        },
+      },
+    },
+    sequence: {
+      actions: [
+        { spellId: "feu-follet-test", target: { kind: "feuFollet" } },
+      ],
+    },
+  });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.finalState.classState.huppermage?.temporaryUnlockedSpellElement, "water");
+});
+
 test("always exposes last generated rune state for Huppermage", () => {
   const result = simulateTurn({
     catalog: testCatalog,
@@ -351,7 +840,7 @@ test("stores and recovers missing runes with Sauvegarde Runique", () => {
   assert.ok(storeEffect && storeEffect.type === "feuFolletRunesStored");
   assert.deepEqual(storeEffect.runes, ["incandescent", "aquatic", "telluric"]);
 
-  const recoverEffect = result.breakdown[1].appliedEffects.at(-1);
+  const recoverEffect = result.breakdown[1].appliedEffects.find((effect) => effect.type === "feuFolletRunesRecovered");
   assert.ok(recoverEffect && recoverEffect.type === "feuFolletRunesRecovered");
   assert.deepEqual(recoverEffect.runes, ["incandescent", "aquatic", "telluric"]);
   assert.equal(recoverEffect.lastGeneratedRuneAfter, "telluric");
@@ -391,6 +880,30 @@ test("regenerates BQ through Extension des sens in fire and earth hearts", () =>
 
   assert.equal(earthResult.valid, true);
   assert.equal(earthResult.finalState.remainingResources.bq, 60);
+});
+
+test("regenerates BQ through Extension des sens from the effective AP cost", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      resources: createResources({ ap: 6, mp: 3, wp: 1, bq: 100 }),
+      classState: {
+        huppermage: {
+          activeHeart: "earth",
+          activePassives: ["extension-des-sens"],
+          runes: {
+            aquatic: true,
+          },
+        },
+      },
+    },
+    sequence: { actions: [{ spellId: "resonance-cost-test" }] },
+  });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.breakdown[0].resourceAfter.ap, 3);
+  assert.equal(result.finalState.remainingResources.bq, 135);
 });
 
 test("regenerates BQ through Extension des sens for air movement events", () => {
@@ -480,6 +993,112 @@ test("regenerates BQ through Extension des sens by alternating light and element
   assert.equal(brokenAlternationResult.valid, true);
   assert.equal(brokenAlternationResult.finalState.remainingResources.bq, 0);
   assert.equal(brokenAlternationResult.finalState.classState.huppermage?.waterHeartLastSpellKind, "light");
+});
+
+test("converts configured PW into initial BQ when enabled", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      resources: createResources({ ap: 6, mp: 3, wp: 2, bq: 0 }),
+      classState: {
+        huppermage: {
+          convertWpToBq: true,
+        },
+      },
+    },
+    sequence: { actions: [] },
+  });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.finalState.remainingResources.bq, 150);
+  assert.equal(result.finalState.classState.huppermage?.bqMax, 150);
+});
+
+test("applies turn-end natural BQ regeneration and stored BQ", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      resources: createResources({ ap: 6, mp: 3, wp: 1, bq: 50 }),
+      classState: {
+        huppermage: {
+          storedBq: 25,
+        },
+      },
+    },
+    sequence: { actions: [] },
+    includeTurnEnd: true,
+  });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.finalState.remainingResources.bq, 175);
+  assert.equal(result.finalState.classState.huppermage?.storedBq, 0);
+  assert.equal(result.finalState.turnEndEffects[0].type, "turnEndBq");
+});
+
+test("stores turn-end BQ under Coeur de Lumiere instead of regenerating it", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      resources: createResources({ ap: 6, mp: 3, wp: 1, bq: 50 }),
+      classState: {
+        huppermage: {
+          activeHeart: "fire",
+          storedBq: 25,
+        },
+      },
+    },
+    sequence: { actions: [] },
+    includeTurnEnd: true,
+  });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.finalState.remainingResources.bq, 50);
+  assert.equal(result.finalState.classState.huppermage?.storedBq, 100);
+});
+
+test("applies Transcendance Runique and Profusion Runique to turn-end BQ gains", () => {
+  const transcendanceResult = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      classState: {
+        huppermage: {
+          activePassives: ["transcendance-runique"],
+          runes: {
+            incandescent: true,
+            aquatic: true,
+            telluric: true,
+            aerial: true,
+          },
+        },
+      },
+    },
+    sequence: { actions: [] },
+    includeTurnEnd: true,
+  });
+
+  assert.equal(transcendanceResult.valid, true);
+  assert.equal(transcendanceResult.finalState.remainingResources.bq, 200);
+
+  const profusionResult = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      classState: {
+        huppermage: {
+          activePassives: ["profusion-runique"],
+        },
+      },
+    },
+    sequence: { actions: [] },
+    includeTurnEnd: true,
+  });
+
+  assert.equal(profusionResult.valid, true);
+  assert.equal(profusionResult.finalState.remainingResources.bq, 80);
 });
 
 test("rejects recovering a Feu-Follet when none is active", () => {
@@ -633,6 +1252,117 @@ test("applies complete damage formula without target resistance", () => {
   assert.equal(damageEffect.formula.blockMultiplier, 0.8);
 });
 
+test("applies Rayon Crepusculaire BQ remaining damage scaling", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      resources: createResources({ ap: 6, mp: 3, wp: 1, bq: 250 }),
+      classState: {
+        huppermage: {
+          bqMax: 500,
+          runes: {
+            incandescent: true,
+          },
+        },
+      },
+    },
+    sequence: { actions: [{ spellId: "rayon-crepusculaire" }] },
+  });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.totalDamage, 540);
+  assert.equal(result.finalState.classState.huppermage?.runes.active.incandescent, false);
+});
+
+test("records Epee de Lumiere life steal from active runes", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      classState: {
+        huppermage: {
+          runes: {
+            incandescent: true,
+            aquatic: true,
+          },
+        },
+      },
+    },
+    sequence: { actions: [{ spellId: "epee-de-lumiere" }] },
+  });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.totalDamage, 440);
+  const lifeSteal = result.breakdown[0].appliedEffects.find((effect) => effect.type === "lifeSteal");
+  assert.ok(lifeSteal && lifeSteal.type === "lifeSteal");
+  assert.equal(lifeSteal.percent, 60);
+  assert.equal(lifeSteal.amount, 264);
+});
+
+test("adds Lueur de l'Aube delayed damage when the fire rune is consumed", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      classState: {
+        huppermage: {
+          runes: {
+            incandescent: true,
+          },
+          lastGeneratedRune: "incandescent",
+        },
+      },
+    },
+    sequence: { actions: [{ spellId: "lueur-de-laube" }] },
+  });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.totalDamage, 242);
+  const damageEffects = result.breakdown[0].appliedEffects.filter((effect) => effect.type === "damage");
+  assert.equal(damageEffects.length, 2);
+  assert.equal(damageEffects[1].amount, 22);
+});
+
+test("tracks and triggers Halo Chatoyant marks", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character,
+    sequence: {
+      actions: [
+        { spellId: "halo-chatoyant" },
+        { spellId: "halo-chatoyant" },
+      ],
+    },
+  });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.breakdown[0].damage, 0);
+  assert.equal(result.breakdown[0].classStateAfter.huppermage?.haloChatoyantMarks, 1);
+  assert.equal(result.breakdown[1].damage, 356.4);
+  assert.equal(result.breakdown[1].classStateAfter.huppermage?.haloChatoyantMarks, 1);
+
+  const aerialResult = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      classState: {
+        huppermage: {
+          runes: {
+            aerial: true,
+          },
+        },
+      },
+    },
+    sequence: { actions: [{ spellId: "halo-chatoyant" }] },
+  });
+
+  assert.equal(aerialResult.valid, true);
+  assert.equal(aerialResult.totalDamage, 356.4);
+  assert.equal(aerialResult.finalState.classState.huppermage?.haloChatoyantMarks, 0);
+  assert.equal(aerialResult.finalState.classState.huppermage?.runes.active.aerial, false);
+});
+
 test("evolves caster stats during the turn from supported stat modifiers", () => {
   const result = simulateTurn({
     catalog: testCatalog,
@@ -649,6 +1379,25 @@ test("evolves caster stats during the turn from supported stat modifiers", () =>
   assert.equal(result.totalDamage, 144);
   assert.equal(result.finalState.currentStats.damageInflictedPercent, 20);
   assert.equal(result.breakdown[0].appliedEffects[0].type, "statModifier");
+});
+
+test("records stat snapshots before and after each successful action", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character,
+    sequence: {
+      actions: [
+        { spellId: "boost-test" },
+        { spellId: "lueur-test" },
+      ],
+    },
+  });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.breakdown[0].statsBefore.damageInflictedPercent, 10);
+  assert.equal(result.breakdown[0].statsAfter.damageInflictedPercent, 20);
+  assert.equal(result.breakdown[1].statsBefore.damageInflictedPercent, 20);
+  assert.equal(result.breakdown[1].statsAfter.damageInflictedPercent, 20);
 });
 
 test("rounds damage to two decimals per damage effect", () => {
