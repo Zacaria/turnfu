@@ -182,6 +182,8 @@ export function App() {
   useEffect(() => {
     setUiLocale(locale);
     document.documentElement.lang = locale;
+    document.documentElement.classList.add("notranslate");
+    document.documentElement.setAttribute("translate", "no");
     document.title = t("app.title");
   }, [locale]);
 
