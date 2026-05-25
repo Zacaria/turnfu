@@ -4,7 +4,21 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test --experimental-strip-types src/**/*.test.ts",
+    "dev": "vite",
+    "build": "vite build",
+    "test": "node --test --experimental-strip-types \"src/**/*.test.ts\"",
     "validate:openspec:huppermage": "openspec validate catalog-huppermage-spells-effects --strict --no-interactive"
+  },
+  "dependencies": {
+    "lucide-react": "1.16.0",
+    "react": "19.2.6",
+    "react-dom": "19.2.6"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.15",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.0.2",
+    "typescript": "6.0.3",
+    "vite": "8.0.14"
   }
 }

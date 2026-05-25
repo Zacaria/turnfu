@@ -1,0 +1,9 @@
+node_modules/
+dist/
+artifacts/
+.DS_Store
+*.log
+/*.png
+/public/assets/areas/
+/public/assets/spellAttributes/
+/public/assets/stats/
