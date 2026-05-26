@@ -39,6 +39,7 @@ import type {
   ActionTarget,
   AttackPosition,
   BaseStats,
+  ComboPlan,
   RangeMode,
   SimulatedCharacter,
 } from "../core/simulation/types.ts";
@@ -63,6 +64,34 @@ import { resolveDetailTarget } from "./detailSelection.ts";
 import { describeEffect, describeViolation, formatHeart, formatNumber, summarizeStats } from "./format.ts";
 import { HuppermageRuneAura } from "./HuppermageRuneAura.tsx?v=demo-frame-v1";
 import { getHuppermageIconSrc } from "./icons.ts";
+import { openCandidateInBuilder, type OptimizerCandidateViewModel } from "./optimizerWorkspace.ts";
+import {
+  BuildPage,
+  OptimizerWorkspacePage,
+  ResearchLibraryPage,
+  SetupPage,
+} from "./ResearchWorkspacePages.tsx";
+import {
+  createBuild,
+  getBuildRuns,
+  getBuildSavedCombos,
+  getBuildSetups,
+  restoreResearchWorkspace,
+  saveResearchWorkspace,
+  type ResearchWorkspaceData,
+  type SetupSnapshot,
+  type WakfuClassId,
+} from "./researchWorkspace.ts";
+import {
+  createResearchRoute,
+  openBuilderFromSetup,
+  openBuild,
+  openOptimizerFromSetup,
+  openSetup,
+  returnToBuild,
+  returnToPrevious,
+  type ResearchRoute,
+} from "./researchNavigation.ts";
 import {
   getAptitudeIconSrc,
   getElementMasteryIconSrc,
@@ -136,6 +165,14 @@ const nonDeckSpellIds = new Set(["coeur-de-lumiere", "cycle-elementaire", "feu-f
 export function App() {
   const spells = useMemo(() => getHuppermageSpells(), []);
   const passives = useMemo(() => getHuppermagePassives(), []);
+  const catalog = useMemo(() => [...spells, ...passives], [passives, spells]);
+  const [researchWorkspace, setResearchWorkspace] = useState<ResearchWorkspaceData>(() => (
+    typeof window === "undefined"
+      ? restoreResearchWorkspace(createMemoryStorageFallback())
+      : restoreResearchWorkspace(window.localStorage)
+  ));
+  const [researchRoute, setResearchRoute] = useState<ResearchRoute>(() => createResearchRoute());
+  const [buildClassFilter, setBuildClassFilter] = useState<WakfuClassId | "all">("all");
   const [characterConfig, setCharacterConfig] = useState<SimulatedCharacter>(() => createDefaultCharacter());
   const [equipmentCharacter, setEquipmentCharacter] = useState<SimulatedCharacter>(() => createDefaultEquipmentCharacter());
   const [equipmentExtras, setEquipmentExtras] = useState<EquipmentExtraStats>(() => createDefaultEquipmentExtraStats());
@@ -159,6 +196,14 @@ export function App() {
     () => createCharacterFromBuild(characterConfig, aptitudeDistribution, equipmentCharacter),
     [aptitudeDistribution, characterConfig, equipmentCharacter],
   );
+  const activeBuild = researchRoute.buildId
+    ? researchWorkspace.builds.find((build) => build.id === researchRoute.buildId)
+    : undefined;
+  const activeSetup = researchRoute.setupSnapshotId
+    ? researchWorkspace.setupSnapshots.find((setup) => setup.id === researchRoute.setupSnapshotId)
+    : activeBuild
+      ? getBuildSetups(researchWorkspace, activeBuild.id)[0]
+      : undefined;
 
   const timeline = turns[selectedTurnIndex] ?? [];
   const combo = useMemo(
@@ -170,8 +215,8 @@ export function App() {
     [turns],
   );
   const simulation = useMemo(
-    () => simulateCombo({ catalog: [...spells, ...passives], character, combo }),
-    [character, combo, passives, spells],
+    () => simulateCombo({ catalog, character, combo }),
+    [catalog, character, combo],
   );
   const turnRows = useMemo(() => createTurnRows({ turns, turnResults: simulation.turns }), [simulation.turns, turns]);
   const cursorMarks = useMemo(() => createTimelineCursorMarks(turns.map((turn) => turn.length)), [turns]);
@@ -212,6 +257,12 @@ export function App() {
   }, [snapshots.length]);
 
   useEffect(() => {
+    if (typeof window !== "undefined") {
+      saveResearchWorkspace(window.localStorage, researchWorkspace);
+    }
+  }, [researchWorkspace]);
+
+  useEffect(() => {
     setUiLocale(locale);
     document.documentElement.lang = locale;
     document.documentElement.classList.add("notranslate");
@@ -222,6 +273,38 @@ export function App() {
   function changeLocale(nextLocale: UiLocale) {
     setUiLocale(nextLocale);
     setLocale(nextLocale);
+  }
+
+  function createResearchBuild(input: { classId: WakfuClassId; gameplayLabel: string; name: string }) {
+    setResearchWorkspace((workspace) => {
+      const nextWorkspace = createBuild(workspace, { ...input, now: new Date().toISOString() });
+      const createdBuild = nextWorkspace.builds.at(-1);
+      if (createdBuild && createdBuild.id !== workspace.builds.at(-1)?.id) {
+        setResearchRoute(openBuild(researchRoute, createdBuild.id));
+      }
+      return nextWorkspace;
+    });
+  }
+
+  function openSetupInBuilder(setup: SetupSnapshot, candidate?: OptimizerCandidateViewModel) {
+    applySetupToBuilder(setup, candidate?.plan);
+    setResearchRoute(openBuilderFromSetup(researchRoute, setup.buildId, setup.id));
+  }
+
+  function applySetupToBuilder(setup: SetupSnapshot, plan?: ComboPlan) {
+    const distribution = createDefaultAptitudeDistribution(setup.character.stats.level ?? 200);
+    setAptitudeDistribution(distribution);
+    setCharacterConfig(setup.character);
+    setEquipmentCharacter(createEquipmentCharacterFromFinalCharacter(setup.character, distribution));
+    setCenterTab("combos");
+    const nextTurns = plan
+      ? plan.turns.map((turn) => turn.actions.map(createTimelineActionFromAction))
+      : [[]];
+    setTurns(nextTurns.length > 0 ? nextTurns : [[]]);
+    setSelectedTurnIndex(0);
+    setSelectedTimelineUid(nextTurns[0]?.[0]?.uid ?? null);
+    setSelectedCatalogEntryId(null);
+    setSelectedStep(0);
   }
 
   function insertAction(spellId: string, index = timeline.length) {
@@ -562,14 +645,77 @@ export function App() {
     }
   }
 
+  if (researchRoute.page === "library") {
+    return (
+      <>
+        <AppHeader locale={locale} onChangeLocale={changeLocale} />
+        <ResearchLibraryPage
+          classFilter={buildClassFilter}
+          workspace={researchWorkspace}
+          onClassFilterChange={setBuildClassFilter}
+          onCreateBuild={createResearchBuild}
+          onOpenBuild={(buildId) => setResearchRoute(openBuild(researchRoute, buildId))}
+          onOpenQuickBuilder={() => setResearchRoute({ page: "builder" })}
+        />
+      </>
+    );
+  }
+
+  if (researchRoute.page === "build" && activeBuild) {
+    const setups = getBuildSetups(researchWorkspace, activeBuild.id);
+    return (
+      <>
+        <AppHeader locale={locale} onChangeLocale={changeLocale} />
+        <BuildPage
+          build={activeBuild}
+          runs={getBuildRuns(researchWorkspace, activeBuild.id)}
+          savedCombos={getBuildSavedCombos(researchWorkspace, activeBuild.id)}
+          setups={setups}
+          onBack={() => setResearchRoute({ page: "library" })}
+          onOpenBuilder={(setup) => openSetupInBuilder(setup)}
+          onOpenOptimizer={(setup) => setResearchRoute(openOptimizerFromSetup(researchRoute, activeBuild.id, setup.id))}
+          onOpenSetup={(setup) => setResearchRoute(openSetup(researchRoute, activeBuild.id, setup.id))}
+        />
+      </>
+    );
+  }
+
+  if (researchRoute.page === "setup" && activeBuild && activeSetup) {
+    return (
+      <>
+        <AppHeader locale={locale} onChangeLocale={changeLocale} />
+        <SetupPage
+          build={activeBuild}
+          setup={activeSetup}
+          onBack={() => setResearchRoute(returnToPrevious(researchRoute))}
+          onOpenBuilder={() => openSetupInBuilder(activeSetup)}
+          onOpenOptimizer={() => setResearchRoute(openOptimizerFromSetup(researchRoute, activeBuild.id, activeSetup.id))}
+        />
+      </>
+    );
+  }
+
+  if (researchRoute.page === "optimizer" && activeBuild && activeSetup) {
+    return (
+      <>
+        <AppHeader locale={locale} onChangeLocale={changeLocale} />
+        <OptimizerWorkspacePage
+          build={activeBuild}
+          catalog={catalog}
+          setup={activeSetup}
+          onBack={() => setResearchRoute(returnToPrevious(researchRoute))}
+          onOpenCandidate={(candidate) => {
+            openCandidateInBuilder(activeSetup, candidate);
+            openSetupInBuilder(activeSetup, candidate);
+          }}
+        />
+      </>
+    );
+  }
+
   return (
     <>
-      <header className="app-header" aria-label={t("app.title")}>
-        <div className="project-brand">
-          <strong>{t("app.projectName")}</strong>
-        </div>
-        <LanguageSelector locale={locale} onChange={changeLocale} />
-      </header>
+      <AppHeader locale={locale} onChangeLocale={changeLocale} onOpenLibrary={() => setResearchRoute(returnToBuild(researchRoute))} />
 
       <main className="app-shell">
         <section className="live-results" aria-label={t("app.liveResults")}>
@@ -951,6 +1097,61 @@ function createDefaultTimeline(): TimelineAction[] {
   ];
 }
 
+function createTimelineActionFromAction(action: Action): TimelineAction {
+  return {
+    target: defaultActionTarget,
+    context: defaultActionContext,
+    ...action,
+    uid: crypto.randomUUID(),
+  };
+}
+
+function createEquipmentCharacterFromFinalCharacter(
+  finalCharacter: SimulatedCharacter,
+  aptitudeDistribution: AptitudeDistribution,
+): SimulatedCharacter {
+  const aptitudeStats = computeAptitudeStats(aptitudeDistribution);
+  const stats: BaseStats = {
+    ...finalCharacter.stats,
+    elementalMastery: {
+      fire: finalCharacter.stats.elementalMastery.fire - aptitudeStats.stats.elementalMastery.fire,
+      water: finalCharacter.stats.elementalMastery.water - aptitudeStats.stats.elementalMastery.water,
+      earth: finalCharacter.stats.elementalMastery.earth - aptitudeStats.stats.elementalMastery.earth,
+      air: finalCharacter.stats.elementalMastery.air - aptitudeStats.stats.elementalMastery.air,
+      light: finalCharacter.stats.elementalMastery.light - aptitudeStats.stats.elementalMastery.light,
+      neutral: finalCharacter.stats.elementalMastery.neutral - aptitudeStats.stats.elementalMastery.neutral,
+    },
+  };
+
+  for (const key of additiveStatKeys) {
+    stats[key] = finalCharacter.stats[key] - aptitudeStats.stats[key];
+  }
+
+  return {
+    ...createDefaultEquipmentCharacter(),
+    resources: createResources({
+      ap: finalCharacter.resources.ap - aptitudeStats.resources.ap,
+      mp: finalCharacter.resources.mp - aptitudeStats.resources.mp,
+      wp: finalCharacter.resources.wp - aptitudeStats.resources.wp,
+      bq: finalCharacter.resources.bq - aptitudeStats.resources.bq,
+    }),
+    stats,
+  };
+}
+
+function createMemoryStorageFallback() {
+  const values = new Map<string, string>();
+  return {
+    getItem: (key: string) => values.get(key) ?? null,
+    removeItem: (key: string) => {
+      values.delete(key);
+    },
+    setItem: (key: string, value: string) => {
+      values.set(key, value);
+    },
+  };
+}
+
 function getSnapshotIndexForAction(turnIndex: number, actionIndex: number, snapshots: TimelineSnapshot[]): number {
   const snapshotIndex = snapshots.findIndex((snapshot) => snapshot.turnIndex === turnIndex && snapshot.actionIndex === actionIndex);
   return snapshotIndex >= 0 ? snapshotIndex : Math.max(0, snapshots.length - 1);
@@ -1016,6 +1217,32 @@ function PanelHeader({ title, subtitle }: { title: string; subtitle?: string }) 
       <h2>{title}</h2>
       {subtitle ? <span>{subtitle}</span> : null}
     </div>
+  );
+}
+
+function AppHeader({
+  locale,
+  onChangeLocale,
+  onOpenLibrary,
+}: {
+  locale: UiLocale;
+  onChangeLocale: (locale: UiLocale) => void;
+  onOpenLibrary?: () => void;
+}) {
+  return (
+    <header className="app-header" aria-label={t("app.title")}>
+      <div className="project-brand">
+        <strong>{t("app.projectName")}</strong>
+      </div>
+      <div className="app-header-actions">
+        {onOpenLibrary ? (
+          <button className="secondary-button" type="button" onClick={onOpenLibrary}>
+            Laboratoire
+          </button>
+        ) : null}
+        <LanguageSelector locale={locale} onChange={onChangeLocale} />
+      </div>
+    </header>
   );
 }
 
