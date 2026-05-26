@@ -44,6 +44,30 @@ const catalog = normalizeCatalog([
     constraints: [],
     metadata: { status: "extracted", sources: [source] },
   }),
+  spell("cheap-utility", {
+    name: "Cheap Utility",
+    level: 200,
+    cost: cost({ ap: 1 }),
+    effects: [],
+    constraints: [],
+    metadata: { status: "extracted", sources: [source] },
+  }),
+  spell("expensive-utility", {
+    name: "Expensive Utility",
+    level: 200,
+    cost: cost({ ap: 3 }),
+    effects: [],
+    constraints: [],
+    metadata: { status: "extracted", sources: [source] },
+  }),
+  spell("zero-noop", {
+    name: "Zero Noop",
+    level: 200,
+    cost: cost({}),
+    effects: [],
+    constraints: [],
+    metadata: { status: "extracted", sources: [source] },
+  }),
 ]) as CatalogEntry[];
 
 const character: SimulatedCharacter = {
@@ -177,4 +201,112 @@ test("limits returned optimizer candidates deterministically", () => {
 
   assert.equal(results.length, 2);
   assert.ok(results[0].score.score >= results[1].score.score);
+});
+
+test("searches exact turn count without shorter candidates", () => {
+  const results = optimizeCombo({
+    catalog,
+    character,
+    availableSpellIds: ["light-hit", "fire-hit"],
+    exactTurnCount: 2,
+    maxTurns: 3,
+    maxActionsPerTurn: 1,
+    criterion: { type: "totalDamage" },
+  });
+
+  assert.ok(results.length > 0);
+  assert.ok(results.every((result) => result.plan.turns.length === 2));
+});
+
+test("uses deterministic beam search for richer action counts", () => {
+  const firstRun = optimizeCombo({
+    catalog,
+    character,
+    availableSpellIds: ["light-hit", "fire-hit"],
+    exactTurnCount: 1,
+    maxTurns: 1,
+    beamWidth: 2,
+    maxCandidates: 3,
+    criterion: { type: "totalDamage" },
+  });
+  const secondRun = optimizeCombo({
+    catalog,
+    character,
+    availableSpellIds: ["fire-hit", "light-hit"],
+    exactTurnCount: 1,
+    maxTurns: 1,
+    beamWidth: 2,
+    maxCandidates: 3,
+    criterion: { type: "totalDamage" },
+  });
+
+  assert.deepEqual(
+    firstRun.map((result) => result.plan),
+    secondRun.map((result) => result.plan),
+  );
+  assert.deepEqual(firstRun[0]?.plan.turns[0]?.actions.map((action) => action.spellId), [
+    "fire-hit",
+    "light-hit",
+    "light-hit",
+    "light-hit",
+    "light-hit",
+    "light-hit",
+    "light-hit",
+  ]);
+  assert.ok((firstRun[0]?.plan.turns[0]?.actions.length ?? 0) > character.resources.ap);
+  assert.equal(firstRun[0]?.score.score, 260);
+});
+
+test("beam search prefers greater resource use when scores tie", () => {
+  const results = optimizeCombo({
+    catalog,
+    character,
+    availableSpellIds: ["cheap-utility", "expensive-utility"],
+    exactTurnCount: 1,
+    maxTurns: 1,
+    maxActionsPerTurn: 1,
+    beamWidth: 2,
+    maxCandidates: 2,
+    criterion: { type: "totalDamage" },
+  });
+
+  assert.deepEqual(results[0]?.plan.turns[0]?.actions.map((action) => action.spellId), ["expensive-utility"]);
+});
+
+test("beam search prunes repeated simulator states instead of relying on an action-count limit", () => {
+  const results = optimizeCombo({
+    catalog,
+    character,
+    availableSpellIds: ["zero-noop", "light-hit"],
+    exactTurnCount: 1,
+    maxTurns: 1,
+    beamWidth: 4,
+    maxCandidates: 3,
+    criterion: { type: "totalDamage" },
+  });
+
+  assert.ok(results.length > 0);
+  assert.ok(results.every((result) => result.plan.turns[0]?.actions.length));
+  assert.ok(results.every((result) => !result.plan.turns[0]?.actions.some((action) => action.spellId === "zero-noop")));
+});
+
+test("beam search preserves sustainable cycle filtering", () => {
+  const results = optimizeCombo({
+    catalog,
+    character: {
+      ...character,
+      resources: createResources({ ap: 6, mp: 3, wp: 1, bq: 500 }),
+    },
+    availableSpellIds: ["balanced-bq-cycle", "draining-bq-cycle"],
+    exactTurnCount: 1,
+    maxTurns: 1,
+    maxActionsPerTurn: 1,
+    beamWidth: 2,
+    requireSustainableCycle: true,
+    criterion: { type: "totalDamage" },
+  });
+
+  assert.ok(results.length > 0);
+  assert.ok(results.every((result) => result.sustainability.sustainable));
+  assert.ok(results.every((result) => result.plan.turns[0]?.actions[0]?.spellId === "balanced-bq-cycle"));
 });

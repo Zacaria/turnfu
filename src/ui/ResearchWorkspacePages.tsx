@@ -335,6 +335,16 @@ export function OptimizerWorkspacePage({
           </select>
         </label>
         <label className="field">
+          Largeur
+          <input
+            type="number"
+            min={1}
+            max={200}
+            value={controls.beamWidth}
+            onChange={(event) => updateControls({ beamWidth: Number(event.target.value) })}
+          />
+        </label>
+        <label className="field">
           Résultats
           <input
             type="number"

@@ -18,8 +18,8 @@ export type OptimizerWorkspaceControls = {
   scoreCriterion: OptimizerScoreCriterionId;
   targetElement: Exclude<Element, "light" | "neutral">;
   requireSustainableCycle: boolean;
+  beamWidth: number;
   maxResultsPerDuration: number;
-  maxActionsPerTurn: number;
 };
 
 export type OptimizerCandidateViewModel = {
@@ -53,8 +53,8 @@ export function createDefaultOptimizerControls(): OptimizerWorkspaceControls {
     scoreCriterion: "totalDamage",
     targetElement: "fire",
     requireSustainableCycle: false,
+    beamWidth: 40,
     maxResultsPerDuration: 10,
-    maxActionsPerTurn: 1,
   };
 }
 
@@ -67,8 +67,8 @@ export function normalizeOptimizerControls(controls: OptimizerWorkspaceControls)
   return {
     ...controls,
     durations: durations.length > 0 ? durations : [1],
+    beamWidth: clampInteger(controls.beamWidth, 1, 200),
     maxResultsPerDuration: clampInteger(controls.maxResultsPerDuration, 1, 50),
-    maxActionsPerTurn: clampInteger(controls.maxActionsPerTurn, 1, 3),
   };
 }
 
@@ -87,7 +87,8 @@ export function createOptimizerOptionsForSetup(
     catalog,
     character: setup.character,
     maxTurns: clampInteger(duration, 1, 3),
-    maxActionsPerTurn: normalizedControls.maxActionsPerTurn,
+    exactTurnCount: clampInteger(duration, 1, 3),
+    beamWidth: normalizedControls.beamWidth,
     availableSpellIds: getSetupSupportedSpellIds(setup, catalog),
     requireSustainableCycle: normalizedControls.requireSustainableCycle,
     criterion,

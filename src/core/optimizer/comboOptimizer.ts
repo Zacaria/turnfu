@@ -3,6 +3,7 @@ import { simulateCombo } from "../simulation/comboSimulator.ts";
 import { roundDamage } from "../simulation/damage.ts";
 import type {
   Action,
+  ActionResult,
   BaseStats,
   ClassTurnState,
   ComboPlan,
@@ -20,7 +21,8 @@ export type ComboOptimizerOptions = {
   catalog: CatalogEntry[];
   character: SimulatedCharacter;
   maxTurns: number;
-  maxActionsPerTurn: number;
+  maxActionsPerTurn?: number;
+  exactTurnCount?: number;
   availableSpellIds?: string[];
   beamWidth?: number;
   maxCandidates?: number;
@@ -89,6 +91,11 @@ export function scoreComboSimulation(
 }
 
 export function optimizeCombo(options: ComboOptimizerOptions): ComboOptimizerResult[] {
+  if (options.beamWidth && options.beamWidth > 0) {
+    const ranked = optimizeComboWithBeamSearch(options);
+    return ranked.slice(0, options.maxCandidates ?? options.beamWidth ?? ranked.length);
+  }
+
   const results: ComboOptimizerResult[] = [];
 
   for (const plan of generateCandidatePlans(options)) {
@@ -196,17 +203,272 @@ function createElementDamageRecord(): Record<Element, number> {
 
 function generateCandidatePlans(options: ComboOptimizerOptions): ComboPlan[] {
   const maxTurns = clampInteger(options.maxTurns, 1, 3);
-  const maxActionsPerTurn = clampInteger(options.maxActionsPerTurn, 1, 12);
+  const minTurns = options.exactTurnCount ? clampInteger(options.exactTurnCount, 1, 3) : 1;
+  const turnLimit = options.exactTurnCount ? minTurns : maxTurns;
+  const maxActionsPerTurn = clampInteger(options.maxActionsPerTurn ?? 12, 1, 12);
   const turnPlans = generateTurnPlans(getSearchSpellIds(options), maxActionsPerTurn);
   const plans: ComboPlan[] = [];
 
-  for (let turnCount = 1; turnCount <= maxTurns; turnCount += 1) {
+  for (let turnCount = minTurns; turnCount <= turnLimit; turnCount += 1) {
     for (const turns of combineTurnPlans(turnPlans, turnCount)) {
       plans.push({ turns });
     }
   }
 
   return plans;
+}
+
+type BeamSearchEntry = {
+  plan: ComboPlan;
+  result: ComboOptimizerResult;
+  seenStateKeys: Set<string>;
+};
+
+function optimizeComboWithBeamSearch(options: ComboOptimizerOptions): ComboOptimizerResult[] {
+  const targetTurnCount = clampInteger(options.exactTurnCount ?? options.maxTurns, 1, 3);
+  const maxActionsPerTurn = options.maxActionsPerTurn ? clampInteger(options.maxActionsPerTurn, 1, 12) : undefined;
+  const beamWidth = clampInteger(options.beamWidth ?? 1, 1, 500);
+  const spellIds = getSearchSpellIds(options);
+  const completed = new Map<string, ComboOptimizerResult>();
+  let frontier: BeamSearchEntry[] = [];
+
+  for (const spellId of spellIds) {
+    const plan = { turns: [{ actions: [{ spellId }] }] };
+    const entry = createBeamEntry(options, plan, new Set());
+    if (!entry) {
+      continue;
+    }
+    addCompletedCandidate(completed, options, entry.plan, targetTurnCount);
+    frontier.push(entry);
+  }
+
+  frontier = rankBeamEntries(frontier).slice(0, beamWidth);
+
+  while (frontier.length > 0) {
+    const nextFrontier: BeamSearchEntry[] = [];
+
+    for (const entry of frontier) {
+      const currentTurn = entry.plan.turns.at(-1);
+      if (!currentTurn) {
+        continue;
+      }
+
+      if (currentTurn.actions.length > 0 && entry.plan.turns.length < targetTurnCount) {
+        nextFrontier.push({
+          plan: {
+            turns: [
+              ...entry.plan.turns.map(cloneTurnPlan),
+              { actions: [] },
+            ],
+          },
+          result: entry.result,
+          seenStateKeys: new Set(entry.seenStateKeys),
+        });
+      }
+
+      if (maxActionsPerTurn !== undefined && currentTurn.actions.length >= maxActionsPerTurn) {
+        continue;
+      }
+
+      for (const spellId of spellIds) {
+        const plan = appendActionToPlan(entry.plan, { spellId });
+        const nextEntry = createBeamEntry(options, plan, entry.seenStateKeys);
+        if (!nextEntry) {
+          continue;
+        }
+
+        addCompletedCandidate(completed, options, nextEntry.plan, targetTurnCount);
+        nextFrontier.push(nextEntry);
+      }
+    }
+
+    frontier = rankBeamEntries(dedupeBeamEntries(nextFrontier)).slice(0, beamWidth);
+  }
+
+  return [...completed.values()].sort(compareOptimizerResults);
+}
+
+function createOptimizerResult(options: ComboOptimizerOptions, plan: ComboPlan): ComboOptimizerResult | null {
+  const simulation = simulateValidCombo(options, plan);
+  if (!simulation) {
+    return null;
+  }
+
+  const sustainability = options.requireSustainableCycle
+    ? evaluateSustainableCycle({
+      catalog: options.catalog,
+      character: options.character,
+      plan,
+      defaultActionContext: options.defaultActionContext,
+    })
+    : {
+      required: false,
+      sustainable: true,
+    };
+
+  if (!sustainability.sustainable) {
+    return null;
+  }
+
+  return {
+    plan,
+    simulation,
+    score: scoreComboSimulation(simulation, options.criterion),
+    sustainability,
+  };
+}
+
+function createScoredOptimizerResult(options: ComboOptimizerOptions, plan: ComboPlan): ComboOptimizerResult | null {
+  const simulation = simulateValidCombo(options, plan);
+  if (!simulation) {
+    return null;
+  }
+
+  return {
+    plan,
+    simulation,
+    score: scoreComboSimulation(simulation, options.criterion),
+    sustainability: {
+      required: false,
+      sustainable: true,
+    },
+  };
+}
+
+function createBeamEntry(
+  options: ComboOptimizerOptions,
+  plan: ComboPlan,
+  previousStateKeys: Set<string>,
+): BeamSearchEntry | null {
+  const candidate = createScoredOptimizerResult(options, plan);
+  if (!candidate) {
+    return null;
+  }
+
+  const action = getLastActionResult(candidate.simulation);
+  if (!action) {
+    return null;
+  }
+
+  const turnIndex = plan.turns.length - 1;
+  const beforeStateKey = createActionStateKey(action, turnIndex, "before");
+  const afterStateKey = createActionStateKey(action, turnIndex, "after");
+  const seenStateKeys = new Set(previousStateKeys);
+  if (seenStateKeys.size === 0) {
+    seenStateKeys.add(beforeStateKey);
+  }
+
+  if (action.damage === 0 && beforeStateKey === afterStateKey) {
+    return null;
+  }
+
+  if (
+    action.damage === 0
+    && computeActionResourceUse(action) === 0
+    && hasAlreadyCastSpellInCurrentTurn(plan, action.spellId)
+  ) {
+    return null;
+  }
+
+  if (seenStateKeys.has(afterStateKey)) {
+    return null;
+  }
+
+  return {
+    plan: candidate.plan,
+    result: candidate,
+    seenStateKeys: new Set([...seenStateKeys, afterStateKey]),
+  };
+}
+
+function simulateValidCombo(options: ComboOptimizerOptions, plan: ComboPlan): ComboSimulationResult | null {
+  const simulation = simulateCombo({
+    catalog: options.catalog,
+    character: options.character,
+    combo: plan,
+    defaultActionContext: options.defaultActionContext,
+  });
+
+  return simulation.valid ? simulation : null;
+}
+
+function addCompletedCandidate(
+  completed: Map<string, ComboOptimizerResult>,
+  options: ComboOptimizerOptions,
+  plan: ComboPlan,
+  targetTurnCount: number,
+) {
+  if (plan.turns.length !== targetTurnCount) {
+    return;
+  }
+
+  if (plan.turns.some((turn) => turn.actions.length === 0)) {
+    return;
+  }
+
+  const candidate = createOptimizerResult(options, plan);
+  if (!candidate) {
+    return;
+  }
+
+  completed.set(serializePlan(candidate.plan), candidate);
+}
+
+function appendActionToPlan(plan: ComboPlan, action: Action): ComboPlan {
+  return {
+    turns: plan.turns.map((turn, index) => index === plan.turns.length - 1
+      ? { actions: [...turn.actions.map((existingAction) => ({ ...existingAction })), action] }
+      : cloneTurnPlan(turn)),
+  };
+}
+
+function rankBeamEntries(entries: BeamSearchEntry[]): BeamSearchEntry[] {
+  return entries.sort((left, right) => compareOptimizerResults(left.result, right.result));
+}
+
+function dedupeBeamEntries(entries: BeamSearchEntry[]): BeamSearchEntry[] {
+  const entriesByPlan = new Map<string, BeamSearchEntry>();
+  for (const entry of entries) {
+    entriesByPlan.set(serializePlan(entry.plan), entry);
+  }
+  return [...entriesByPlan.values()];
+}
+
+function hasAlreadyCastSpellInCurrentTurn(plan: ComboPlan, spellId: string): boolean {
+  const currentTurn = plan.turns.at(-1);
+  if (!currentTurn) {
+    return false;
+  }
+
+  return currentTurn.actions.slice(0, -1).some((action) => action.spellId === spellId);
+}
+
+function getLastActionResult(simulation: ComboSimulationResult): ActionResult | undefined {
+  return simulation.turns.at(-1)?.result.breakdown.at(-1);
+}
+
+function createActionStateKey(action: ActionResult, turnIndex: number, side: "before" | "after"): string {
+  return JSON.stringify({
+    turnIndex,
+    resources: side === "before" ? action.resourceBefore : action.resourceAfter,
+    classState: createLoopDetectionClassState(side === "before" ? action.classStateBefore : action.classStateAfter),
+    stats: side === "before" ? action.statsBefore : action.statsAfter,
+  });
+}
+
+function createLoopDetectionClassState(classState: ClassTurnState): ClassTurnState {
+  if (!classState.huppermage) {
+    return classState;
+  }
+
+  const { usedSpellIds: _usedSpellIds, ...huppermage } = classState.huppermage;
+  return {
+    ...classState,
+    huppermage: {
+      ...huppermage,
+      usedSpellIds: [],
+    },
+  };
 }
 
 function generateTurnPlans(spellIds: string[], maxActionsPerTurn: number): Array<{ actions: Action[] }> {
@@ -258,7 +520,27 @@ function compareOptimizerResults(left: ComboOptimizerResult, right: ComboOptimiz
     return scoreDifference;
   }
 
+  const resourceUseDifference = computeResourceUse(right) - computeResourceUse(left);
+  if (resourceUseDifference !== 0) {
+    return resourceUseDifference;
+  }
+
   return serializePlan(left.plan).localeCompare(serializePlan(right.plan));
+}
+
+function computeResourceUse(result: ComboOptimizerResult): number {
+  return result.simulation.turns.reduce((total, turn) => (
+    total + turn.result.breakdown.reduce((turnTotal, action) => (
+      turnTotal + computeActionResourceUse(action)
+    ), 0)
+  ), 0);
+}
+
+function computeActionResourceUse(action: ActionResult): number {
+  return Math.max(0, action.resourceBefore.ap - action.resourceAfter.ap)
+    + Math.max(0, action.resourceBefore.mp - action.resourceAfter.mp)
+    + Math.max(0, action.resourceBefore.wp - action.resourceAfter.wp)
+    + Math.max(0, action.resourceBefore.bq - action.resourceAfter.bq);
 }
 
 function serializePlan(plan: ComboPlan): string {

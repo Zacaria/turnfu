@@ -47,6 +47,7 @@ test("maps setup snapshots and controls to core optimizer options", () => {
   const controls = {
     ...createDefaultOptimizerControls(),
     durations: [1, 3],
+    beamWidth: 25,
     maxResultsPerDuration: 7,
     scoreCriterion: "elementDamage" as const,
     targetElement: "fire" as const,
@@ -59,6 +60,9 @@ test("maps setup snapshots and controls to core optimizer options", () => {
   assert.equal(options.defaultActionContext, setup.defaultActionContext);
   assert.deepEqual(options.availableSpellIds, setup.deckSpellIds.filter((spellId) => catalog.some((entry) => entry.id === spellId)));
   assert.equal(options.maxTurns, 3);
+  assert.equal(options.exactTurnCount, 3);
+  assert.equal(options.beamWidth, 25);
+  assert.equal(options.maxActionsPerTurn, undefined);
   assert.equal(options.criterion.type, "elementDamage");
   assert.equal(options.criterion.type === "elementDamage" ? options.criterion.element : null, "fire");
   assert.equal(options.requireSustainableCycle, true);
@@ -67,11 +71,13 @@ test("maps setup snapshots and controls to core optimizer options", () => {
 test("normalizes optimizer controls to supported durations and result limits", () => {
   const controls = normalizeOptimizerControls({
     ...createDefaultOptimizerControls(),
+    beamWidth: 999,
     durations: [0, 1, 3, 7],
     maxResultsPerDuration: 999,
   });
 
   assert.deepEqual(controls.durations, [1, 3]);
+  assert.equal(controls.beamWidth, 200);
   assert.equal(controls.maxResultsPerDuration, 50);
 });
 
@@ -99,7 +105,6 @@ test("groups optimizer results by exact duration without cross-ranking raw total
   const groups = groupOptimizerResultsByDuration(setup, catalog, {
     ...createDefaultOptimizerControls(),
     durations: [1, 2, 3],
-    maxActionsPerTurn: 1,
     maxResultsPerDuration: 2,
   });
 
@@ -135,18 +140,17 @@ test("builds result view models with normalized metrics and resolved element dam
   const [candidate] = groupOptimizerResultsByDuration(setup, catalog, {
     ...createDefaultOptimizerControls(),
     durations: [1],
-    maxActionsPerTurn: 1,
     scoreCriterion: "elementDamage",
     targetElement: "water",
   })[1];
 
   assert.ok(candidate);
   assert.equal(candidate.duration, 1);
-  assert.equal(candidate.damageByResolvedElement.water, 40);
-  assert.equal(candidate.score, 40);
-  assert.equal(candidate.damagePerTurn, 40);
+  assert.equal(candidate.damageByResolvedElement.water, 480);
+  assert.equal(candidate.score, 480);
+  assert.equal(candidate.damagePerTurn, 480);
   assert.equal(candidate.damagePerAp, 40);
-  assert.equal(candidate.finalResources.ap, 11);
+  assert.equal(candidate.finalResources.ap, 0);
 });
 
 test("compares pinned candidates across durations using normalized metrics", () => {
@@ -157,7 +161,6 @@ test("compares pinned candidates across durations using normalized metrics", () 
   const groups = groupOptimizerResultsByDuration(setup, catalog, {
     ...createDefaultOptimizerControls(),
     durations: [1, 2],
-    maxActionsPerTurn: 1,
   });
   const comparison = createPinnedCandidateComparison([groups[1][0], groups[2][0]]);
 
