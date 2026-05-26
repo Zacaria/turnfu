@@ -5,12 +5,15 @@ import { cost, damage, normalizeCatalog, screenshot, spell } from "../core/catal
 import { createSeedResearchWorkspace } from "./researchWorkspace.ts";
 import {
   createDefaultOptimizerControls,
+  createOptimizerCandidateId,
   createOptimizerOptionsForSetup,
   createOptimizerResultViewModel,
   createPinnedCandidateComparison,
+  createSavedComboName,
   groupOptimizerResultsByDuration,
   normalizeOptimizerControls,
   openCandidateInBuilder,
+  summarizeOptimizerControls,
 } from "./optimizerWorkspace.ts";
 
 const source = screenshot("/tmp/optimizer-workspace-test.png", "optimizer-workspace-test");
@@ -79,6 +82,20 @@ test("normalizes optimizer controls to supported durations and result limits", (
   assert.deepEqual(controls.durations, [1, 3]);
   assert.equal(controls.beamWidth, 200);
   assert.equal(controls.maxResultsPerDuration, 50);
+});
+
+test("summarizes optimizer controls for saved run references", () => {
+  const summary = summarizeOptimizerControls({
+    ...createDefaultOptimizerControls(),
+    durations: [3, 1],
+    scoreCriterion: "elementDamage",
+    targetElement: "water",
+    requireSustainableCycle: true,
+    beamWidth: 25,
+    maxResultsPerDuration: 7,
+  });
+
+  assert.equal(summary, "1T, 3T · dégâts eau · cycle soutenable · largeur 25 · 7 résultats");
 });
 
 test("groups optimizer results by exact duration without cross-ranking raw totals", () => {
@@ -216,4 +233,6 @@ test("creates builder handoff payload from an optimizer candidate", () => {
   assert.equal(handoff.setupSnapshotId, setup.id);
   assert.equal(handoff.character, setup.character);
   assert.deepEqual(handoff.plan, result.plan);
+  assert.equal(createOptimizerCandidateId(result.plan), "light-hit");
+  assert.equal(createSavedComboName(result), "1T · 40 dégâts · 40/tour");
 });

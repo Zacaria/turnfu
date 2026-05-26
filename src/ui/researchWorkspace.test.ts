@@ -5,11 +5,13 @@ import { createResources } from "../core/simulation/index.ts";
 import {
   createBuild,
   createMemoryWorkspaceStorage,
+  createOptimizerRunReference,
   createSeedResearchWorkspace,
   filterBuildsByClass,
   isWakfuClassSelectable,
   restoreResearchWorkspace,
   saveResearchWorkspace,
+  saveOptimizerCandidateCombo,
 } from "./researchWorkspace.ts";
 import {
   createResearchRoute,
@@ -83,6 +85,42 @@ test("saves and restores workspace data from local storage", () => {
   const restored = restoreResearchWorkspace(storage);
 
   assert.deepEqual(restored, withRun);
+});
+
+test("creates optimizer run and saved combo references for a build setup", () => {
+  const workspace = createSeedResearchWorkspace({ now: "2026-05-26T10:00:00.000Z" });
+  const setup = workspace.setupSnapshots[0];
+  assert.ok(setup);
+
+  const withRun = createOptimizerRunReference(workspace, {
+    buildId: setup.buildId,
+    setupSnapshotId: setup.id,
+    label: "Run eau soutenable",
+    criteriaSummary: "1T, 2T · dégâts eau · cycle soutenable",
+    now: "2026-05-26T10:05:00.000Z",
+  });
+  const run = withRun.optimizerRuns[0];
+  assert.ok(run);
+  assert.equal(run.buildId, setup.buildId);
+  assert.equal(run.setupSnapshotId, setup.id);
+  assert.equal(run.label, "Run eau soutenable");
+  assert.deepEqual(withRun.builds[0].optimizerRunIds, [run.id]);
+  assert.equal(withRun.builds[0].updatedAt, "2026-05-26T10:05:00.000Z");
+
+  const withCombo = saveOptimizerCandidateCombo(withRun, {
+    buildId: setup.buildId,
+    setupSnapshotId: setup.id,
+    name: "Combo 2T eau",
+    plan: { turns: [{ actions: [{ spellId: "lueur-de-laube" }] }] },
+    totalDamage: 480,
+    now: "2026-05-26T10:06:00.000Z",
+  });
+  const combo = withCombo.savedCombos[0];
+  assert.ok(combo);
+  assert.equal(combo.name, "Combo 2T eau");
+  assert.equal(combo.totalDamage, 480);
+  assert.deepEqual(withCombo.builds[0].savedComboIds, [combo.id]);
+  assert.equal(withCombo.builds[0].updatedAt, "2026-05-26T10:06:00.000Z");
 });
 
 test("filters builds by class", () => {

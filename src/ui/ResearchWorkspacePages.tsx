@@ -1,4 +1,4 @@
-import { ArrowLeft, BarChart3, Boxes, Check, Pin, Plus, Search, Wrench } from "lucide-react";
+import { ArrowLeft, BarChart3, Boxes, Check, Pin, Plus, Save, Search, Wrench } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { CatalogEntry } from "../core/catalog/types.ts";
 import {
@@ -262,17 +262,24 @@ export function OptimizerWorkspacePage({
   catalog,
   onBack,
   onOpenCandidate,
+  onSaveCandidate,
+  onSaveRun,
+  savedCandidateIds,
   setup,
 }: {
   build: ResearchBuild;
   catalog: CatalogEntry[];
   onBack: () => void;
   onOpenCandidate: (candidate: OptimizerCandidateViewModel) => void;
+  onSaveCandidate: (candidate: OptimizerCandidateViewModel) => void;
+  onSaveRun: (controls: OptimizerWorkspaceControls) => void;
+  savedCandidateIds: string[];
   setup: SetupSnapshot;
 }) {
   const [controls, setControls] = useState<OptimizerWorkspaceControls>(() => createDefaultOptimizerControls());
   const [pinnedIds, setPinnedIds] = useState<string[]>([]);
   const normalizedControls = normalizeOptimizerControls(controls);
+  const savedCandidateIdSet = useMemo(() => new Set(savedCandidateIds), [savedCandidateIds]);
   const groups = useMemo(
     () => groupOptimizerResultsByDuration(setup, catalog, normalizedControls),
     [catalog, normalizedControls, setup],
@@ -298,7 +305,13 @@ export function OptimizerWorkspacePage({
           <span>{setup.name} · {formatWakfuClassLabel(build.classId)}</span>
           <h1>Recherche de combos</h1>
         </div>
-        <span className="status-pill status-ok">Max 3 tours</span>
+        <div className="header-actions">
+          <button className="secondary-button" type="button" onClick={() => onSaveRun(normalizedControls)}>
+            <Save size={16} />
+            Sauvegarder run
+          </button>
+          <span className="status-pill status-ok">Max 3 tours</span>
+        </div>
       </section>
 
       <section className="optimizer-controls">
@@ -373,7 +386,9 @@ export function OptimizerWorkspacePage({
                 candidate={candidate}
                 key={candidate.id}
                 pinned={pinnedIds.includes(candidate.id)}
+                saved={savedCandidateIdSet.has(candidate.id)}
                 onOpen={() => onOpenCandidate(candidate)}
+                onSave={() => onSaveCandidate(candidate)}
                 onTogglePin={() => setPinnedIds((current) => togglePinnedCandidate(current, candidate))}
               />
             )) : <EmptyState title="Aucun candidat" body="Aucun combo valide pour cette durée et ces critères." />}
@@ -475,13 +490,17 @@ function SetupSummary({
 function CandidateRow({
   candidate,
   onOpen,
+  onSave,
   onTogglePin,
   pinned,
+  saved,
 }: {
   candidate: OptimizerCandidateViewModel;
   onOpen: () => void;
+  onSave: () => void;
   onTogglePin: () => void;
   pinned: boolean;
+  saved: boolean;
 }) {
   return (
     <article className="candidate-row">
@@ -493,6 +512,15 @@ function CandidateRow({
       <div className="candidate-actions">
         <button className={pinned ? "icon-button active" : "icon-button"} type="button" onClick={onTogglePin} title="Épingler">
           {pinned ? <Check size={15} /> : <Pin size={15} />}
+        </button>
+        <button
+          className={saved ? "icon-button active" : "icon-button"}
+          type="button"
+          onClick={onSave}
+          title={saved ? "Combo sauvegardé" : "Sauvegarder combo"}
+          disabled={saved}
+        >
+          {saved ? <Check size={15} /> : <Save size={15} />}
         </button>
         <button className="secondary-button" type="button" onClick={onOpen}>Ouvrir</button>
       </div>

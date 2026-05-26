@@ -130,7 +130,7 @@ export function createOptimizerResultViewModel({
   const damagePerAp = roundMetric(totalDamage / Math.max(1, apSpent));
 
   return {
-    id: serializePlan(result.plan),
+    id: createOptimizerCandidateId(result.plan),
     duration,
     plan: result.plan,
     score: result.score.score,
@@ -145,6 +145,31 @@ export function createOptimizerResultViewModel({
     sustainabilityRequired: result.sustainability.required,
     source: result,
   };
+}
+
+export function createOptimizerCandidateId(plan: ComboPlan): string {
+  return serializePlan(plan);
+}
+
+export function summarizeOptimizerControls(controls: OptimizerWorkspaceControls): string {
+  const normalizedControls = normalizeOptimizerControls(controls);
+  const durationSummary = normalizedControls.durations.map((duration) => `${duration}T`).join(", ");
+  const scoringSummary = normalizedControls.scoreCriterion === "totalDamage"
+    ? "dégâts totaux"
+    : `dégâts ${elementLabels[normalizedControls.targetElement]}`;
+  const cycleSummary = normalizedControls.requireSustainableCycle ? "cycle soutenable" : "cycle libre";
+
+  return [
+    durationSummary,
+    scoringSummary,
+    cycleSummary,
+    `largeur ${normalizedControls.beamWidth}`,
+    `${normalizedControls.maxResultsPerDuration} résultats`,
+  ].join(" · ");
+}
+
+export function createSavedComboName(candidate: OptimizerCandidateViewModel): string {
+  return `${candidate.duration}T · ${candidate.totalDamage} dégâts · ${candidate.damagePerTurn}/tour`;
 }
 
 export function createPinnedCandidateComparison(candidates: OptimizerCandidateViewModel[]): OptimizerCandidateViewModel[] {
@@ -194,6 +219,13 @@ function countPlanActions(plan: ComboPlan): number {
 function serializePlan(plan: ComboPlan): string {
   return plan.turns.map((turn) => turn.actions.map((action) => action.spellId).join(",")).join("|");
 }
+
+const elementLabels: Record<Exclude<Element, "light" | "neutral">, string> = {
+  fire: "feu",
+  water: "eau",
+  earth: "terre",
+  air: "air",
+};
 
 function roundMetric(value: number): number {
   return Math.round(value * 100) / 100;

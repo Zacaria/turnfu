@@ -91,6 +91,23 @@ export type ResearchWorkspaceData = {
   savedCombos: SavedComboReference[];
 };
 
+export type CreateOptimizerRunReferenceInput = {
+  buildId: string;
+  setupSnapshotId: string;
+  label?: string;
+  criteriaSummary: string;
+  now?: string;
+};
+
+export type SaveOptimizerCandidateComboInput = {
+  buildId: string;
+  setupSnapshotId: string;
+  name?: string;
+  plan: ComboPlan;
+  totalDamage?: number;
+  now?: string;
+};
+
 export type WorkspaceStorage = Pick<Storage, "getItem" | "removeItem" | "setItem">;
 
 export const researchWorkspaceStorageKey = "wakfu-turn-optimizer:research-workspace:v1";
@@ -218,6 +235,71 @@ export function createBuild(
   };
 }
 
+export function createOptimizerRunReference(
+  workspace: ResearchWorkspaceData,
+  input: CreateOptimizerRunReferenceInput,
+): ResearchWorkspaceData {
+  if (!hasBuildSetupPair(workspace, input.buildId, input.setupSnapshotId)) {
+    return workspace;
+  }
+
+  const now = input.now ?? new Date().toISOString();
+  const label = input.label?.trim() || `Run optimizer ${formatTimestampLabel(now)}`;
+  const id = createUniqueStableId(
+    "run",
+    `${label}-${input.setupSnapshotId}`,
+    now,
+    workspace.optimizerRuns.map((run) => run.id),
+  );
+  const run: OptimizerRunReference = {
+    id,
+    buildId: input.buildId,
+    setupSnapshotId: input.setupSnapshotId,
+    label,
+    criteriaSummary: input.criteriaSummary.trim() || "Critères optimizer",
+    createdAt: now,
+  };
+
+  return {
+    ...workspace,
+    builds: appendBuildReference(workspace.builds, input.buildId, "optimizerRunIds", id, now),
+    optimizerRuns: [...workspace.optimizerRuns, run],
+  };
+}
+
+export function saveOptimizerCandidateCombo(
+  workspace: ResearchWorkspaceData,
+  input: SaveOptimizerCandidateComboInput,
+): ResearchWorkspaceData {
+  if (!hasBuildSetupPair(workspace, input.buildId, input.setupSnapshotId)) {
+    return workspace;
+  }
+
+  const now = input.now ?? new Date().toISOString();
+  const name = input.name?.trim() || `Combo ${formatTimestampLabel(now)}`;
+  const id = createUniqueStableId(
+    "combo",
+    `${name}-${input.setupSnapshotId}`,
+    now,
+    workspace.savedCombos.map((combo) => combo.id),
+  );
+  const combo: SavedComboReference = {
+    id,
+    buildId: input.buildId,
+    setupSnapshotId: input.setupSnapshotId,
+    name,
+    plan: input.plan,
+    totalDamage: input.totalDamage,
+    createdAt: now,
+  };
+
+  return {
+    ...workspace,
+    builds: appendBuildReference(workspace.builds, input.buildId, "savedComboIds", id, now),
+    savedCombos: [...workspace.savedCombos, combo],
+  };
+}
+
 export function filterBuildsByClass(builds: ResearchBuild[], classId: WakfuClassId | "all"): ResearchBuild[] {
   if (classId === "all") {
     return builds;
@@ -320,6 +402,47 @@ function createStableId(prefix: string, label: string, now: string): string {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 48) || "item";
-  const suffix = now.replace(/[^0-9]/g, "").slice(0, 14);
+  const suffix = now.replace(/[^0-9]/g, "").slice(0, 17);
   return `${prefix}-${slug}-${suffix}`;
+}
+
+function createUniqueStableId(prefix: string, label: string, now: string, existingIds: string[]): string {
+  const existingIdSet = new Set(existingIds);
+  const baseId = createStableId(prefix, label, now);
+  if (!existingIdSet.has(baseId)) {
+    return baseId;
+  }
+
+  let index = 2;
+  while (existingIdSet.has(`${baseId}-${index}`)) {
+    index += 1;
+  }
+  return `${baseId}-${index}`;
+}
+
+function hasBuildSetupPair(workspace: ResearchWorkspaceData, buildId: string, setupSnapshotId: string): boolean {
+  return workspace.builds.some((build) => build.id === buildId)
+    && workspace.setupSnapshots.some((setup) => setup.id === setupSnapshotId && setup.buildId === buildId);
+}
+
+function appendBuildReference(
+  builds: ResearchBuild[],
+  buildId: string,
+  key: "optimizerRunIds" | "savedComboIds",
+  id: string,
+  now: string,
+): ResearchBuild[] {
+  return builds.map((build) => (
+    build.id === buildId
+      ? {
+        ...build,
+        [key]: [...build[key], id],
+        updatedAt: now,
+      }
+      : build
+  ));
+}
+
+function formatTimestampLabel(now: string): string {
+  return now.slice(0, 16).replace("T", " ");
 }

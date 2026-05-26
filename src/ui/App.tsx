@@ -64,7 +64,14 @@ import { resolveDetailTarget } from "./detailSelection.ts";
 import { describeEffect, describeViolation, formatHeart, formatNumber, summarizeStats } from "./format.ts";
 import { HuppermageRuneAura } from "./HuppermageRuneAura.tsx?v=demo-frame-v1";
 import { getHuppermageIconSrc } from "./icons.ts";
-import { openCandidateInBuilder, type OptimizerCandidateViewModel } from "./optimizerWorkspace.ts";
+import {
+  createOptimizerCandidateId,
+  createSavedComboName,
+  openCandidateInBuilder,
+  summarizeOptimizerControls,
+  type OptimizerCandidateViewModel,
+  type OptimizerWorkspaceControls,
+} from "./optimizerWorkspace.ts";
 import {
   BuildPage,
   OptimizerWorkspacePage,
@@ -73,11 +80,13 @@ import {
 } from "./ResearchWorkspacePages.tsx";
 import {
   createBuild,
+  createOptimizerRunReference,
   getBuildRuns,
   getBuildSavedCombos,
   getBuildSetups,
   restoreResearchWorkspace,
   saveResearchWorkspace,
+  saveOptimizerCandidateCombo,
   type ResearchWorkspaceData,
   type SetupSnapshot,
   type WakfuClassId,
@@ -289,6 +298,28 @@ export function App() {
   function openSetupInBuilder(setup: SetupSnapshot, candidate?: OptimizerCandidateViewModel) {
     applySetupToBuilder(setup, candidate?.plan);
     setResearchRoute(openBuilderFromSetup(researchRoute, setup.buildId, setup.id));
+  }
+
+  function saveOptimizerRun(setup: SetupSnapshot, controls: OptimizerWorkspaceControls) {
+    const now = new Date().toISOString();
+    setResearchWorkspace((workspace) => createOptimizerRunReference(workspace, {
+      buildId: setup.buildId,
+      setupSnapshotId: setup.id,
+      label: `Run optimizer ${now.slice(0, 16).replace("T", " ")}`,
+      criteriaSummary: summarizeOptimizerControls(controls),
+      now,
+    }));
+  }
+
+  function saveOptimizerCombo(setup: SetupSnapshot, candidate: OptimizerCandidateViewModel) {
+    setResearchWorkspace((workspace) => saveOptimizerCandidateCombo(workspace, {
+      buildId: setup.buildId,
+      setupSnapshotId: setup.id,
+      name: createSavedComboName(candidate),
+      plan: candidate.plan,
+      totalDamage: candidate.totalDamage,
+      now: new Date().toISOString(),
+    }));
   }
 
   function applySetupToBuilder(setup: SetupSnapshot, plan?: ComboPlan) {
@@ -696,6 +727,10 @@ export function App() {
   }
 
   if (researchRoute.page === "optimizer" && activeBuild && activeSetup) {
+    const savedCandidateIds = getBuildSavedCombos(researchWorkspace, activeBuild.id)
+      .filter((comboReference) => comboReference.setupSnapshotId === activeSetup.id)
+      .map((comboReference) => createOptimizerCandidateId(comboReference.plan));
+
     return (
       <>
         <AppHeader locale={locale} onChangeLocale={changeLocale} />
@@ -703,11 +738,14 @@ export function App() {
           build={activeBuild}
           catalog={catalog}
           setup={activeSetup}
+          savedCandidateIds={savedCandidateIds}
           onBack={() => setResearchRoute(returnToPrevious(researchRoute))}
           onOpenCandidate={(candidate) => {
             openCandidateInBuilder(activeSetup, candidate);
             openSetupInBuilder(activeSetup, candidate);
           }}
+          onSaveCandidate={(candidate) => saveOptimizerCombo(activeSetup, candidate)}
+          onSaveRun={(controls) => saveOptimizerRun(activeSetup, controls)}
         />
       </>
     );
