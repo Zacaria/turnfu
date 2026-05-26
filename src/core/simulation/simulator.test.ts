@@ -344,7 +344,7 @@ test("simulates a valid one-spell sequence", () => {
   });
 
   assert.equal(result.valid, true);
-  assert.equal(result.totalDamage, 132);
+  assert.equal(result.totalDamage, 82.5);
   assert.deepEqual(result.finalState.remainingResources, createResources({ ap: 4, mp: 3, wp: 1, bq: 10 }));
   assert.equal(result.breakdown.length, 1);
 });
@@ -363,7 +363,7 @@ test("simulates a valid multi-spell sequence with resource changes", () => {
   });
 
   assert.equal(result.valid, true);
-  assert.equal(result.totalDamage, 616);
+  assert.equal(result.totalDamage, 385);
   assert.deepEqual(result.finalState.remainingResources, createResources({ ap: 0, mp: 3, wp: 1, bq: 0 }));
   assert.deepEqual(result.finalState.castsBySpellId, {
     "lueur-test": 2,
@@ -594,7 +594,7 @@ test("applies conditional caster effects before damage", () => {
   });
 
   assert.equal(result.valid, true);
-  assert.equal(result.breakdown[0].damage, 48);
+  assert.equal(result.breakdown[0].damage, 30);
   assert.equal(result.breakdown[0].statsAfter.damageInflictedPercent, 20);
 });
 
@@ -1674,7 +1674,7 @@ test("records damage totals and per-action breakdown", () => {
   });
 
   const [action] = result.breakdown;
-  assert.equal(action.damage, 132);
+  assert.equal(action.damage, 82.5);
   assert.deepEqual(action.resourceBefore, createResources({ ap: 6, mp: 3, wp: 1, bq: 0 }));
   assert.deepEqual(action.resourceAfter, createResources({ ap: 4, mp: 3, wp: 1, bq: 10 }));
   assert.equal(action.appliedEffects[0].type, "damage");
@@ -1711,15 +1711,74 @@ test("applies complete damage formula without target resistance", () => {
   });
 
   assert.equal(result.valid, true);
-  assert.equal(result.totalDamage, 243.38);
+  assert.equal(result.totalDamage, 181.5);
 
   const damageEffect = result.breakdown[0].appliedEffects[0];
   assert.equal(damageEffect.type, "damage");
-  assert.equal(damageEffect.formula.elementalMastery, 200);
+  assert.equal(damageEffect.formula.elementalMastery, 50);
+  assert.equal(damageEffect.resolvedElement, "earth");
   assert.equal(damageEffect.formula.extraMastery, 190);
   assert.equal(damageEffect.formula.criticalMultiplier, 1.25);
   assert.equal(damageEffect.formula.positionMultiplier, 1.25);
   assert.equal(damageEffect.formula.blockMultiplier, 0.8);
+});
+
+test("uses highest elemental mastery when computing Light damage", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      stats: {
+        ...character.stats,
+        generalMastery: 100,
+        elementalMastery: {
+          fire: 50,
+          water: 300,
+          earth: 100,
+          air: 75,
+          light: 900,
+        },
+        damageInflictedPercent: 10,
+      },
+    },
+    sequence: { actions: [{ spellId: "lueur-test" }] },
+  });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.totalDamage, 165);
+
+  const damageEffect = result.breakdown[0].appliedEffects.find((effect) => effect.type === "damage");
+  assert.ok(damageEffect && damageEffect.type === "damage");
+  assert.equal(damageEffect.element, "light");
+  assert.equal(damageEffect.formula.elementalMastery, 300);
+  assert.equal(damageEffect.resolvedElement, "water");
+});
+
+test("resolves tied Light damage mastery deterministically", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      stats: {
+        ...character.stats,
+        generalMastery: 100,
+        elementalMastery: {
+          fire: 250,
+          water: 250,
+          earth: 80,
+          air: 80,
+          light: 0,
+        },
+        damageInflictedPercent: 10,
+      },
+    },
+    sequence: { actions: [{ spellId: "lueur-test" }] },
+  });
+
+  const damageEffect = result.breakdown[0].appliedEffects.find((effect) => effect.type === "damage");
+  assert.ok(damageEffect && damageEffect.type === "damage");
+  assert.equal(damageEffect.formula.elementalMastery, 250);
+  assert.equal(damageEffect.resolvedElement, "fire");
 });
 
 test("applies Rayon Crepusculaire BQ remaining damage scaling", () => {
@@ -1741,7 +1800,7 @@ test("applies Rayon Crepusculaire BQ remaining damage scaling", () => {
   });
 
   assert.equal(result.valid, true);
-  assert.equal(result.totalDamage, 540);
+  assert.equal(result.totalDamage, 337.5);
   assert.equal(result.finalState.classState.huppermage?.runes.active.incandescent, false);
 });
 
@@ -1763,11 +1822,11 @@ test("records Epee de Lumiere life steal from active runes", () => {
   });
 
   assert.equal(result.valid, true);
-  assert.equal(result.totalDamage, 440);
+  assert.equal(result.totalDamage, 275);
   const lifeSteal = result.breakdown[0].appliedEffects.find((effect) => effect.type === "lifeSteal");
   assert.ok(lifeSteal && lifeSteal.type === "lifeSteal");
   assert.equal(lifeSteal.percent, 60);
-  assert.equal(lifeSteal.amount, 264);
+  assert.equal(lifeSteal.amount, 165);
 });
 
 test("adds Lueur de l'Aube delayed damage when the fire rune is consumed", () => {
@@ -1809,7 +1868,7 @@ test("tracks and triggers Halo Chatoyant marks", () => {
   assert.equal(result.valid, true);
   assert.equal(result.breakdown[0].damage, 0);
   assert.equal(result.breakdown[0].classStateAfter.huppermage?.haloChatoyantMarks, 1);
-  assert.equal(result.breakdown[1].damage, 356.4);
+  assert.equal(result.breakdown[1].damage, 222.75);
   assert.equal(result.breakdown[1].classStateAfter.huppermage?.haloChatoyantMarks, 1);
 
   const aerialResult = simulateTurn({
@@ -1828,7 +1887,7 @@ test("tracks and triggers Halo Chatoyant marks", () => {
   });
 
   assert.equal(aerialResult.valid, true);
-  assert.equal(aerialResult.totalDamage, 356.4);
+  assert.equal(aerialResult.totalDamage, 222.75);
   assert.equal(aerialResult.finalState.classState.huppermage?.haloChatoyantMarks, 0);
   assert.equal(aerialResult.finalState.classState.huppermage?.runes.active.aerial, false);
 });
@@ -1846,7 +1905,7 @@ test("evolves caster stats during the turn from supported stat modifiers", () =>
   });
 
   assert.equal(result.valid, true);
-  assert.equal(result.totalDamage, 144);
+  assert.equal(result.totalDamage, 90);
   assert.equal(result.finalState.currentStats.damageInflictedPercent, 20);
   assert.equal(result.breakdown[0].appliedEffects[0].type, "statModifier");
 });

@@ -152,6 +152,7 @@ export type AppliedEffect =
       type: "damage";
       amount: number;
       element: Element;
+      resolvedElement: Element;
       source: "spellEffect";
       formula: DamageFormulaBreakdown;
     }
@@ -322,6 +323,7 @@ export type ComboSimulationOptions = {
 export type DamageFormulaBreakdown = {
   baseDamage: number;
   times: number;
+  resolvedElement: Element;
   elementalMastery: number;
   extraMastery: number;
   masteryMultiplier: number;

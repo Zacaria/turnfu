@@ -1187,13 +1187,14 @@ function applyHaloChatoyant(
 
   const damageEffect: DamageEffect = { type: "damage", element: "light", base: 81, times: triggerCount };
   const formula = computeRawDamage(stats, damageEffect, actionContext);
-  appliedEffects.push({
-    type: "damage",
-    amount: formula.result,
-    element: "light",
-    source: "spellEffect",
-    formula,
-  });
+    appliedEffects.push({
+      type: "damage",
+      amount: formula.result,
+      element: "light",
+      resolvedElement: formula.resolvedElement,
+      source: "spellEffect",
+      formula,
+    });
 
   return {
     damage: formula.result,
@@ -1207,10 +1208,12 @@ function createDerivedDamageEffect(element: Element, amount: number): AppliedEff
     type: "damage",
     amount,
     element,
+    resolvedElement: element,
     source: "spellEffect",
     formula: {
       baseDamage: amount,
       times: 1,
+      resolvedElement: element,
       elementalMastery: 0,
       extraMastery: 0,
       masteryMultiplier: 1,
@@ -1806,6 +1809,7 @@ function applySupportedEffect(
           type: "damage",
           amount: formula.result,
           element: effect.element,
+          resolvedElement: formula.resolvedElement,
           source: "spellEffect",
           formula,
         },
