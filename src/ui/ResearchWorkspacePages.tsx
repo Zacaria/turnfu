@@ -26,8 +26,11 @@ import {
   type WakfuClassId,
 } from "./researchWorkspace.ts";
 import {
+  filterSavedCombosForComparison,
+  getSavedComboDurationsForSet,
   groupSavedCombosByDuration,
   type SavedComboComparisonGroups,
+  type SavedComboComparisonRow,
 } from "./savedComboComparison.ts";
 import { getHuppermageIconSrc } from "./icons.ts";
 
@@ -281,7 +284,30 @@ export function SavedComboComparisonPage({
   savedCombos: SavedComboReference[];
   setups: SetupSnapshot[];
 }) {
-  const groups = useMemo(() => groupSavedCombosByDuration(savedCombos), [savedCombos]);
+  const defaultSetupId = useMemo(
+    () => setups.find((setup) => savedCombos.some((combo) => combo.setupSnapshotId === setup.id))?.id ?? setups[0]?.id ?? "",
+    [savedCombos, setups],
+  );
+  const [selectedSetupId, setSelectedSetupId] = useState(defaultSetupId);
+  const activeSetupId = setups.some((setup) => setup.id === selectedSetupId) ? selectedSetupId : defaultSetupId;
+  const availableDurations = useMemo(
+    () => getSavedComboDurationsForSet(savedCombos, activeSetupId),
+    [activeSetupId, savedCombos],
+  );
+  const [selectedDuration, setSelectedDuration] = useState(availableDurations[0] ?? 1);
+  const activeDuration = [1, 2, 3].includes(selectedDuration) ? selectedDuration : (availableDurations[0] ?? 1);
+  const comparableRows = useMemo(
+    () => filterSavedCombosForComparison(savedCombos, {
+      duration: activeDuration,
+      setupSnapshotId: activeSetupId,
+    }),
+    [activeDuration, activeSetupId, savedCombos],
+  );
+
+  function selectSetup(setupId: string) {
+    setSelectedSetupId(setupId);
+    setSelectedDuration(getSavedComboDurationsForSet(savedCombos, setupId)[0] ?? 1);
+  }
 
   return (
     <main className="research-shell">
@@ -293,7 +319,36 @@ export function SavedComboComparisonPage({
         </div>
         <span className="status-pill status-ok">Par durée exacte</span>
       </section>
-      <SavedComboDurationGroups groups={groups} setups={setups} onOpenCombo={onOpenCombo} />
+      <section className="workspace-section comparison-section">
+        <div className="comparison-filter-bar">
+          <label className="field">
+            Set
+            <select value={activeSetupId} onChange={(event) => selectSetup(event.target.value)}>
+              {setups.map((setup) => (
+                <option key={setup.id} value={setup.id}>{setup.name}</option>
+              ))}
+            </select>
+          </label>
+          <fieldset className="duration-segmented">
+            <legend>Durée</legend>
+            {[1, 2, 3].map((duration) => (
+              <button
+                className={activeDuration === duration ? "duration-segment active" : "duration-segment"}
+                key={duration}
+                type="button"
+                onClick={() => setSelectedDuration(duration)}
+              >
+                {duration}T
+              </button>
+            ))}
+          </fieldset>
+        </div>
+        <SavedComboExactDurationTable
+          duration={activeDuration}
+          onOpenCombo={onOpenCombo}
+          rows={comparableRows}
+        />
+      </section>
     </main>
   );
 }
@@ -369,7 +424,7 @@ export function OptimizerWorkspacePage({
   catalog: CatalogEntry[];
   onBack: () => void;
   onOpenCandidate: (candidate: OptimizerCandidateViewModel) => void;
-  onSaveCandidate: (candidate: OptimizerCandidateViewModel) => void;
+  onSaveCandidate: (candidate: OptimizerCandidateViewModel, controls: OptimizerWorkspaceControls) => void;
   onSaveRun: (controls: OptimizerWorkspaceControls) => void;
   savedCandidateIds: string[];
   setup: SetupSnapshot;
@@ -487,7 +542,7 @@ export function OptimizerWorkspacePage({
                 pinned={pinnedIds.includes(candidate.id)}
                 saved={savedCandidateIdSet.has(candidate.id)}
                 onOpen={() => onOpenCandidate(candidate)}
-                onSave={() => onSaveCandidate(candidate)}
+                onSave={() => onSaveCandidate(candidate, normalizedControls)}
                 onTogglePin={() => setPinnedIds((current) => togglePinnedCandidate(current, candidate))}
               />
             )) : <EmptyState title="Aucun candidat" body="Aucun combo valide pour cette durée et ces critères." />}
@@ -660,6 +715,47 @@ function SpellMiniIcon({ label, spellId }: { label: string; spellId: string }) {
   );
 }
 
+function SavedComboExactDurationTable({
+  duration,
+  onOpenCombo,
+  rows,
+}: {
+  duration: number;
+  onOpenCombo: (combo: SavedComboReference) => void;
+  rows: SavedComboComparisonRow[];
+}) {
+  if (rows.length === 0) {
+    return <EmptyState title={`Aucun combo ${duration}T`} body="Choisis un autre set ou sauvegarde des candidats de cette durée depuis l'optimizer." />;
+  }
+
+  return (
+    <div className="comparison-table saved-combo-table" role="table">
+      <div className="comparison-row comparison-head" role="row">
+        <span>Combo</span>
+        <span>Total</span>
+        <span>/ tour</span>
+        <span>Actions</span>
+        <span>Critères</span>
+        <span>Inspection</span>
+      </div>
+      {rows.map((row) => (
+        <div className="comparison-row" role="row" key={row.combo.id}>
+          <span>{row.combo.name}</span>
+          <span>{row.totalDamage}</span>
+          <span>{row.damagePerTurn}</span>
+          <span>{row.actionCount}</span>
+          <span>{row.combo.criteriaSummary ?? "Critères non enregistrés"}</span>
+          <span>
+            <button className="secondary-button" type="button" onClick={() => onOpenCombo(row.combo)}>
+              Ouvrir
+            </button>
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function SavedComboDurationGroups({
   groups,
   onOpenCombo,
@@ -682,13 +778,14 @@ function SavedComboDurationGroups({
         <section className="workspace-section saved-combo-group" key={duration}>
           <h2>{duration} tour{duration > 1 ? "s" : ""}</h2>
           {groups[duration]?.length ? (
-            <div className="comparison-table saved-combo-table" role="table">
+            <div className="comparison-table saved-combo-table saved-combo-table-with-set" role="table">
               <div className="comparison-row comparison-head" role="row">
                 <span>Combo</span>
                 <span>Total</span>
                 <span>/ tour</span>
                 <span>Actions</span>
                 <span>Set</span>
+                <span>Critères</span>
                 <span>Inspection</span>
               </div>
               {groups[duration].map((row) => (
@@ -698,6 +795,7 @@ function SavedComboDurationGroups({
                   <span>{row.damagePerTurn}</span>
                   <span>{row.actionCount}</span>
                   <span>{setupById.get(row.combo.setupSnapshotId)?.name ?? "Set introuvable"}</span>
+                  <span>{row.combo.criteriaSummary ?? "Critères non enregistrés"}</span>
                   <span>
                     <button className="secondary-button" type="button" onClick={() => onOpenCombo(row.combo)}>
                       Ouvrir

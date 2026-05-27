@@ -2388,6 +2388,50 @@ body {
   margin-top: 14px;
 }
 
+.comparison-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 12px;
+}
+
+.comparison-filter-bar .field {
+  min-width: min(360px, 100%);
+}
+
+.duration-segmented {
+  display: inline-flex;
+  gap: 4px;
+  min-height: 54px;
+  margin: 0;
+  border: 1px solid #263337;
+  padding: 7px 8px;
+}
+
+.duration-segmented legend {
+  color: #8fa39d;
+  font-size: 0.72rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.duration-segment {
+  min-width: 44px;
+  border: 1px solid #334348;
+  border-radius: 5px;
+  background: #101719;
+  color: #d7e2dc;
+  font-weight: 900;
+}
+
+.duration-segment.active,
+.duration-segment:hover,
+.duration-segment:focus-visible {
+  border-color: #55d5d8;
+  color: #55d5d8;
+  outline: none;
+}
+
 .saved-combo-groups {
   display: grid;
   gap: 14px;
@@ -2409,6 +2453,10 @@ body {
 
 .saved-combo-table .comparison-row {
   grid-template-columns: minmax(180px, 1.4fr) minmax(80px, 0.6fr) minmax(80px, 0.6fr) minmax(70px, 0.5fr) minmax(160px, 1fr) auto;
+}
+
+.saved-combo-table-with-set .comparison-row {
+  grid-template-columns: minmax(180px, 1.2fr) minmax(80px, 0.5fr) minmax(80px, 0.5fr) minmax(70px, 0.4fr) minmax(160px, 0.9fr) minmax(160px, 0.9fr) auto;
 }
 
 .comparison-row:last-child {

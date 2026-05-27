@@ -4,6 +4,8 @@ import test from "node:test";
 import type { SavedComboReference } from "./researchWorkspace.ts";
 import {
   createSavedComboComparisonRow,
+  filterSavedCombosForComparison,
+  getSavedComboDurationsForSet,
   groupSavedCombosByDuration,
 } from "./savedComboComparison.ts";
 
@@ -14,6 +16,7 @@ const combo1Turn: SavedComboReference = {
   name: "Combo 1T",
   plan: { turns: [{ actions: [{ spellId: "spell-a" }, { spellId: "spell-b" }] }] },
   totalDamage: 600,
+  criteriaSummary: "1T · dégâts totaux",
   createdAt: "2026-05-27T10:00:00.000Z",
 };
 
@@ -55,4 +58,21 @@ test("groups saved combos by exact duration without cross-ranking durations", ()
   assert.deepEqual(groups[1].map((row) => row.combo.id), ["combo-1"]);
   assert.deepEqual(groups[2].map((row) => row.combo.id), ["combo-3", "combo-2"]);
   assert.deepEqual(groups[3], []);
+});
+
+test("filters saved combo comparisons by set and exact duration", () => {
+  const otherSetCombo = {
+    ...stronger2Turns,
+    id: "combo-4",
+    setupSnapshotId: "setup-2",
+    totalDamage: 1800,
+  };
+
+  const rows = filterSavedCombosForComparison([combo1Turn, combo2Turns, stronger2Turns, otherSetCombo], {
+    duration: 2,
+    setupSnapshotId: "setup-1",
+  });
+
+  assert.deepEqual(rows.map((row) => row.combo.id), ["combo-3", "combo-2"]);
+  assert.deepEqual(getSavedComboDurationsForSet([combo1Turn, combo2Turns, stronger2Turns, otherSetCombo], "setup-1"), [1, 2]);
 });

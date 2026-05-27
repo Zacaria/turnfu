@@ -341,13 +341,18 @@ export function App() {
     }));
   }
 
-  function saveOptimizerCombo(setup: SetupSnapshot, candidate: OptimizerCandidateViewModel) {
+  function saveOptimizerCombo(
+    setup: SetupSnapshot,
+    candidate: OptimizerCandidateViewModel,
+    controls: OptimizerWorkspaceControls,
+  ) {
     setResearchWorkspace((workspace) => saveOptimizerCandidateCombo(workspace, {
       buildId: setup.buildId,
       setupSnapshotId: setup.id,
       name: createSavedComboName(candidate),
       plan: candidate.plan,
       totalDamage: candidate.totalDamage,
+      criteriaSummary: summarizeOptimizerControls(controls),
       now: new Date().toISOString(),
     }));
   }
@@ -809,7 +814,7 @@ export function App() {
             openCandidateInBuilder(activeSetup, candidate);
             openSetupInBuilder(activeSetup, candidate);
           }}
-          onSaveCandidate={(candidate) => saveOptimizerCombo(activeSetup, candidate)}
+          onSaveCandidate={(candidate, controls) => saveOptimizerCombo(activeSetup, candidate, controls)}
           onSaveRun={(controls) => saveOptimizerRun(activeSetup, controls)}
         />
       </>

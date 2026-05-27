@@ -117,12 +117,14 @@ test("creates optimizer run and saved combo references for a build setup", () =>
     name: "Combo 2T eau",
     plan: { turns: [{ actions: [{ spellId: "lueur-de-laube" }] }] },
     totalDamage: 480,
+    criteriaSummary: "2T · dégâts eau",
     now: "2026-05-26T10:06:00.000Z",
   });
   const combo = withCombo.savedCombos[0];
   assert.ok(combo);
   assert.equal(combo.name, "Combo 2T eau");
   assert.equal(combo.totalDamage, 480);
+  assert.equal(combo.criteriaSummary, "2T · dégâts eau");
   assert.deepEqual(withCombo.builds[0].savedComboIds, [combo.id]);
   assert.equal(withCombo.builds[0].updatedAt, "2026-05-26T10:06:00.000Z");
 });

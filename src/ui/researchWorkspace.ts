@@ -80,6 +80,7 @@ export type SavedComboReference = {
   name: string;
   plan: ComboPlan;
   totalDamage?: number;
+  criteriaSummary?: string;
   createdAt: string;
 };
 
@@ -112,6 +113,7 @@ export type SaveOptimizerCandidateComboInput = {
   name?: string;
   plan: ComboPlan;
   totalDamage?: number;
+  criteriaSummary?: string;
   now?: string;
 };
 
@@ -347,6 +349,7 @@ export function saveOptimizerCandidateCombo(
     name,
     plan: input.plan,
     totalDamage: input.totalDamage,
+    criteriaSummary: input.criteriaSummary?.trim() || undefined,
     createdAt: now,
   };
 

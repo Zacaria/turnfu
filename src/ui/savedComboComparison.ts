@@ -10,6 +10,11 @@ export type SavedComboComparisonRow = {
 
 export type SavedComboComparisonGroups = Record<number, SavedComboComparisonRow[]>;
 
+export type SavedComboComparisonFilter = {
+  duration: number;
+  setupSnapshotId: string;
+};
+
 export function createSavedComboComparisonRow(combo: SavedComboReference): SavedComboComparisonRow {
   const duration = Math.max(1, combo.plan.turns.length);
   const totalDamage = combo.totalDamage ?? 0;
@@ -21,6 +26,24 @@ export function createSavedComboComparisonRow(combo: SavedComboReference): Saved
     totalDamage,
     damagePerTurn: roundMetric(totalDamage / duration),
   };
+}
+
+export function filterSavedCombosForComparison(
+  combos: SavedComboReference[],
+  filter: SavedComboComparisonFilter,
+): SavedComboComparisonRow[] {
+  return combos
+    .map(createSavedComboComparisonRow)
+    .filter((row) => row.combo.setupSnapshotId === filter.setupSnapshotId && row.duration === filter.duration)
+    .sort((left, right) => right.totalDamage - left.totalDamage || left.combo.createdAt.localeCompare(right.combo.createdAt));
+}
+
+export function getSavedComboDurationsForSet(combos: SavedComboReference[], setupSnapshotId: string): number[] {
+  return [...new Set(combos
+    .map(createSavedComboComparisonRow)
+    .filter((row) => row.combo.setupSnapshotId === setupSnapshotId)
+    .map((row) => row.duration))]
+    .sort((left, right) => left - right);
 }
 
 export function groupSavedCombosByDuration(combos: SavedComboReference[]): SavedComboComparisonGroups {
