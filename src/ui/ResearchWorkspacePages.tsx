@@ -3,6 +3,7 @@ import { useMemo, useState } from "react";
 import type { CatalogEntry } from "../core/catalog/types.ts";
 import {
   createDefaultOptimizerControls,
+  createOptimizerCandidateSpellIconRows,
   getPinnedCandidates,
   groupOptimizerResultsByDuration,
   normalizeOptimizerControls,
@@ -28,6 +29,7 @@ import {
   groupSavedCombosByDuration,
   type SavedComboComparisonGroups,
 } from "./savedComboComparison.ts";
+import { getHuppermageIconSrc } from "./icons.ts";
 
 export function ResearchLibraryPage({
   classFilter,
@@ -474,6 +476,7 @@ export function OptimizerWorkspacePage({
             {groups[duration]?.length ? groups[duration].map((candidate) => (
               <CandidateRow
                 candidate={candidate}
+                catalog={catalog}
                 key={candidate.id}
                 pinned={pinnedIds.includes(candidate.id)}
                 saved={savedCandidateIdSet.has(candidate.id)}
@@ -579,6 +582,7 @@ function SetupSummary({
 
 function CandidateRow({
   candidate,
+  catalog,
   onOpen,
   onSave,
   onTogglePin,
@@ -586,18 +590,34 @@ function CandidateRow({
   saved,
 }: {
   candidate: OptimizerCandidateViewModel;
+  catalog: CatalogEntry[];
   onOpen: () => void;
   onSave: () => void;
   onTogglePin: () => void;
   pinned: boolean;
   saved: boolean;
 }) {
+  const spellRows = createOptimizerCandidateSpellIconRows(candidate.plan, catalog);
+
   return (
     <article className="candidate-row">
       <div>
         <b>{candidate.score}</b>
         <span>{candidate.totalDamage} total · {candidate.damagePerTurn}/tour · {candidate.damagePerAp}/PA</span>
         <small>{candidate.actionCount} actions · {candidate.finalResources.bq} BQ · {candidate.finalResources.wp} PW</small>
+        <div className="candidate-spell-icon-rows" aria-label="Sorts du candidat">
+          {spellRows.map((row) => (
+            <div className="candidate-spell-icon-row" aria-label={`Tour ${row.turn}`} key={row.turn}>
+              {row.icons.map((icon, iconIndex) => (
+                <SpellMiniIcon
+                  key={`${row.turn}-${icon.spellId}-${iconIndex}`}
+                  label={icon.label}
+                  spellId={icon.spellId}
+                />
+              ))}
+            </div>
+          ))}
+        </div>
       </div>
       <div className="candidate-actions">
         <button className={pinned ? "icon-button active" : "icon-button"} type="button" onClick={onTogglePin} title="Épingler">
@@ -615,6 +635,16 @@ function CandidateRow({
         <button className="secondary-button" type="button" onClick={onOpen}>Ouvrir</button>
       </div>
     </article>
+  );
+}
+
+function SpellMiniIcon({ label, spellId }: { label: string; spellId: string }) {
+  const iconSrc = getHuppermageIconSrc(spellId);
+
+  return iconSrc ? (
+    <img className="candidate-spell-icon" src={iconSrc} alt={label} title={label} draggable={false} />
+  ) : (
+    <span className="candidate-spell-icon candidate-spell-icon-fallback" title={label}>{label.slice(0, 1)}</span>
   );
 }
 

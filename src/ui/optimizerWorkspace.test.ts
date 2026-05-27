@@ -6,6 +6,7 @@ import { createSeedResearchWorkspace } from "./researchWorkspace.ts";
 import {
   createDefaultOptimizerControls,
   createOptimizerCandidateId,
+  createOptimizerCandidateSpellIconRows,
   createOptimizerOptionsForSetup,
   createOptimizerResultViewModel,
   createPinnedCandidateComparison,
@@ -96,6 +97,35 @@ test("summarizes optimizer controls for saved run references", () => {
   });
 
   assert.equal(summary, "1T, 3T · dégâts eau · cycle soutenable · largeur 25 · 7 résultats");
+});
+
+test("formats three optimizer candidate spell icon rows from catalog names", () => {
+  const rows = createOptimizerCandidateSpellIconRows({
+    turns: [
+      { actions: [{ spellId: "light-hit" }, { spellId: "missing-spell" }] },
+      { actions: [{ spellId: "fire-hit" }] },
+    ],
+  }, catalog);
+
+  assert.deepEqual(rows, [
+    {
+      turn: 1,
+      icons: [
+        { spellId: "light-hit", label: "Light Hit" },
+        { spellId: "missing-spell", label: "missing-spell" },
+      ],
+    },
+    {
+      turn: 2,
+      icons: [
+        { spellId: "fire-hit", label: "Fire Hit" },
+      ],
+    },
+    {
+      turn: 3,
+      icons: [],
+    },
+  ]);
 });
 
 test("groups optimizer results by exact duration without cross-ranking raw totals", () => {

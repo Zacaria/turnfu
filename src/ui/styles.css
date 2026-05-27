@@ -2343,6 +2343,37 @@ body {
   font-size: 1.1rem;
 }
 
+.candidate-spell-icon-rows {
+  display: grid;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.candidate-spell-icon-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-height: 22px;
+}
+
+.candidate-spell-icon {
+  width: 20px;
+  height: 20px;
+  border: 1px solid #2e3f43;
+  border-radius: 3px;
+  background: #172124;
+  object-fit: cover;
+}
+
+.candidate-spell-icon-fallback {
+  display: inline-grid;
+  place-items: center;
+  color: #d7e2dc;
+  font-size: 0.68rem;
+  font-weight: 900;
+}
+
 .icon-button.active {
   border-color: #55d5d8;
   color: #55d5d8;

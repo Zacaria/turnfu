@@ -39,6 +39,16 @@ export type OptimizerCandidateViewModel = {
   source: ComboOptimizerResult;
 };
 
+export type OptimizerCandidateSpellIcon = {
+  spellId: string;
+  label: string;
+};
+
+export type OptimizerCandidateSpellIconRow = {
+  turn: number;
+  icons: OptimizerCandidateSpellIcon[];
+};
+
 export type BuilderHandoff = {
   setupSnapshotId: string;
   character: SimulatedCharacter;
@@ -170,6 +180,18 @@ export function summarizeOptimizerControls(controls: OptimizerWorkspaceControls)
 
 export function createSavedComboName(candidate: OptimizerCandidateViewModel): string {
   return `${candidate.duration}T · ${candidate.totalDamage} dégâts · ${candidate.damagePerTurn}/tour`;
+}
+
+export function createOptimizerCandidateSpellIconRows(plan: ComboPlan, catalog: CatalogEntry[]): OptimizerCandidateSpellIconRow[] {
+  const catalogNamesById = new Map(catalog.map((entry) => [entry.id, entry.name]));
+
+  return [0, 1, 2].map((turnIndex) => ({
+    turn: turnIndex + 1,
+    icons: (plan.turns[turnIndex]?.actions ?? []).map((action) => ({
+      spellId: action.spellId,
+      label: catalogNamesById.get(action.spellId) ?? action.spellId,
+    })),
+  }));
 }
 
 export function createPinnedCandidateComparison(candidates: OptimizerCandidateViewModel[]): OptimizerCandidateViewModel[] {
