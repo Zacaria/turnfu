@@ -2196,11 +2196,16 @@ body {
 }
 
 .header-actions,
+.section-title-row,
 .setup-summary-actions,
 .candidate-actions {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.section-title-row {
+  justify-content: space-between;
 }
 
 .build-columns {
@@ -2251,6 +2256,18 @@ body {
 .empty-state {
   display: grid;
   gap: 3px;
+}
+
+.action-row {
+  width: 100%;
+  color: inherit;
+  text-align: left;
+}
+
+.action-row:hover,
+.action-row:focus-visible {
+  border-color: #55d5d8;
+  outline: none;
 }
 
 .setup-detail-grid {
@@ -2335,6 +2352,11 @@ body {
   margin-top: 14px;
 }
 
+.saved-combo-groups {
+  display: grid;
+  gap: 14px;
+}
+
 .comparison-table {
   display: grid;
   border: 1px solid #263337;
@@ -2347,6 +2369,10 @@ body {
   padding: 8px 10px;
   border-bottom: 1px solid #263337;
   font-size: 0.86rem;
+}
+
+.saved-combo-table .comparison-row {
+  grid-template-columns: minmax(180px, 1.4fr) minmax(80px, 0.6fr) minmax(80px, 0.6fr) minmax(70px, 0.5fr) minmax(160px, 1fr) auto;
 }
 
 .comparison-row:last-child {

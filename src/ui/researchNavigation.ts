@@ -24,6 +24,19 @@ export type ResearchRoute =
       returnTo?: ResearchRoute;
     }
   | {
+      page: "optimizerRun";
+      buildId: string;
+      optimizerRunId: string;
+      setupSnapshotId?: undefined;
+      returnTo?: ResearchRoute;
+    }
+  | {
+      page: "savedCombos";
+      buildId: string;
+      setupSnapshotId?: undefined;
+      returnTo?: ResearchRoute;
+    }
+  | {
       page: "builder";
       buildId?: string;
       setupSnapshotId?: string;
@@ -62,6 +75,29 @@ export function openOptimizerFromSetup(_route: ResearchRoute, buildId: string, s
       page: "setup",
       buildId,
       setupSnapshotId,
+    },
+  };
+}
+
+export function openOptimizerRun(_route: ResearchRoute, buildId: string, optimizerRunId: string): ResearchRoute {
+  return {
+    page: "optimizerRun",
+    buildId,
+    optimizerRunId,
+    returnTo: {
+      page: "build",
+      buildId,
+    },
+  };
+}
+
+export function openSavedComboComparison(_route: ResearchRoute, buildId: string): ResearchRoute {
+  return {
+    page: "savedCombos",
+    buildId,
+    returnTo: {
+      page: "build",
+      buildId,
     },
   };
 }

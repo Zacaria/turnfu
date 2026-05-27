@@ -17,8 +17,11 @@ import {
   createResearchRoute,
   openBuilderFromSetup,
   openBuild,
+  openOptimizerRun,
+  openSavedComboComparison,
   openSetup,
   returnToBuild,
+  returnToPrevious,
 } from "./researchNavigation.ts";
 
 test("creates named Huppermage builds while keeping unsupported classes disabled", () => {
@@ -151,6 +154,31 @@ test("preserves build and setup context across navigation", () => {
   assert.equal(builderRoute.setupSnapshotId, setup.id);
   assert.equal(returnedRoute.page, "build");
   assert.equal(returnedRoute.buildId, setup.buildId);
+});
+
+test("navigates to saved optimizer run and saved combo comparison pages", () => {
+  const workspace = createSeedResearchWorkspace({ now: "2026-05-26T10:00:00.000Z" });
+  const setup = workspace.setupSnapshots[0];
+  assert.ok(setup);
+  const withRun = createOptimizerRunReference(workspace, {
+    buildId: setup.buildId,
+    setupSnapshotId: setup.id,
+    label: "Run test",
+    criteriaSummary: "1T · dégâts totaux",
+    now: "2026-05-26T10:05:00.000Z",
+  });
+  const run = withRun.optimizerRuns[0];
+  assert.ok(run);
+
+  const buildRoute = openBuild(createResearchRoute(), setup.buildId);
+  const runRoute = openOptimizerRun(buildRoute, setup.buildId, run.id);
+  const comboRoute = openSavedComboComparison(buildRoute, setup.buildId);
+
+  assert.equal(runRoute.page, "optimizerRun");
+  assert.equal(runRoute.optimizerRunId, run.id);
+  assert.deepEqual(returnToPrevious(runRoute), buildRoute);
+  assert.equal(comboRoute.page, "savedCombos");
+  assert.deepEqual(returnToPrevious(comboRoute), buildRoute);
 });
 
 test("setup snapshots are versioned instead of mutated", () => {

@@ -75,7 +75,9 @@ import {
 import {
   BuildPage,
   OptimizerWorkspacePage,
+  OptimizerRunDetailPage,
   ResearchLibraryPage,
+  SavedComboComparisonPage,
   SetupPage,
 } from "./ResearchWorkspacePages.tsx";
 import {
@@ -88,6 +90,7 @@ import {
   saveResearchWorkspace,
   saveOptimizerCandidateCombo,
   type ResearchWorkspaceData,
+  type SavedComboReference,
   type SetupSnapshot,
   type WakfuClassId,
 } from "./researchWorkspace.ts";
@@ -96,6 +99,8 @@ import {
   openBuilderFromSetup,
   openBuild,
   openOptimizerFromSetup,
+  openOptimizerRun,
+  openSavedComboComparison,
   openSetup,
   returnToBuild,
   returnToPrevious,
@@ -208,6 +213,9 @@ export function App() {
   const activeBuild = researchRoute.buildId
     ? researchWorkspace.builds.find((build) => build.id === researchRoute.buildId)
     : undefined;
+  const activeOptimizerRun = researchRoute.page === "optimizerRun"
+    ? researchWorkspace.optimizerRuns.find((run) => run.id === researchRoute.optimizerRunId)
+    : undefined;
   const activeSetup = researchRoute.setupSnapshotId
     ? researchWorkspace.setupSnapshots.find((setup) => setup.id === researchRoute.setupSnapshotId)
     : activeBuild
@@ -296,8 +304,19 @@ export function App() {
   }
 
   function openSetupInBuilder(setup: SetupSnapshot, candidate?: OptimizerCandidateViewModel) {
-    applySetupToBuilder(setup, candidate?.plan);
+    openSetupPlanInBuilder(setup, candidate?.plan);
+  }
+
+  function openSetupPlanInBuilder(setup: SetupSnapshot, plan?: ComboPlan) {
+    applySetupToBuilder(setup, plan);
     setResearchRoute(openBuilderFromSetup(researchRoute, setup.buildId, setup.id));
+  }
+
+  function openSavedComboInBuilder(combo: SavedComboReference) {
+    const setup = researchWorkspace.setupSnapshots.find((candidate) => candidate.id === combo.setupSnapshotId);
+    if (setup) {
+      openSetupPlanInBuilder(setup, combo.plan);
+    }
   }
 
   function saveOptimizerRun(setup: SetupSnapshot, controls: OptimizerWorkspaceControls) {
@@ -705,7 +724,41 @@ export function App() {
           onBack={() => setResearchRoute({ page: "library" })}
           onOpenBuilder={(setup) => openSetupInBuilder(setup)}
           onOpenOptimizer={(setup) => setResearchRoute(openOptimizerFromSetup(researchRoute, activeBuild.id, setup.id))}
+          onOpenRun={(run) => setResearchRoute(openOptimizerRun(researchRoute, activeBuild.id, run.id))}
+          onOpenSavedCombos={() => setResearchRoute(openSavedComboComparison(researchRoute, activeBuild.id))}
           onOpenSetup={(setup) => setResearchRoute(openSetup(researchRoute, activeBuild.id, setup.id))}
+        />
+      </>
+    );
+  }
+
+  if (researchRoute.page === "optimizerRun" && activeBuild && activeOptimizerRun) {
+    return (
+      <>
+        <AppHeader locale={locale} onChangeLocale={changeLocale} />
+        <OptimizerRunDetailPage
+          build={activeBuild}
+          run={activeOptimizerRun}
+          setup={researchWorkspace.setupSnapshots.find((setup) => setup.id === activeOptimizerRun.setupSnapshotId)}
+          setups={getBuildSetups(researchWorkspace, activeBuild.id)}
+          savedCombos={getBuildSavedCombos(researchWorkspace, activeBuild.id)}
+          onBack={() => setResearchRoute(returnToPrevious(researchRoute))}
+          onOpenCombo={openSavedComboInBuilder}
+        />
+      </>
+    );
+  }
+
+  if (researchRoute.page === "savedCombos" && activeBuild) {
+    return (
+      <>
+        <AppHeader locale={locale} onChangeLocale={changeLocale} />
+        <SavedComboComparisonPage
+          build={activeBuild}
+          setups={getBuildSetups(researchWorkspace, activeBuild.id)}
+          savedCombos={getBuildSavedCombos(researchWorkspace, activeBuild.id)}
+          onBack={() => setResearchRoute(returnToPrevious(researchRoute))}
+          onOpenCombo={openSavedComboInBuilder}
         />
       </>
     );

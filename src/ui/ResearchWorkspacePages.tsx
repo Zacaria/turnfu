@@ -16,12 +16,18 @@ import {
   getBuildRuns,
   getBuildSavedCombos,
   getBuildSetups,
+  type OptimizerRunReference,
   wakfuClassOptions,
   type ResearchBuild,
   type ResearchWorkspaceData,
+  type SavedComboReference,
   type SetupSnapshot,
   type WakfuClassId,
 } from "./researchWorkspace.ts";
+import {
+  groupSavedCombosByDuration,
+  type SavedComboComparisonGroups,
+} from "./savedComboComparison.ts";
 
 export function ResearchLibraryPage({
   classFilter,
@@ -139,6 +145,8 @@ export function BuildPage({
   onBack,
   onOpenBuilder,
   onOpenOptimizer,
+  onOpenRun,
+  onOpenSavedCombos,
   onOpenSetup,
   runs,
   savedCombos,
@@ -148,6 +156,8 @@ export function BuildPage({
   onBack: () => void;
   onOpenBuilder: (setup: SetupSnapshot) => void;
   onOpenOptimizer: (setup: SetupSnapshot) => void;
+  onOpenRun: (run: OptimizerRunReference) => void;
+  onOpenSavedCombos: () => void;
   onOpenSetup: (setup: SetupSnapshot) => void;
   runs: ReturnType<typeof getBuildRuns>;
   savedCombos: ReturnType<typeof getBuildSavedCombos>;
@@ -182,14 +192,22 @@ export function BuildPage({
           <h2>Runs optimizer</h2>
           {runs.length === 0 ? <EmptyState title="Aucun run" body="Lance une recherche depuis un setup pour conserver des résultats." /> : null}
           {runs.map((run) => (
-            <div className="thin-row" key={run.id}>
+            <button className="thin-row action-row" type="button" key={run.id} onClick={() => onOpenRun(run)}>
               <b>{run.label}</b>
               <span>{run.criteriaSummary}</span>
-            </div>
+            </button>
           ))}
         </section>
         <section className="workspace-section">
-          <h2>Combos sauvegardés</h2>
+          <div className="section-title-row">
+            <h2>Combos sauvegardés</h2>
+            {savedCombos.length > 0 ? (
+              <button className="secondary-button" type="button" onClick={onOpenSavedCombos}>
+                <BarChart3 size={15} />
+                Comparer
+              </button>
+            ) : null}
+          </div>
           {savedCombos.length === 0 ? <EmptyState title="Aucun combo" body="Épingle ou sauvegarde des candidats depuis l'optimizer." /> : null}
           {savedCombos.map((combo) => (
             <div className="thin-row" key={combo.id}>
@@ -199,6 +217,78 @@ export function BuildPage({
           ))}
         </section>
       </section>
+    </main>
+  );
+}
+
+export function OptimizerRunDetailPage({
+  build,
+  onBack,
+  onOpenCombo,
+  run,
+  savedCombos,
+  setup,
+  setups,
+}: {
+  build: ResearchBuild;
+  onBack: () => void;
+  onOpenCombo: (combo: SavedComboReference) => void;
+  run: OptimizerRunReference;
+  savedCombos: SavedComboReference[];
+  setup?: SetupSnapshot;
+  setups: SetupSnapshot[];
+}) {
+  const setupCombos = savedCombos.filter((combo) => combo.setupSnapshotId === run.setupSnapshotId);
+  const groups = useMemo(() => groupSavedCombosByDuration(setupCombos), [setupCombos]);
+
+  return (
+    <main className="research-shell">
+      <PageBackButton onBack={onBack} label={build.name} />
+      <section className="build-header">
+        <div>
+          <span>{setup?.name ?? "Setup introuvable"} · {formatDateTime(run.createdAt)}</span>
+          <h1>{run.label}</h1>
+        </div>
+        <span className="status-pill status-ok">Run sauvegardé</span>
+      </section>
+      <section className="workspace-section">
+        <h2>Critères</h2>
+        <p>{run.criteriaSummary}</p>
+      </section>
+      <section className="workspace-section comparison-section">
+        <h2>Combos sauvegardés sur ce setup</h2>
+        <SavedComboDurationGroups groups={groups} setups={setups} onOpenCombo={onOpenCombo} />
+      </section>
+    </main>
+  );
+}
+
+export function SavedComboComparisonPage({
+  build,
+  onBack,
+  onOpenCombo,
+  savedCombos,
+  setups,
+}: {
+  build: ResearchBuild;
+  onBack: () => void;
+  onOpenCombo: (combo: SavedComboReference) => void;
+  savedCombos: SavedComboReference[];
+  setups: SetupSnapshot[];
+}) {
+  const groups = useMemo(() => groupSavedCombosByDuration(savedCombos), [savedCombos]);
+
+  return (
+    <main className="research-shell">
+      <PageBackButton onBack={onBack} label={build.name} />
+      <section className="build-header">
+        <div>
+          <span>{formatWakfuClassLabel(build.classId)} · {savedCombos.length} combo{savedCombos.length > 1 ? "s" : ""}</span>
+          <h1>Comparaison des combos</h1>
+        </div>
+        <span className="status-pill status-ok">Par durée exacte</span>
+      </section>
+      <SavedComboDurationGroups groups={groups} setups={setups} onOpenCombo={onOpenCombo} />
     </main>
   );
 }
@@ -528,6 +618,59 @@ function CandidateRow({
   );
 }
 
+function SavedComboDurationGroups({
+  groups,
+  onOpenCombo,
+  setups,
+}: {
+  groups: SavedComboComparisonGroups;
+  onOpenCombo: (combo: SavedComboReference) => void;
+  setups: SetupSnapshot[];
+}) {
+  const setupById = new Map(setups.map((setup) => [setup.id, setup]));
+  const hasAnyCombo = Object.values(groups).some((rows) => rows.length > 0);
+
+  if (!hasAnyCombo) {
+    return <EmptyState title="Aucun combo" body="Sauvegarde des candidats depuis l'optimizer pour les comparer ici." />;
+  }
+
+  return (
+    <section className="saved-combo-groups">
+      {[1, 2, 3].map((duration) => (
+        <section className="workspace-section saved-combo-group" key={duration}>
+          <h2>{duration} tour{duration > 1 ? "s" : ""}</h2>
+          {groups[duration]?.length ? (
+            <div className="comparison-table saved-combo-table" role="table">
+              <div className="comparison-row comparison-head" role="row">
+                <span>Combo</span>
+                <span>Total</span>
+                <span>/ tour</span>
+                <span>Actions</span>
+                <span>Setup</span>
+                <span>Inspection</span>
+              </div>
+              {groups[duration].map((row) => (
+                <div className="comparison-row" role="row" key={row.combo.id}>
+                  <span>{row.combo.name}</span>
+                  <span>{row.totalDamage}</span>
+                  <span>{row.damagePerTurn}</span>
+                  <span>{row.actionCount}</span>
+                  <span>{setupById.get(row.combo.setupSnapshotId)?.name ?? "Setup introuvable"}</span>
+                  <span>
+                    <button className="secondary-button" type="button" onClick={() => onOpenCombo(row.combo)}>
+                      Ouvrir
+                    </button>
+                  </span>
+                </div>
+              ))}
+            </div>
+          ) : <EmptyState title={`Aucun combo ${duration}T`} body="Les durées restent séparées pour éviter les comparaisons trompeuses." />}
+        </section>
+      ))}
+    </section>
+  );
+}
+
 function MetricTile({ label, value }: { label: string; value: number | string }) {
   return (
     <div className="metric-tile">
@@ -535,6 +678,10 @@ function MetricTile({ label, value }: { label: string; value: number | string })
       <b>{value}</b>
     </div>
   );
+}
+
+function formatDateTime(value: string): string {
+  return value.slice(0, 16).replace("T", " ");
 }
 
 function EmptyState({ body, title }: { body: string; title: string }) {
