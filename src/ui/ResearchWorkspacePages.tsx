@@ -400,9 +400,8 @@ export function SetupPage({
         <MetricTile label="Dommages infligés" value={`${stats.damageInflictedPercent ?? 0}%`} />
       </section>
       <section className="workspace-section">
-        <h2>Hypothèses</h2>
+        <h2>Contexte du set</h2>
         <p>{setup.equipmentNotes}</p>
-        <p>Deck: {setup.deckSpellIds.join(", ")}</p>
         <p>Passifs: {setup.passiveIds.join(", ") || "Aucun"}</p>
         <p>Cible: {setup.target.kind}</p>
       </section>
@@ -633,7 +632,7 @@ function SetupSummary({
     <article className="setup-summary">
       <button className="setup-summary-main" type="button" onClick={onOpenSetup}>
         <b>{setup.name}</b>
-        <span>v{setup.version} · {setup.character.resources.ap} PA · {setup.character.resources.bq} BQ · {setup.deckSpellIds.length} sorts</span>
+        <span>v{setup.version} · {setup.character.resources.ap} PA · {setup.character.resources.bq} BQ · stats sauvegardées</span>
       </button>
       <div className="setup-summary-actions">
         <button className="secondary-button" type="button" onClick={onCreateBalancedSet}>

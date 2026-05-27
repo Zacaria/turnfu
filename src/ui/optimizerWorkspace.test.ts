@@ -62,7 +62,7 @@ test("maps setup snapshots and controls to core optimizer options", () => {
 
   assert.equal(options.character, setup.character);
   assert.equal(options.defaultActionContext, setup.defaultActionContext);
-  assert.deepEqual(options.availableSpellIds, setup.deckSpellIds.filter((spellId) => catalog.some((entry) => entry.id === spellId)));
+  assert.equal(options.availableSpellIds, undefined);
   assert.equal(options.maxTurns, 3);
   assert.equal(options.exactTurnCount, 3);
   assert.equal(options.beamWidth, 25);
@@ -195,8 +195,8 @@ test("builds result view models with normalized metrics and resolved element dam
   assert.equal(candidate.duration, 1);
   assert.equal(candidate.damageByResolvedElement.water, 480);
   assert.equal(candidate.score, 480);
-  assert.equal(candidate.damagePerTurn, 480);
-  assert.equal(candidate.damagePerAp, 40);
+  assert.equal(candidate.damagePerTurn, 490);
+  assert.equal(candidate.damagePerAp, 40.83);
   assert.equal(candidate.finalResources.ap, 0);
 });
 

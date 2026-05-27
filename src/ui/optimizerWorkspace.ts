@@ -6,10 +6,7 @@ import {
   optimizeCombo,
 } from "../core/optimizer/index.ts";
 import type { ComboPlan, ResourcePool, SimulatedCharacter } from "../core/simulation/types.ts";
-import {
-  getSetupSupportedSpellIds,
-  type SetupSnapshot,
-} from "./researchWorkspace.ts";
+import type { SetupSnapshot } from "./researchWorkspace.ts";
 
 export type OptimizerScoreCriterionId = "totalDamage" | "elementDamage";
 
@@ -99,7 +96,6 @@ export function createOptimizerOptionsForSetup(
     maxTurns: clampInteger(duration, 1, 3),
     exactTurnCount: clampInteger(duration, 1, 3),
     beamWidth: normalizedControls.beamWidth,
-    availableSpellIds: getSetupSupportedSpellIds(setup, catalog),
     requireSustainableCycle: normalizedControls.requireSustainableCycle,
     criterion,
     defaultActionContext: setup.defaultActionContext,
