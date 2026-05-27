@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { createResources } from "../core/simulation/index.ts";
 import {
+  createBalancedElementSet,
   createBuild,
   createMemoryWorkspaceStorage,
   createOptimizerRunReference,
@@ -124,6 +125,33 @@ test("creates optimizer run and saved combo references for a build setup", () =>
   assert.equal(combo.totalDamage, 480);
   assert.deepEqual(withCombo.builds[0].savedComboIds, [combo.id]);
   assert.equal(withCombo.builds[0].updatedAt, "2026-05-26T10:06:00.000Z");
+});
+
+test("creates balanced element set variants without mutating the source set", () => {
+  const workspace = createSeedResearchWorkspace({ now: "2026-05-26T10:00:00.000Z" });
+  const sourceSetup = workspace.setupSnapshots[0];
+  assert.ok(sourceSetup);
+
+  const nextWorkspace = createBalancedElementSet(workspace, {
+    buildId: sourceSetup.buildId,
+    sourceSetupSnapshotId: sourceSetup.id,
+    name: "Set multi équilibré",
+    now: "2026-05-26T11:00:00.000Z",
+  });
+  const balancedSet = nextWorkspace.setupSnapshots.at(-1);
+
+  assert.ok(balancedSet);
+  assert.notEqual(balancedSet.id, sourceSetup.id);
+  assert.equal(balancedSet.buildId, sourceSetup.buildId);
+  assert.equal(balancedSet.name, "Set multi équilibré");
+  assert.equal(balancedSet.character.stats.elementalMastery.fire, 463);
+  assert.equal(balancedSet.character.stats.elementalMastery.water, 463);
+  assert.equal(balancedSet.character.stats.elementalMastery.earth, 463);
+  assert.equal(balancedSet.character.stats.elementalMastery.air, 463);
+  assert.equal(sourceSetup.character.stats.elementalMastery.fire, 400);
+  assert.equal(sourceSetup.character.stats.elementalMastery.water, 700);
+  assert.deepEqual(nextWorkspace.builds[0].setupSnapshotIds, [sourceSetup.id, balancedSet.id]);
+  assert.equal(nextWorkspace.builds[0].updatedAt, "2026-05-26T11:00:00.000Z");
 });
 
 test("filters builds by class", () => {

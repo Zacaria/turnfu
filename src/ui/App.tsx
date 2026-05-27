@@ -81,6 +81,7 @@ import {
   SetupPage,
 } from "./ResearchWorkspacePages.tsx";
 import {
+  createBalancedElementSet,
   createBuild,
   createOptimizerRunReference,
   getBuildRuns,
@@ -301,6 +302,16 @@ export function App() {
       }
       return nextWorkspace;
     });
+  }
+
+  function createBalancedSetFromSetup(setup: SetupSnapshot) {
+    const now = new Date().toISOString();
+    setResearchWorkspace((workspace) => createBalancedElementSet(workspace, {
+      buildId: setup.buildId,
+      sourceSetupSnapshotId: setup.id,
+      name: `Set éléments équilibrés ${now.slice(0, 16).replace("T", " ")}`,
+      now,
+    }));
   }
 
   function openSetupInBuilder(setup: SetupSnapshot, candidate?: OptimizerCandidateViewModel) {
@@ -722,6 +733,7 @@ export function App() {
           savedCombos={getBuildSavedCombos(researchWorkspace, activeBuild.id)}
           setups={setups}
           onBack={() => setResearchRoute({ page: "library" })}
+          onCreateBalancedSet={createBalancedSetFromSetup}
           onOpenBuilder={(setup) => openSetupInBuilder(setup)}
           onOpenOptimizer={(setup) => setResearchRoute(openOptimizerFromSetup(researchRoute, activeBuild.id, setup.id))}
           onOpenRun={(run) => setResearchRoute(openOptimizerRun(researchRoute, activeBuild.id, run.id))}

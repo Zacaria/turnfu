@@ -2204,6 +2204,11 @@ body {
   gap: 8px;
 }
 
+.setup-summary-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .section-title-row {
   justify-content: space-between;
 }

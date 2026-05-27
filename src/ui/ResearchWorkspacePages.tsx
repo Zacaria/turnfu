@@ -118,7 +118,7 @@ export function ResearchLibraryPage({
           </div>
 
           {workspace.builds.length === 0 ? (
-            <EmptyState title="Aucun build" body="Crée un build Huppermage pour commencer à comparer des setups." />
+            <EmptyState title="Aucun build" body="Crée un build Huppermage, puis configure ses sets pour chercher des combos." />
           ) : null}
           {workspace.builds.length > 0 && builds.length === 0 ? (
             <EmptyState title="Aucun résultat" body="Aucun build ne correspond au filtre de classe actuel." />
@@ -145,6 +145,7 @@ export function ResearchLibraryPage({
 export function BuildPage({
   build,
   onBack,
+  onCreateBalancedSet,
   onOpenBuilder,
   onOpenOptimizer,
   onOpenRun,
@@ -156,6 +157,7 @@ export function BuildPage({
 }: {
   build: ResearchBuild;
   onBack: () => void;
+  onCreateBalancedSet: (setup: SetupSnapshot) => void;
   onOpenBuilder: (setup: SetupSnapshot) => void;
   onOpenOptimizer: (setup: SetupSnapshot) => void;
   onOpenRun: (run: OptimizerRunReference) => void;
@@ -178,12 +180,13 @@ export function BuildPage({
 
       <section className="build-columns">
         <section className="workspace-section">
-          <h2>Setups</h2>
-          {setups.length === 0 ? <EmptyState title="Aucun setup" body="Ce build n'a pas encore de setup sauvegardé." /> : null}
+          <h2>Sets</h2>
+          {setups.length === 0 ? <EmptyState title="Aucun set" body="Ce build n'a pas encore de set sauvegardé." /> : null}
           {setups.map((setup) => (
             <SetupSummary
               key={setup.id}
               setup={setup}
+              onCreateBalancedSet={() => onCreateBalancedSet(setup)}
               onOpenBuilder={() => onOpenBuilder(setup)}
               onOpenOptimizer={() => onOpenOptimizer(setup)}
               onOpenSetup={() => onOpenSetup(setup)}
@@ -192,7 +195,7 @@ export function BuildPage({
         </section>
         <section className="workspace-section">
           <h2>Runs optimizer</h2>
-          {runs.length === 0 ? <EmptyState title="Aucun run" body="Lance une recherche depuis un setup pour conserver des résultats." /> : null}
+          {runs.length === 0 ? <EmptyState title="Aucun run" body="Lance une recherche depuis un set pour conserver des résultats." /> : null}
           {runs.map((run) => (
             <button className="thin-row action-row" type="button" key={run.id} onClick={() => onOpenRun(run)}>
               <b>{run.label}</b>
@@ -248,7 +251,7 @@ export function OptimizerRunDetailPage({
       <PageBackButton onBack={onBack} label={build.name} />
       <section className="build-header">
         <div>
-          <span>{setup?.name ?? "Setup introuvable"} · {formatDateTime(run.createdAt)}</span>
+          <span>{setup?.name ?? "Set introuvable"} · {formatDateTime(run.createdAt)}</span>
           <h1>{run.label}</h1>
         </div>
         <span className="status-pill status-ok">Run sauvegardé</span>
@@ -258,7 +261,7 @@ export function OptimizerRunDetailPage({
         <p>{run.criteriaSummary}</p>
       </section>
       <section className="workspace-section comparison-section">
-        <h2>Combos sauvegardés sur ce setup</h2>
+        <h2>Combos sauvegardés sur ce set</h2>
         <SavedComboDurationGroups groups={groups} setups={setups} onOpenCombo={onOpenCombo} />
       </section>
     </main>
@@ -314,7 +317,7 @@ export function SetupPage({
       <PageBackButton onBack={onBack} label={build.name} />
       <section className="build-header">
         <div>
-          <span>Setup v{setup.version} · {formatWakfuClassLabel(setup.classId)}</span>
+          <span>Set v{setup.version} · {formatWakfuClassLabel(setup.classId)}</span>
           <h1>{setup.name}</h1>
         </div>
         <div className="header-actions">
@@ -334,7 +337,10 @@ export function SetupPage({
         <MetricTile label="PW" value={setup.character.resources.wp} />
         <MetricTile label="BQ" value={setup.character.resources.bq} />
         <MetricTile label="Maîtrise générale" value={stats.generalMastery} />
+        <MetricTile label="Maîtrise feu" value={stats.elementalMastery.fire} />
         <MetricTile label="Maîtrise eau" value={stats.elementalMastery.water} />
+        <MetricTile label="Maîtrise terre" value={stats.elementalMastery.earth} />
+        <MetricTile label="Maîtrise air" value={stats.elementalMastery.air} />
         <MetricTile label="Maîtrise distance" value={stats.distanceMastery ?? 0} />
         <MetricTile label="Dommages infligés" value={`${stats.damageInflictedPercent ?? 0}%`} />
       </section>
@@ -394,7 +400,7 @@ export function OptimizerWorkspacePage({
       <PageBackButton onBack={onBack} label={build.name} />
       <section className="build-header">
         <div>
-          <span>{setup.name} · {formatWakfuClassLabel(build.classId)}</span>
+          <span>Set: {setup.name} · {formatWakfuClassLabel(build.classId)}</span>
           <h1>Recherche de combos</h1>
         </div>
         <div className="header-actions">
@@ -549,18 +555,20 @@ function BuildRow({
         <small>{formatWakfuClassLabel(build.classId)} · {build.gameplayLabel}</small>
       </span>
       <span className="build-row-metrics">
-        {setupCount} setup · {runCount} run · {savedComboCount} combo
+        {setupCount} set · {runCount} run · {savedComboCount} combo
       </span>
     </button>
   );
 }
 
 function SetupSummary({
+  onCreateBalancedSet,
   onOpenBuilder,
   onOpenOptimizer,
   onOpenSetup,
   setup,
 }: {
+  onCreateBalancedSet: () => void;
   onOpenBuilder: () => void;
   onOpenOptimizer: () => void;
   onOpenSetup: () => void;
@@ -573,6 +581,10 @@ function SetupSummary({
         <span>v{setup.version} · {setup.character.resources.ap} PA · {setup.character.resources.bq} BQ · {setup.deckSpellIds.length} sorts</span>
       </button>
       <div className="setup-summary-actions">
+        <button className="secondary-button" type="button" onClick={onCreateBalancedSet}>
+          <Plus size={15} />
+          Set équilibré
+        </button>
         <button className="secondary-button" type="button" onClick={onOpenBuilder}>Builder</button>
         <button className="primary-button" type="button" onClick={onOpenOptimizer}>Optimizer</button>
       </div>
@@ -676,7 +688,7 @@ function SavedComboDurationGroups({
                 <span>Total</span>
                 <span>/ tour</span>
                 <span>Actions</span>
-                <span>Setup</span>
+                <span>Set</span>
                 <span>Inspection</span>
               </div>
               {groups[duration].map((row) => (
@@ -685,7 +697,7 @@ function SavedComboDurationGroups({
                   <span>{row.totalDamage}</span>
                   <span>{row.damagePerTurn}</span>
                   <span>{row.actionCount}</span>
-                  <span>{setupById.get(row.combo.setupSnapshotId)?.name ?? "Setup introuvable"}</span>
+                  <span>{setupById.get(row.combo.setupSnapshotId)?.name ?? "Set introuvable"}</span>
                   <span>
                     <button className="secondary-button" type="button" onClick={() => onOpenCombo(row.combo)}>
                       Ouvrir

@@ -99,6 +99,13 @@ export type CreateOptimizerRunReferenceInput = {
   now?: string;
 };
 
+export type CreateBalancedElementSetInput = {
+  buildId: string;
+  sourceSetupSnapshotId: string;
+  name?: string;
+  now?: string;
+};
+
 export type SaveOptimizerCandidateComboInput = {
   buildId: string;
   setupSnapshotId: string;
@@ -146,7 +153,7 @@ export function createSeedResearchWorkspace({ now = new Date().toISOString() }: 
     id: setupId,
     buildId,
     version: 1,
-    name: "Setup distance lumière v1",
+    name: "Set distance lumière v1",
     classId: "huppermage",
     character,
     equipmentNotes: "Stats finales saisies manuellement; les items ne sont pas modelises.",
@@ -202,7 +209,7 @@ export function createBuild(
     id: setupId,
     buildId,
     version: 1,
-    name: "Setup v1",
+    name: "Set v1",
     classId: input.classId,
     character,
     equipmentNotes: "Stats finales saisies manuellement; les items ne sont pas modelises.",
@@ -231,6 +238,56 @@ export function createBuild(
         updatedAt: now,
       },
     ],
+    setupSnapshots: [...workspace.setupSnapshots, setup],
+  };
+}
+
+export function createBalancedElementSet(
+  workspace: ResearchWorkspaceData,
+  input: CreateBalancedElementSetInput,
+): ResearchWorkspaceData {
+  const sourceSetup = workspace.setupSnapshots.find((setup) => (
+    setup.id === input.sourceSetupSnapshotId && setup.buildId === input.buildId
+  ));
+  if (!sourceSetup) {
+    return workspace;
+  }
+
+  const now = input.now ?? new Date().toISOString();
+  const name = input.name?.trim() || "Set éléments équilibrés";
+  const mastery = sourceSetup.character.stats.elementalMastery;
+  const balancedMastery = Math.round((mastery.fire + mastery.water + mastery.earth + mastery.air) / 4);
+  const setupId = createUniqueStableId(
+    "setup",
+    `${name}-${sourceSetup.id}`,
+    now,
+    workspace.setupSnapshots.map((setup) => setup.id),
+  );
+  const setup: SetupSnapshot = {
+    ...sourceSetup,
+    id: setupId,
+    version: sourceSetup.version + 1,
+    name,
+    character: {
+      ...sourceSetup.character,
+      stats: {
+        ...sourceSetup.character.stats,
+        elementalMastery: {
+          ...sourceSetup.character.stats.elementalMastery,
+          fire: balancedMastery,
+          water: balancedMastery,
+          earth: balancedMastery,
+          air: balancedMastery,
+        },
+      },
+    },
+    equipmentNotes: `${sourceSetup.equipmentNotes} Set dérivé de ${sourceSetup.name}; maîtrises Feu/Eau/Terre/Air équilibrées à ${balancedMastery}.`,
+    createdAt: now,
+  };
+
+  return {
+    ...workspace,
+    builds: appendBuildReference(workspace.builds, input.buildId, "setupSnapshotIds", setupId, now),
     setupSnapshots: [...workspace.setupSnapshots, setup],
   };
 }
@@ -428,7 +485,7 @@ function hasBuildSetupPair(workspace: ResearchWorkspaceData, buildId: string, se
 function appendBuildReference(
   builds: ResearchBuild[],
   buildId: string,
-  key: "optimizerRunIds" | "savedComboIds",
+  key: "setupSnapshotIds" | "optimizerRunIds" | "savedComboIds",
   id: string,
   now: string,
 ): ResearchBuild[] {
