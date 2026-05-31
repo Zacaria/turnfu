@@ -260,7 +260,7 @@ around the high-value pivots. On the reference Huppermage benchmarks it found
 the current best T3 warmup line without changing the verified T2 capped scores.
 
 The best repair-discovered three-turn branch is now also a domain warmup seed.
-It reaches `102410.95` damage immediately on the reference Huppermage setup,
+It reaches `102536.53` damage immediately on the reference Huppermage setup,
 so small-budget T3 searches start from the strongest known line instead of
 spending early iterations rediscovering it. High-budget T2 capped discoveries
 are also promoted back into warmup seeds so constrained two-turn searches do not

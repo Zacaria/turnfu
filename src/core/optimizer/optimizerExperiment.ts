@@ -1535,10 +1535,10 @@ function getHuppermageDomainSeedCandidates(): Array<{ passiveIds: string[]; turn
           "runification",
           "debacle",
           "fleche-de-lumiere",
+          "epee-de-lumiere",
           "eboulement",
           "ombres-dansantes",
           "halo-chatoyant",
-          "epee-de-lumiere",
         ],
         [
           "halo-chatoyant",
