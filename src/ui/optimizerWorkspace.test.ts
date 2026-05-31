@@ -299,6 +299,29 @@ test("live optimizer run reports intermediate best results and counters", async 
   assert.ok(results.length > 0);
 });
 
+test("live optimizer throttles progress for large genetic workspace runs", async () => {
+  const setup = {
+    ...getSeedSetup(),
+    deckSpellIds: ["light-hit", "fire-hit"],
+  };
+  const snapshots: Array<{ attempts: number; resultCount: number }> = [];
+
+  const results = await runOptimizerForControlsLive(setup, catalog, {
+    ...createDefaultOptimizerControls(),
+    duration: 1,
+    iterationBudget: 10_000,
+    maxResultsPerDuration: 2,
+    searchMethod: "genetic",
+  }, (progress) => {
+    snapshots.push({ attempts: progress.attempts, resultCount: progress.results.length });
+  });
+
+  assert.ok(snapshots.length > 1);
+  assert.ok(snapshots.length <= 102);
+  assert.ok(snapshots.at(-1)!.attempts >= 10_000);
+  assert.ok(results.length > 0);
+});
+
 test("creates builder handoff payload from an optimizer candidate", () => {
   const setup = getSeedSetup();
   const result = createOptimizerResultViewModel({

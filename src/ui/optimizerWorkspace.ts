@@ -254,11 +254,28 @@ async function runGeneticOptimizerForControlsLive(
   const normalizedControls = normalizeOptimizerControls(controls);
   const candidates = new Map<string, OptimizerCandidateViewModel>();
   let latestResults: OptimizerCandidateViewModel[] = [];
+  const uiProgressInterval = Math.max(10, Math.floor(normalizedControls.iterationBudget / 100));
+  let nextUiProgressAttempt = 0;
+  let reportedUiProgress = false;
+
+  function shouldReportUiProgress(attempts: number): boolean {
+    const isFinalProgress = attempts >= normalizedControls.iterationBudget || signal?.aborted;
+    if (!reportedUiProgress || attempts >= nextUiProgressAttempt || isFinalProgress) {
+      reportedUiProgress = true;
+      nextUiProgressAttempt = Math.min(
+        normalizedControls.iterationBudget,
+        Math.max(nextUiProgressAttempt + uiProgressInterval, attempts + uiProgressInterval),
+      );
+      return true;
+    }
+
+    return false;
+  }
 
   const experiment = await runOptimizerExperimentProgressive({
     ...createOptimizerExperimentOptionsForSetup(setup, catalog, normalizedControls),
     seed: `${normalizedControls.searchMethod}:${normalizedControls.duration}:${normalizedControls.targetElement}`,
-    progressInterval: Math.min(200, Math.max(10, Math.floor(normalizedControls.iterationBudget / 10))),
+    progressInterval: uiProgressInterval,
     signal,
     onProgress: (progress) => {
       for (const candidate of progress.topCandidates) {
@@ -266,9 +283,13 @@ async function runGeneticOptimizerForControlsLive(
         candidates.set(viewModel.id, viewModel);
       }
 
+      if (!shouldReportUiProgress(progress.attempts)) {
+        return;
+      }
+
       latestResults = rankOptimizerCandidateViewModels([...candidates.values()]).slice(0, normalizedControls.maxResultsPerDuration);
       onProgress({
-        batch: Math.max(1, Math.ceil(progress.attempts / Math.max(1, Math.floor(normalizedControls.iterationBudget / 10)))),
+        batch: Math.max(1, Math.ceil(progress.attempts / uiProgressInterval)),
         attempts: progress.attempts,
         validCandidates: progress.validCandidates,
         invalidCandidates: progress.invalidCandidates,
