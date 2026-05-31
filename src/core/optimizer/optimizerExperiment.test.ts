@@ -84,6 +84,7 @@ test("runs requested engines with common progress and deterministic seeded resul
   });
 
   assert.deepEqual(first.engineResults.map((result) => result.engine), allEngines);
+  assert.deepEqual(first.engineResults.map((result) => result.backend), allEngines.map(() => "typescript"));
   assert.ok(first.engineResults.every((result) => result.budget.iterations === 40));
   assert.ok(first.engineResults.every((result) => result.attempts > 0));
   assert.ok(first.engineResults.every((result) => result.validCandidates > 0));
@@ -92,6 +93,35 @@ test("runs requested engines with common progress and deterministic seeded resul
   assert.deepEqual(
     first.engineResults.map((result) => result.bestCandidate?.id),
     second.engineResults.map((result) => result.bestCandidate?.id),
+  );
+});
+
+test("keeps TypeScript backend as default and rejects Rust backend until implemented", () => {
+  const defaultResult = runOptimizerExperiment({
+    catalog,
+    character,
+    duration: 2,
+    availableSpellIds: ["setup", "hit", "burst"],
+    engines: ["hybrid"],
+    seed: "default-backend",
+    budget: { iterations: 40 },
+    maxActionsPerTurn: 1,
+  });
+
+  assert.equal(defaultResult.engineResults[0]?.backend, "typescript");
+  assert.throws(
+    () => runOptimizerExperiment({
+      catalog,
+      character,
+      duration: 2,
+      availableSpellIds: ["setup", "hit", "burst"],
+      engines: ["hybrid"],
+      backend: "rustWasm",
+      seed: "rust-backend",
+      budget: { iterations: 40 },
+      maxActionsPerTurn: 1,
+    }),
+    /Optimizer backend 'rustWasm' is not implemented/,
   );
 });
 

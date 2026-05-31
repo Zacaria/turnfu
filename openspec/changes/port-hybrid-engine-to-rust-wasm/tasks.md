@@ -1,21 +1,21 @@
 ## 1. Backend Boundary
 
-- [ ] 1.1 Add an optimizer backend option and metadata field without changing existing TypeScript default behavior.
-- [ ] 1.2 Extract a backend adapter interface that accepts normalized optimizer requests and returns the existing optimizer result shape.
-- [ ] 1.3 Route TypeScript optimizer runs through the adapter interface and prove current tests still pass.
-- [ ] 1.4 Add explicit unsupported-backend errors for engine or option combinations the Rust backend cannot run.
+- [x] 1.1 Add an optimizer backend option and metadata field without changing existing TypeScript default behavior.
+- [x] 1.2 Extract a backend adapter interface that accepts normalized optimizer requests and returns the existing optimizer result shape.
+- [x] 1.3 Route TypeScript optimizer runs through the adapter interface and prove current tests still pass.
+- [x] 1.4 Add explicit unsupported-backend errors for engine or option combinations the Rust backend cannot run.
 
 ## 2. Rust/WASM Scaffolding
 
-- [ ] 2.1 Add a Rust crate under `rust/optimizer-wasm` with deterministic build scripts.
-- [ ] 2.2 Add package scripts for WASM build, Rust benchmark runs, and differential test runs.
-- [ ] 2.3 Define the compact request and response data model shared between TypeScript and Rust.
-- [ ] 2.4 Implement serialization and normalization helpers for catalog entries, character state, optimizer options, plans, results, and metrics.
+- [x] 2.1 Add a Rust crate under `rust/optimizer-wasm` with deterministic build scripts.
+- [x] 2.2 Add package scripts for WASM build, Rust benchmark runs, and differential test runs.
+- [x] 2.3 Define the compact request and response data model shared between TypeScript and Rust.
+- [x] 2.4 Implement serialization and normalization helpers for catalog entries, character state, optimizer options, plans, results, and metrics.
 
 ## 3. Gameplay Port
 
-- [ ] 3.1 Port resource pools, spell costs, action context resolution, and resource validation to Rust.
-- [ ] 3.2 Port damage calculation, resolved element logic, contextual mastery handling, critical/rear/block modifiers, and two-decimal rounding.
+- [x] 3.1 Port resource pools, spell costs, action context resolution, and resource validation to Rust.
+- [x] 3.2 Port damage calculation, resolved element logic, contextual mastery handling, critical/rear/block modifiers, and two-decimal rounding.
 - [ ] 3.3 Port Huppermage rune state, rune AP gains, Abondance, Feu-Follet state, Coeur de Lumiere, BQ conversion, and end-of-turn BQ rules.
 - [ ] 3.4 Port supported passive behavior including initial stat/resource modifiers and Huppermage BQ gain modifiers.
 - [ ] 3.5 Port cooldowns, cast limits, deck limits, target validation, and normalized violation reporting.

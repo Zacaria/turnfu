@@ -3,6 +3,8 @@ node_modules/
 .pnpm-store/
 dist/
 artifacts/
+src/wasm/
+rust/optimizer-wasm/target/
 .DS_Store
 *.log
 /*.png

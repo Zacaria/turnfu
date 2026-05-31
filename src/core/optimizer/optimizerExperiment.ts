@@ -13,6 +13,7 @@ import {
 } from "./comboOptimizer.ts";
 
 export type OptimizerExperimentEngineKind = "random" | "mcts" | "novelty" | "annealing" | "genetic" | "hybrid";
+export type OptimizerExperimentBackendKind = "typescript" | "rustWasm";
 
 export type OptimizerExperimentBudget = {
   iterations: number;
@@ -48,6 +49,7 @@ export type OptimizerExperimentProgress = {
 
 export type OptimizerExperimentEngineResult = {
   engine: OptimizerExperimentEngineKind;
+  backend?: OptimizerExperimentBackendKind;
   budget: OptimizerExperimentBudget;
   attempts: number;
   validCandidates: number;
@@ -70,6 +72,7 @@ export type OptimizerExperimentOptions = {
   character: SimulatedCharacter;
   duration: number;
   engines: OptimizerExperimentEngineKind[];
+  backend?: OptimizerExperimentBackendKind;
   budget: OptimizerExperimentBudget;
   seed?: string;
   availableSpellIds?: string[];
@@ -126,9 +129,14 @@ type EngineContext = {
 
 type NormalizedExperimentOptions = Required<Pick<
   OptimizerExperimentOptions,
-  "duration" | "engines" | "budget" | "seed" | "maxPassiveCount" | "maxActionsPerTurn" | "progressInterval"
-  | "maxSublimationCount"
->> & Omit<OptimizerExperimentOptions, "duration" | "engines" | "budget" | "seed" | "maxPassiveCount" | "maxActionsPerTurn" | "progressInterval" | "maxSublimationCount">;
+  "duration" | "engines" | "backend" | "budget" | "seed" | "maxPassiveCount" | "maxSublimationCount" | "maxActionsPerTurn" | "progressInterval"
+>> & Omit<OptimizerExperimentOptions, "duration" | "engines" | "backend" | "budget" | "seed" | "maxPassiveCount" | "maxSublimationCount" | "maxActionsPerTurn" | "progressInterval">;
+
+type OptimizerExperimentBackend = {
+  kind: OptimizerExperimentBackendKind;
+  run(options: NormalizedExperimentOptions): OptimizerExperimentResult;
+  runProgressive(options: NormalizedExperimentOptions): Promise<OptimizerExperimentResult>;
+};
 
 type EngineAccumulator = {
   engine: OptimizerExperimentEngineKind;
@@ -174,7 +182,58 @@ const DEFAULT_EVALUATION_CACHE_LIMIT = 20_000;
 
 export function runOptimizerExperiment(options: OptimizerExperimentOptions): OptimizerExperimentResult {
   const normalized = normalizeExperimentOptions(options);
-  const engineResults = normalized.engines.map((engine, engineIndex) => {
+  return getOptimizerExperimentBackend(normalized.backend).run(normalized);
+}
+
+export async function runOptimizerExperimentProgressive(options: OptimizerExperimentOptions): Promise<OptimizerExperimentResult> {
+  const normalized = normalizeExperimentOptions(options);
+  return getOptimizerExperimentBackend(normalized.backend).runProgressive(normalized);
+}
+
+const typescriptOptimizerBackend: OptimizerExperimentBackend = {
+  kind: "typescript",
+  run: runTypeScriptOptimizerExperiment,
+  runProgressive: runTypeScriptOptimizerExperimentProgressive,
+};
+
+const rustWasmOptimizerBackend: OptimizerExperimentBackend = {
+  kind: "rustWasm",
+  run(options) {
+    throw createUnsupportedOptimizerBackendError("rustWasm", options);
+  },
+  async runProgressive(options) {
+    throw createUnsupportedOptimizerBackendError("rustWasm", options);
+  },
+};
+
+function getOptimizerExperimentBackend(backend: OptimizerExperimentBackendKind): OptimizerExperimentBackend {
+  switch (backend) {
+    case "typescript":
+      return typescriptOptimizerBackend;
+    case "rustWasm":
+      return rustWasmOptimizerBackend;
+  }
+}
+
+function runTypeScriptOptimizerExperiment(normalized: NormalizedExperimentOptions): OptimizerExperimentResult {
+  const engineResults = normalized.engines.map((engine, engineIndex) => withBackendMetadata(
+    runTypeScriptOptimizerEngine(normalized, engine, engineIndex),
+    "typescript",
+  ));
+
+  return {
+    seed: normalized.seed,
+    duration: normalized.duration,
+    engineResults,
+    bestCandidate: pickBestCandidate(engineResults.flatMap((result) => result.bestCandidate ? [result.bestCandidate] : [])),
+  };
+}
+
+function runTypeScriptOptimizerEngine(
+  normalized: NormalizedExperimentOptions,
+  engine: OptimizerExperimentEngineKind,
+  engineIndex: number,
+): OptimizerExperimentEngineResult {
     const evaluator = createOptimizerExperimentEvaluator(normalized);
     const rng = createSeededRandom(`${normalized.seed}:${engine}:${engineIndex}`);
     const sampler = createCandidateSampler(normalized, rng);
@@ -194,23 +253,14 @@ export function runOptimizerExperiment(options: OptimizerExperimentOptions): Opt
       case "hybrid":
         return runHybridEngine(context);
     }
-  });
-
-  return {
-    seed: normalized.seed,
-    duration: normalized.duration,
-    engineResults,
-    bestCandidate: pickBestCandidate(engineResults.flatMap((result) => result.bestCandidate ? [result.bestCandidate] : [])),
-  };
 }
 
-export async function runOptimizerExperimentProgressive(options: OptimizerExperimentOptions): Promise<OptimizerExperimentResult> {
-  const normalized = normalizeExperimentOptions(options);
+async function runTypeScriptOptimizerExperimentProgressive(normalized: NormalizedExperimentOptions): Promise<OptimizerExperimentResult> {
   if (
     normalized.engines.length !== 1
     || (normalized.engines[0] !== "genetic" && normalized.engines[0] !== "hybrid")
   ) {
-    return runOptimizerExperiment(options);
+    return runTypeScriptOptimizerExperiment(normalized);
   }
 
   const evaluator = createOptimizerExperimentEvaluator(normalized);
@@ -218,9 +268,9 @@ export async function runOptimizerExperimentProgressive(options: OptimizerExperi
   const rng = createSeededRandom(`${normalized.seed}:${engine}:0`);
   const sampler = createCandidateSampler(normalized, rng);
   const context: EngineContext = { options: normalized, evaluator, rng, sampler };
-  const engineResult = engine === "hybrid"
+  const engineResult = withBackendMetadata(engine === "hybrid"
     ? await runHybridEngineProgressive(context)
-    : await runGeneticEngineProgressive(context);
+    : await runGeneticEngineProgressive(context), "typescript");
 
   return {
     seed: normalized.seed,
@@ -228,6 +278,21 @@ export async function runOptimizerExperimentProgressive(options: OptimizerExperi
     engineResults: [engineResult],
     bestCandidate: engineResult.bestCandidate,
   };
+}
+
+function withBackendMetadata(
+  result: OptimizerExperimentEngineResult,
+  backend: OptimizerExperimentBackendKind,
+): OptimizerExperimentEngineResult {
+  return { ...result, backend };
+}
+
+function createUnsupportedOptimizerBackendError(
+  backend: OptimizerExperimentBackendKind,
+  options: NormalizedExperimentOptions,
+): Error {
+  const engines = options.engines.join(", ");
+  return new Error(`Optimizer backend '${backend}' is not implemented for engines: ${engines}. Use backend: 'typescript' or wait for the Rust/WASM backend port.`);
 }
 
 export function createOptimizerExperimentEvaluator(
@@ -2847,6 +2912,7 @@ function normalizeExperimentOptions(options: OptimizerExperimentOptions): Normal
     ...options,
     duration: clampInteger(options.duration, 1, 3),
     engines: options.engines.length > 0 ? options.engines : ["random"],
+    backend: options.backend ?? "typescript",
     budget: { iterations: clampInteger(options.budget.iterations, 1, 1_000_000) },
     seed: options.seed ?? "optimizer-experiment",
     maxPassiveCount: clampInteger(options.maxPassiveCount ?? 0, 0, 6),

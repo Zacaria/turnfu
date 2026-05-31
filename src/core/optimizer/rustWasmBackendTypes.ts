@@ -1,0 +1,82 @@
+import type { CatalogEntry } from "../catalog/types.ts";
+import type { ComboSimulationOptions, SimulatedCharacter } from "../simulation/types.ts";
+import type { ComboOptimizationCriterion, ComboSustainability } from "./comboOptimizer.ts";
+import type { OptimizerExperimentBackendKind, OptimizerExperimentEngineKind, OptimizerExperimentOptions } from "./optimizerExperiment.ts";
+
+export const RUST_WASM_OPTIMIZER_SCHEMA_VERSION = 1;
+
+export type RustWasmOptimizerRequest = {
+  schemaVersion: typeof RUST_WASM_OPTIMIZER_SCHEMA_VERSION;
+  engine: OptimizerExperimentEngineKind;
+  seed: string;
+  duration: number;
+  iterations: number;
+  maxActionsPerTurn: number;
+  maxPassiveCount: number;
+  availableSpellIds: string[];
+  availablePassiveIds: string[];
+  catalog: CatalogEntry[];
+  character: SimulatedCharacter;
+  criterion?: ComboOptimizationCriterion;
+  requireSustainableCycle: boolean;
+  defaultActionContext?: ComboSimulationOptions["defaultActionContext"];
+  maxCandidates?: number;
+};
+
+export type RustWasmOptimizerResponse = {
+  schemaVersion: typeof RUST_WASM_OPTIMIZER_SCHEMA_VERSION;
+  backend: OptimizerExperimentBackendKind;
+  supported: boolean;
+  engine: OptimizerExperimentEngineKind;
+  seed: string;
+  attempts: number;
+  validCandidates: number;
+  invalidCandidates: number;
+  metrics: Record<string, number>;
+};
+
+export function createRustWasmOptimizerRequest(options: OptimizerExperimentOptions): RustWasmOptimizerRequest {
+  const engine = options.engines.length === 1 ? options.engines[0] : undefined;
+  if (!engine) {
+    throw new Error("Rust/WASM optimizer requests require exactly one engine.");
+  }
+
+  return {
+    schemaVersion: RUST_WASM_OPTIMIZER_SCHEMA_VERSION,
+    engine,
+    seed: options.seed ?? "optimizer-experiment",
+    duration: clampInteger(options.duration, 1, 3),
+    iterations: clampInteger(options.budget.iterations, 1, 1_000_000_000),
+    maxActionsPerTurn: clampInteger(options.maxActionsPerTurn ?? 3, 1, 12),
+    maxPassiveCount: clampInteger(options.maxPassiveCount ?? 0, 0, 6),
+    availableSpellIds: [...(options.availableSpellIds ?? [])].sort(),
+    availablePassiveIds: [...(options.availablePassiveIds ?? [])].sort(),
+    catalog: normalizeCatalogForRustWasm(options.catalog),
+    character: cloneJson(options.character),
+    criterion: options.criterion ? cloneJson(options.criterion) : undefined,
+    requireSustainableCycle: options.requireSustainableCycle ?? false,
+    defaultActionContext: options.defaultActionContext ? cloneJson(options.defaultActionContext) : undefined,
+    maxCandidates: options.maxCandidates,
+  };
+}
+
+export function serializeRustWasmOptimizerRequest(options: OptimizerExperimentOptions): string {
+  return JSON.stringify(createRustWasmOptimizerRequest(options));
+}
+
+function normalizeCatalogForRustWasm(catalog: CatalogEntry[]): CatalogEntry[] {
+  return [...catalog]
+    .sort((left, right) => left.id.localeCompare(right.id))
+    .map((entry) => cloneJson(entry));
+}
+
+function cloneJson<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function clampInteger(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) {
+    return min;
+  }
+  return Math.min(max, Math.max(min, Math.floor(value)));
+}
