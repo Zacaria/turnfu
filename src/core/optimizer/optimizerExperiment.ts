@@ -2733,10 +2733,36 @@ function addTopCandidate(
   accumulator: EngineAccumulator,
   candidate: OptimizerExperimentCandidate,
 ) {
-  accumulator.topCandidates.set(candidate.id, candidate);
   const maxCandidates = clampInteger(context.options.maxCandidates ?? 20, 1, 200);
-  const ranked = [...accumulator.topCandidates.values()].sort(compareCandidates);
-  accumulator.topCandidates = new Map(ranked.slice(0, maxCandidates).map((entry) => [entry.id, entry]));
+  const existing = accumulator.topCandidates.get(candidate.id);
+  if (existing && compareCandidates(candidate, existing) >= 0) {
+    return;
+  }
+
+  let candidateToRemove: OptimizerExperimentCandidate | undefined;
+  if (!existing && accumulator.topCandidates.size >= maxCandidates) {
+    candidateToRemove = findWorstTopCandidate(accumulator.topCandidates);
+    if (candidateToRemove && compareCandidates(candidate, candidateToRemove) >= 0) {
+      return;
+    }
+  }
+
+  accumulator.topCandidates.set(candidate.id, candidate);
+  if (candidateToRemove) {
+    accumulator.topCandidates.delete(candidateToRemove.id);
+  }
+}
+
+function findWorstTopCandidate(
+  candidates: Map<string, OptimizerExperimentCandidate>,
+): OptimizerExperimentCandidate | undefined {
+  let worst: OptimizerExperimentCandidate | undefined;
+  for (const candidate of candidates.values()) {
+    if (!worst || compareCandidates(candidate, worst) > 0) {
+      worst = candidate;
+    }
+  }
+  return worst;
 }
 
 function normalizeExperimentOptions(options: OptimizerExperimentOptions): NormalizedExperimentOptions {
