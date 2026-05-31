@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use wasm_bindgen::prelude::*;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -488,6 +488,69 @@ pub struct BackendMetrics {
     pub request_available_passives: u32,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HybridIslandSchedule {
+    pub island_index: u32,
+    pub iterations: u32,
+    pub progress_interval: u32,
+    pub rng_seed: String,
+    pub sampler_seed: String,
+    pub population_size: u32,
+    pub elite_count: u32,
+    pub immigrant_batch_size: u32,
+    pub stagnation_limit: u32,
+    pub local_refinement_interval: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HybridSearchSchedule {
+    pub island_count: u32,
+    pub islands: Vec<HybridIslandSchedule>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HybridPopulationConfig {
+    pub population_size: u32,
+    pub elite_count: u32,
+    pub immigrant_batch_size: u32,
+    pub stagnation_limit: u32,
+    pub local_refinement_interval: u32,
+    pub local_refinement_preemption_budget: u32,
+    pub stagnation_refinement_budget: u32,
+    pub stagnation_refinement_interval: u32,
+    pub repair_burst_limit: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HybridPopulationEntry {
+    pub id: String,
+    pub candidate: OptimizerCandidateInput,
+    pub score: f64,
+    #[serde(default)]
+    pub valid: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HybridImmigrant {
+    pub mode: String,
+    pub candidate: OptimizerCandidateInput,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HybridRestartResult {
+    pub retained_elites: Vec<HybridPopulationEntry>,
+    pub immigrants: Vec<HybridImmigrant>,
+    pub next_population: Vec<HybridPopulationEntry>,
+    pub attempts_since_improvement: u32,
+    pub metrics: BTreeMap<String, u32>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct OptimizerCandidateInput {
@@ -632,6 +695,269 @@ pub fn sample_candidate(
         _ => Err(format!(
             "Unknown Rust candidate sampler mode '{mode}'. Expected 'random' or 'resourceAware'."
         )),
+    }
+}
+
+pub fn create_hybrid_schedule(request: &OptimizerRequest) -> HybridSearchSchedule {
+    let island_count = get_hybrid_island_count(request.iterations, request.duration);
+    let base_iterations = request.iterations / island_count;
+    let remainder = request.iterations % island_count;
+    let islands = (0..island_count)
+        .map(|island_index| {
+            let iterations = base_iterations + u32::from(island_index < remainder);
+            let population = create_hybrid_population_config(iterations);
+            HybridIslandSchedule {
+                island_index,
+                iterations,
+                progress_interval: std::cmp::max(1, iterations / 10),
+                rng_seed: format!("{}:hybrid:island:{island_index}", request.seed),
+                sampler_seed: format!("{}:hybrid:sampler:{island_index}", request.seed),
+                population_size: population.population_size,
+                elite_count: population.elite_count,
+                immigrant_batch_size: population.immigrant_batch_size,
+                stagnation_limit: population.stagnation_limit,
+                local_refinement_interval: population.local_refinement_interval,
+            }
+        })
+        .collect();
+
+    HybridSearchSchedule {
+        island_count,
+        islands,
+    }
+}
+
+pub fn get_hybrid_island_count(iterations: u32, duration: u32) -> u32 {
+    if iterations < 80 || (duration <= 2 && iterations < 120) {
+        return 1;
+    }
+
+    std::cmp::min(
+        6,
+        std::cmp::max(2, ((iterations as f64).sqrt() / 5.0).floor() as u32),
+    )
+}
+
+pub fn create_hybrid_population_config(iterations: u32) -> HybridPopulationConfig {
+    let population_size = std::cmp::max(
+        8,
+        std::cmp::min(96, ((iterations as f64).sqrt().floor() as u32) * 2),
+    );
+    HybridPopulationConfig {
+        population_size,
+        elite_count: std::cmp::max(2, ((population_size as f64) * 0.15).ceil() as u32),
+        immigrant_batch_size: std::cmp::max(2, ((population_size as f64) * 0.25).ceil() as u32),
+        stagnation_limit: std::cmp::max(
+            8,
+            std::cmp::min(80, ((population_size as f64) * 2.0).ceil() as u32),
+        ),
+        local_refinement_interval: std::cmp::max(3, population_size / 4),
+        local_refinement_preemption_budget: 160,
+        stagnation_refinement_budget: 1_000,
+        stagnation_refinement_interval: 7,
+        repair_burst_limit: 2,
+    }
+}
+
+pub fn rank_population(mut population: Vec<HybridPopulationEntry>) -> Vec<HybridPopulationEntry> {
+    population.sort_by(compare_population_entries);
+    population
+}
+
+pub fn truncate_population(
+    population: Vec<HybridPopulationEntry>,
+    population_size: u32,
+) -> Vec<HybridPopulationEntry> {
+    rank_population(population)
+        .into_iter()
+        .take(population_size as usize)
+        .collect()
+}
+
+pub fn inject_hybrid_immigrants(
+    request: &OptimizerRequest,
+    population: Vec<HybridPopulationEntry>,
+    restart_index: u32,
+) -> Result<HybridRestartResult, String> {
+    let config = create_hybrid_population_config(request.iterations);
+    let retained_elites = truncate_population(population, config.elite_count);
+    let mut next_population = retained_elites.clone();
+    let mut immigrants = Vec::new();
+    let mut metrics = BTreeMap::new();
+    let mut rng = SeededRandom::new(&format!("{}:hybrid:restart:{restart_index}", request.seed));
+
+    while immigrants.len() < config.immigrant_batch_size as usize
+        && next_population.len() < config.population_size as usize
+    {
+        let use_diverse = request.iterations >= 1_000
+            && request.duration <= 2
+            && immigrants.is_empty()
+            && !next_population.is_empty();
+        let (mode, candidate) = if use_diverse {
+            *metrics
+                .entry("hybridDiverseImmigrants".to_string())
+                .or_insert(0) += 1;
+            (
+                "diverseRandom".to_string(),
+                create_hybrid_diverse_immigrant(request, &next_population, &mut rng)?,
+            )
+        } else if rng.chance(0.12) {
+            *metrics
+                .entry("hybridResourceAwareCandidates".to_string())
+                .or_insert(0) += 1;
+            (
+                "resourceAware".to_string(),
+                sample_candidate_with_rng(request, "resourceAware", &mut rng)?,
+            )
+        } else {
+            (
+                "random".to_string(),
+                sample_candidate_with_rng(request, "random", &mut rng)?,
+            )
+        };
+
+        let id = encode_candidate(&candidate);
+        next_population.push(HybridPopulationEntry {
+            id: id.clone(),
+            candidate: candidate.clone(),
+            score: f64::NEG_INFINITY,
+            valid: false,
+        });
+        immigrants.push(HybridImmigrant { mode, candidate });
+    }
+
+    metrics.insert("hybridRestarts".to_string(), 1);
+    metrics.insert("hybridImmigrants".to_string(), immigrants.len() as u32);
+
+    Ok(HybridRestartResult {
+        retained_elites,
+        immigrants,
+        next_population,
+        attempts_since_improvement: config.stagnation_limit / 2,
+        metrics,
+    })
+}
+
+fn compare_population_entries(
+    left: &HybridPopulationEntry,
+    right: &HybridPopulationEntry,
+) -> std::cmp::Ordering {
+    right
+        .score
+        .partial_cmp(&left.score)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| {
+            left.candidate
+                .passive_ids
+                .len()
+                .cmp(&right.candidate.passive_ids.len())
+        })
+        .then_with(|| {
+            count_candidate_actions(&left.candidate).cmp(&count_candidate_actions(&right.candidate))
+        })
+        .then_with(|| left.id.cmp(&right.id))
+}
+
+fn count_candidate_actions(candidate: &OptimizerCandidateInput) -> usize {
+    candidate
+        .plan
+        .turns
+        .iter()
+        .map(|turn| turn.actions.len())
+        .sum()
+}
+
+fn sample_candidate_with_rng(
+    request: &OptimizerRequest,
+    mode: &str,
+    rng: &mut SeededRandom,
+) -> Result<OptimizerCandidateInput, String> {
+    let catalog = read_search_catalog(request)?;
+    let actions = get_search_actions(request, &catalog);
+    if actions.is_empty() {
+        return Err("Cannot sample Rust candidate without available spells.".to_string());
+    }
+
+    match mode {
+        "random" => Ok(create_random_candidate(request, &catalog, &actions, rng)),
+        "resourceAware" => Ok(create_resource_aware_candidate(
+            request, &catalog, &actions, rng,
+        )),
+        _ => Err(format!(
+            "Unknown Rust candidate sampler mode '{mode}'. Expected 'random' or 'resourceAware'."
+        )),
+    }
+}
+
+fn create_hybrid_diverse_immigrant(
+    request: &OptimizerRequest,
+    population: &[HybridPopulationEntry],
+    rng: &mut SeededRandom,
+) -> Result<OptimizerCandidateInput, String> {
+    let reference_descriptors = population
+        .iter()
+        .map(|entry| create_hybrid_input_descriptor(&entry.candidate))
+        .collect::<Vec<_>>();
+    let mut selected = sample_candidate_with_rng(request, "random", rng)?;
+    let mut selected_distance = distance_to_nearest_hybrid_descriptor(
+        &create_hybrid_input_descriptor(&selected),
+        &reference_descriptors,
+    );
+
+    for _index in 1..4 {
+        let candidate = sample_candidate_with_rng(request, "random", rng)?;
+        let distance = distance_to_nearest_hybrid_descriptor(
+            &create_hybrid_input_descriptor(&candidate),
+            &reference_descriptors,
+        );
+        if distance > selected_distance {
+            selected = candidate;
+            selected_distance = distance;
+        }
+    }
+
+    Ok(selected)
+}
+
+fn create_hybrid_input_descriptor(candidate: &OptimizerCandidateInput) -> Vec<String> {
+    let mut descriptor = vec![
+        format!("actions:{}", count_candidate_actions(candidate)),
+        format!("passives:{}", {
+            let mut passive_ids = candidate.passive_ids.clone();
+            passive_ids.sort();
+            passive_ids.join(",")
+        }),
+    ];
+
+    for (turn_index, turn) in candidate.plan.turns.iter().enumerate() {
+        for action in &turn.actions {
+            descriptor.push(format!("t{turn_index}:{}", encode_candidate_action(action)));
+        }
+    }
+
+    descriptor
+}
+
+fn distance_to_nearest_hybrid_descriptor(descriptor: &[String], references: &[Vec<String>]) -> f64 {
+    if references.is_empty() {
+        return 1.0;
+    }
+
+    references.iter().fold(1.0, |nearest, reference| {
+        nearest.min(descriptor_distance(descriptor, reference))
+    })
+}
+
+fn descriptor_distance(left: &[String], right: &[String]) -> f64 {
+    let left_set = left.iter().collect::<BTreeSet<_>>();
+    let right_set = right.iter().collect::<BTreeSet<_>>();
+    let union = left_set.union(&right_set).count();
+    let intersection = left_set.intersection(&right_set).count();
+
+    if union == 0 {
+        0.0
+    } else {
+        1.0 - (intersection as f64 / union as f64)
     }
 }
 
@@ -2579,6 +2905,36 @@ pub fn sample_candidate_json(request_json: &str, mode: &str) -> Result<String, J
     })
 }
 
+#[wasm_bindgen]
+pub fn create_hybrid_schedule_json(request_json: &str) -> Result<String, JsValue> {
+    let request = parse_optimizer_request(request_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid optimizer request JSON: {error}")))?;
+    serde_json::to_string(&create_hybrid_schedule(&request)).map_err(|error| {
+        JsValue::from_str(&format!(
+            "Failed to serialize Rust hybrid schedule: {error}"
+        ))
+    })
+}
+
+#[wasm_bindgen]
+pub fn inject_hybrid_immigrants_json(
+    request_json: &str,
+    population_json: &str,
+    restart_index: u32,
+) -> Result<String, JsValue> {
+    let request = parse_optimizer_request(request_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid optimizer request JSON: {error}")))?;
+    let population: Vec<HybridPopulationEntry> = serde_json::from_str(population_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid population JSON: {error}")))?;
+    let result = inject_hybrid_immigrants(&request, population, restart_index)
+        .map_err(|error| JsValue::from_str(&error))?;
+    serde_json::to_string(&result).map_err(|error| {
+        JsValue::from_str(&format!(
+            "Failed to serialize Rust hybrid immigrants: {error}"
+        ))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2793,6 +3149,109 @@ mod tests {
         assert!(!actions.is_empty());
         assert!(actions.len() <= 2);
         assert!(actions.iter().all(|action| action.spell_id == "cheap"));
+    }
+
+    #[test]
+    fn schedules_hybrid_islands_with_deterministic_seeds() {
+        let request = parse_optimizer_request(
+            r#"{
+              "schemaVersion":1,
+              "engine":"hybrid",
+              "seed":"schedule",
+              "duration":3,
+              "iterations":1000,
+              "maxActionsPerTurn":8,
+              "maxPassiveCount":3,
+              "catalog":[],
+              "character":{"id":"test","resources":{"ap":6,"mp":3,"wp":2,"bq":100}}
+            }"#,
+        )
+        .expect("request should parse");
+
+        let schedule = create_hybrid_schedule(&request);
+
+        assert_eq!(schedule.island_count, 6);
+        assert_eq!(
+            schedule
+                .islands
+                .iter()
+                .map(|island| island.iterations)
+                .sum::<u32>(),
+            1000
+        );
+        assert_eq!(schedule.islands[0].iterations, 167);
+        assert_eq!(schedule.islands[0].rng_seed, "schedule:hybrid:island:0");
+        assert_eq!(
+            schedule.islands[0].sampler_seed,
+            "schedule:hybrid:sampler:0"
+        );
+        assert_eq!(schedule.islands[0].population_size, 24);
+        assert_eq!(schedule.islands[0].stagnation_limit, 48);
+    }
+
+    #[test]
+    fn ranks_population_and_injects_restart_immigrants() {
+        let request = parse_optimizer_request(
+            r#"{
+              "schemaVersion":1,
+              "engine":"hybrid",
+              "seed":"restart",
+              "duration":3,
+              "iterations":200,
+              "maxActionsPerTurn":4,
+              "maxPassiveCount":0,
+              "availableSpellIds":["hit"],
+              "availablePassiveIds":[],
+              "catalog":[
+                {
+                  "kind":"spell",
+                  "id":"hit",
+                  "cost":{"ap":1},
+                  "effects":[{"type":"damage","base":20,"element":"fire"}],
+                  "constraints":[],
+                  "tags":[]
+                }
+              ],
+              "character":{"id":"test","resources":{"ap":6,"mp":3,"wp":2,"bq":100}}
+            }"#,
+        )
+        .expect("request should parse");
+        let low = population_entry("low", 10.0, 3);
+        let best = population_entry("best", 20.0, 2);
+        let tie_with_more_actions = population_entry("tie", 20.0, 4);
+
+        let restart = inject_hybrid_immigrants(&request, vec![low, tie_with_more_actions, best], 0)
+            .expect("immigrants should inject");
+
+        assert_eq!(restart.retained_elites[0].id, "best");
+        assert_eq!(restart.retained_elites[1].id, "tie");
+        assert_eq!(restart.retained_elites[2].id, "low");
+        assert_eq!(restart.immigrants.len(), 7);
+        assert_eq!(restart.next_population.len(), 10);
+        assert_eq!(restart.metrics.get("hybridRestarts"), Some(&1));
+        assert_eq!(restart.metrics.get("hybridImmigrants"), Some(&7));
+        assert_eq!(restart.attempts_since_improvement, 28);
+    }
+
+    fn population_entry(id: &str, score: f64, action_count: usize) -> HybridPopulationEntry {
+        HybridPopulationEntry {
+            id: id.to_string(),
+            candidate: OptimizerCandidateInput {
+                passive_ids: vec![],
+                plan: CandidatePlan {
+                    turns: vec![CandidateTurn {
+                        actions: (0..action_count)
+                            .map(|index| CandidateAction {
+                                spell_id: format!("hit-{index}"),
+                                target: None,
+                            })
+                            .collect(),
+                    }],
+                },
+            },
+            score,
+            valid: true,
+        }
     }
 
     #[test]
