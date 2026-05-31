@@ -267,8 +267,11 @@ around the high-value pivots. On the reference Huppermage benchmarks it found
 the current best T3 warmup line without changing the verified T2 capped scores.
 For broader T3 passive budgets, the neighborhood expands around `halo-chatoyant`,
 `debacle`, and `orbes-luisants`, and can flip empty-cell capable actions or
-insert weighted actions near those pivots. The expansion is disabled for
-3-passive T3 searches, where benchmarks showed the narrower pivot set is cleaner.
+insert weighted actions near those pivots. The full expansion is disabled for
+3-passive T3 searches, where benchmarks showed the narrower pivot set is cleaner,
+but long-budget 3-passive searches still use the cheaper target-flip pass. This
+keeps the low-budget warmup unchanged while giving longer capped searches a small
+way to test empty-cell variants.
 
 The best repair-discovered three-turn branches are now also domain warmup seeds.
 The robust `102536.53` line is kept first to preserve early search diversity,

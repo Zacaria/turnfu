@@ -901,6 +901,7 @@ function enqueueHybridEliteNeighbors(
       }
     } else if (context.options.duration === 3) {
       const useBroadT3Neighbors = context.options.maxPassiveCount > 3;
+      const useMicroT3Neighbors = context.options.maxPassiveCount === 3 && context.options.budget.iterations >= 1_000;
       const pivotIndexes = turn.actions
         .map((action, index) => ({
           index,
@@ -943,7 +944,7 @@ function enqueueHybridEliteNeighbors(
         }
       }
 
-      if (useBroadT3Neighbors) {
+      if (useBroadT3Neighbors || useMicroT3Neighbors) {
         const targetFlipSpellIds = new Set(actions
           .filter((action) => action.target?.kind === "emptyCell")
           .map((action) => action.spellId));
