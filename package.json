@@ -2,6 +2,7 @@
   "name": "turnfu",
   "version": "0.1.0",
   "private": true,
+  "packageManager": "pnpm@10.20.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
