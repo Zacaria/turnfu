@@ -1411,7 +1411,11 @@ function createDomainWarmupCandidates(
   const candidates: OptimizerExperimentCandidateInput[] = [];
 
   for (const seed of seeds) {
-    if (seed.turns.length > options.duration || (seed.maxDuration && options.duration > seed.maxDuration)) {
+    if (
+      seed.turns.length > options.duration
+      || (seed.maxDuration && options.duration > seed.maxDuration)
+      || (seed.minPassiveCount && options.maxPassiveCount < seed.minPassiveCount)
+    ) {
       continue;
     }
 
@@ -1516,7 +1520,12 @@ function scorePassiveVariant(passiveIds: string[], options: NormalizedExperiment
   return passiveIds.reduce((total, passiveId) => total + getPassiveSearchWeight(passiveId, options), 0);
 }
 
-function getHuppermageDomainSeedCandidates(): Array<{ passiveIds: string[]; turns: string[][]; maxDuration?: number }> {
+function getHuppermageDomainSeedCandidates(): Array<{
+  passiveIds: string[];
+  turns: string[][];
+  maxDuration?: number;
+  minPassiveCount?: number;
+}> {
   return [
     {
       passiveIds: [
@@ -1663,6 +1672,35 @@ function getHuppermageDomainSeedCandidates(): Array<{ passiveIds: string[]; turn
           "epee-de-lumiere",
         ],
       ],
+    },
+    {
+      passiveIds: [
+        "carnage",
+        "extension-des-sens",
+        "profusion-runique",
+      ],
+      turns: [
+        [
+          "eboulement",
+          "coeur-de-lumiere",
+          "flux-denergie",
+          "papillons-diurnes",
+          "debacle",
+          "orbes-luisants",
+          "orbes-luisants",
+        ],
+        [
+          "coeur-de-lumiere",
+          "runification",
+          "debacle",
+          "debacle",
+          "fleche-de-lumiere",
+          "epee-de-lumiere",
+          "epee-de-lumiere",
+        ],
+      ],
+      maxDuration: 2,
+      minPassiveCount: 3,
     },
     {
       passiveIds: [
