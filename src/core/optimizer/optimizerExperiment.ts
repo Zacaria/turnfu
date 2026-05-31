@@ -2986,11 +2986,8 @@ function cloneTurn(turn: { actions: Action[] }): { actions: Action[] } {
 }
 
 function cloneAction(action: Action): Action {
-  return {
-    ...action,
-    target: action.target ? { ...action.target } : undefined,
-    context: action.context ? { ...action.context } : undefined,
-  };
+  // Optimizer mutations replace array slots; Action objects themselves are treated as immutable.
+  return action;
 }
 
 function createMctsStatKey(turnIndex: number, actionIndex: number, action: Action): string {
