@@ -252,6 +252,14 @@ to two consecutive repairs. After that, the loop must give queued elite
 neighbors or normal offspring a chance to run; this prevents repair cascades
 from starving exploration on long T3 budgets.
 
+Three-turn elite neighbors also include a small targeted relocate pass around
+Huppermage pivot spells such as `coeur-de-lumiere`, `runification`,
+`fleche-de-lumiere`, and `epee-de-lumiere`. This keeps the broad relocate
+search limited to T2, while still letting long T3 budgets fix local ordering
+around the high-value pivots. On the reference Huppermage benchmarks it raises
+the 10k T3 score from `102064.11` to `102410.95` without changing the verified
+T2 capped scores.
+
 The best repair-discovered three-turn branch is now also a domain warmup seed.
 It reaches `102064.11` damage immediately on the reference Huppermage setup,
 so small-budget T3 searches start from the strongest known line instead of

@@ -532,6 +532,7 @@ test("hybrid search repairs invalid three-turn Huppermage branches", () => {
   assert.ok((result.bestCandidate?.score.score ?? 0) >= 92_000);
   assert.ok((result.engineResults[0]?.metrics.hybridRepairCandidates ?? 0) > 0);
   assert.ok((result.engineResults[0]?.metrics.hybridRepairDeferrals ?? 0) > 0);
+  assert.ok((result.engineResults[0]?.metrics.hybridRelocateNeighborCandidates ?? 0) > 0);
 });
 
 test("ranks passive chromosomes by simulated score without passive-specific overrides", () => {

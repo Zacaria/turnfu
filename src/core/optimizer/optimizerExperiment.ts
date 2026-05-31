@@ -892,6 +892,43 @@ function enqueueHybridEliteNeighbors(
           }
         }
       }
+    } else if (context.options.duration === 3) {
+      const pivotIndexes = turn.actions
+        .map((action, index) => ({
+          index,
+          isPivot: action.spellId === "coeur-de-lumiere"
+            || action.spellId === "runification"
+            || action.spellId === "fleche-de-lumiere"
+            || action.spellId === "epee-de-lumiere",
+        }))
+        .filter((entry) => entry.isPivot)
+        .slice(0, 4);
+
+      for (const { index: pivotIndex } of pivotIndexes) {
+        for (const fromIndex of [pivotIndex - 2, pivotIndex - 1, pivotIndex + 1, pivotIndex + 2]) {
+          if (relocateGenerated >= 32) {
+            break;
+          }
+          if (fromIndex < 0 || fromIndex >= turn.actions.length) {
+            continue;
+          }
+          for (const toIndex of [pivotIndex, pivotIndex + 1]) {
+            if (relocateGenerated >= 32) {
+              break;
+            }
+            if (toIndex < 0 || toIndex >= turn.actions.length || fromIndex === toIndex || fromIndex + 1 === toIndex) {
+              continue;
+            }
+            const candidate = cloneCandidateInput(input);
+            const actionsToRelocate = candidate.plan.turns[turnIndex]!.actions;
+            const [action] = actionsToRelocate.splice(fromIndex, 1);
+            actionsToRelocate.splice(toIndex > fromIndex ? toIndex - 1 : toIndex, 0, action!);
+            if (addCandidate(candidate, "hybridRelocateNeighborCandidates")) {
+              relocateGenerated += 1;
+            }
+          }
+        }
+      }
     }
 
     for (let firstIndex = 0; firstIndex < turn.actions.length - 1; firstIndex += 1) {
