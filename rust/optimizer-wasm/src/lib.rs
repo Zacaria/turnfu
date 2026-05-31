@@ -632,6 +632,46 @@ pub struct TopCandidateUpdate {
     pub tracker: TopCandidateTrackerSnapshot,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgressCheckpoint {
+    pub attempts: u32,
+    pub valid_candidates: u32,
+    pub invalid_candidates: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub best_score: Option<f64>,
+    #[serde(default)]
+    pub best_changed: bool,
+    #[serde(default)]
+    pub metrics: BTreeMap<String, f64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgressSnapshot {
+    pub engine: String,
+    pub attempts: u32,
+    pub valid_candidates: u32,
+    pub invalid_candidates: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub best_score: Option<f64>,
+    pub top_candidates: Vec<TopCandidateEntry>,
+    pub metrics: BTreeMap<String, f64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgressBatchInput {
+    pub engine: String,
+    pub progress_interval: u32,
+    #[serde(default)]
+    pub top_candidates: Vec<TopCandidateEntry>,
+    #[serde(default)]
+    pub checkpoints: Vec<ProgressCheckpoint>,
+    #[serde(default)]
+    pub include_final: bool,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct OptimizerCandidateInput {
@@ -1458,6 +1498,38 @@ fn compare_top_candidates(
 
 fn clamp_top_candidate_limit(max_candidates: usize) -> usize {
     max_candidates.clamp(1, 200)
+}
+
+pub fn emit_progress_snapshots(input: ProgressBatchInput) -> Vec<ProgressSnapshot> {
+    let interval = input.progress_interval.max(1);
+    let final_attempt = input
+        .checkpoints
+        .last()
+        .map(|checkpoint| checkpoint.attempts);
+    let mut last_emitted_attempt: Option<u32> = None;
+    let mut snapshots = Vec::new();
+
+    for checkpoint in input.checkpoints {
+        let is_final = input.include_final && Some(checkpoint.attempts) == final_attempt;
+        let should_emit =
+            checkpoint.best_changed || checkpoint.attempts % interval == 0 || is_final;
+        if !should_emit || last_emitted_attempt == Some(checkpoint.attempts) {
+            continue;
+        }
+
+        last_emitted_attempt = Some(checkpoint.attempts);
+        snapshots.push(ProgressSnapshot {
+            engine: input.engine.clone(),
+            attempts: checkpoint.attempts,
+            valid_candidates: checkpoint.valid_candidates,
+            invalid_candidates: checkpoint.invalid_candidates,
+            best_score: checkpoint.best_score,
+            top_candidates: input.top_candidates.clone(),
+            metrics: checkpoint.metrics,
+        });
+    }
+
+    snapshots
 }
 
 fn compare_population_entries(
@@ -3962,6 +4034,17 @@ pub fn update_top_candidates_json(
     })
 }
 
+#[wasm_bindgen]
+pub fn emit_progress_snapshots_json(batch_json: &str) -> Result<String, JsValue> {
+    let batch: ProgressBatchInput = serde_json::from_str(batch_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid progress batch JSON: {error}")))?;
+    serde_json::to_string(&emit_progress_snapshots(batch)).map_err(|error| {
+        JsValue::from_str(&format!(
+            "Failed to serialize Rust progress snapshots: {error}"
+        ))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4538,6 +4621,45 @@ mod tests {
                 },
             },
             score,
+        }
+    }
+
+    #[test]
+    fn emits_progress_snapshots_at_interval_best_change_and_final() {
+        let snapshots = emit_progress_snapshots(ProgressBatchInput {
+            engine: "hybrid".to_string(),
+            progress_interval: 3,
+            top_candidates: vec![top_candidate("best", 99.0, vec![], 1)],
+            checkpoints: vec![
+                checkpoint(1, false),
+                checkpoint(2, true),
+                checkpoint(3, false),
+                checkpoint(4, false),
+                checkpoint(5, false),
+            ],
+            include_final: true,
+        });
+
+        assert_eq!(
+            snapshots
+                .iter()
+                .map(|snapshot| snapshot.attempts)
+                .collect::<Vec<_>>(),
+            vec![2, 3, 5]
+        );
+        assert_eq!(snapshots[0].engine, "hybrid");
+        assert_eq!(snapshots[0].top_candidates[0].id, "best");
+        assert_eq!(snapshots[0].metrics.get("cacheHits"), Some(&2.0));
+    }
+
+    fn checkpoint(attempts: u32, best_changed: bool) -> ProgressCheckpoint {
+        ProgressCheckpoint {
+            attempts,
+            valid_candidates: attempts.saturating_sub(1),
+            invalid_candidates: 1,
+            best_score: Some(attempts as f64),
+            best_changed,
+            metrics: BTreeMap::from([("cacheHits".to_string(), attempts as f64)]),
         }
     }
 
