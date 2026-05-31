@@ -97,7 +97,14 @@ export type OptimizerExperimentEvaluatorStats = {
 
 type OptimizerExperimentEvaluator = {
   evaluate(candidate: OptimizerExperimentCandidateInput): OptimizerExperimentCandidate | null;
+  evaluateDetailed(candidate: OptimizerExperimentCandidateInput): OptimizerExperimentEvaluation;
   getStats(): OptimizerExperimentEvaluatorStats;
+};
+
+type OptimizerExperimentEvaluation = {
+  result: OptimizerExperimentCandidate | null;
+  normalizedCandidate: OptimizerExperimentCandidateInput;
+  simulation: ReturnType<typeof simulateCombo>;
 };
 
 type EngineContext = {
@@ -213,66 +220,74 @@ export async function runOptimizerExperimentProgressive(options: OptimizerExperi
 export function createOptimizerExperimentEvaluator(
   options: OptimizerExperimentEvaluatorOptions,
 ): OptimizerExperimentEvaluator {
-  const cache = new Map<string, OptimizerExperimentCandidate | null>();
+  const cache = new Map<string, OptimizerExperimentEvaluation>();
   const stats = {
     cacheHits: 0,
     cacheMisses: 0,
   };
 
-  return {
-    evaluate(candidate) {
-      const normalizedCandidate = normalizeCandidate(candidate);
-      const key = createCandidateCacheKey(options, normalizedCandidate);
-      if (cache.has(key)) {
-        stats.cacheHits += 1;
-        return cache.get(key) ?? null;
-      }
+  const evaluateDetailed = (candidate: OptimizerExperimentCandidateInput): OptimizerExperimentEvaluation => {
+    const normalizedCandidate = normalizeCandidate(candidate);
+    const key = createCandidateCacheKey(options, normalizedCandidate);
+    if (cache.has(key)) {
+      stats.cacheHits += 1;
+      return cache.get(key)!;
+    }
 
-      stats.cacheMisses += 1;
-      const character = createCandidateCharacter(options.character, normalizedCandidate.passiveIds);
-      const simulation = simulateCombo({
+    stats.cacheMisses += 1;
+    const character = createCandidateCharacter(options.character, normalizedCandidate.passiveIds);
+    const simulation = simulateCombo({
+      catalog: options.catalog,
+      character,
+      combo: normalizedCandidate.plan,
+      defaultActionContext: options.defaultActionContext,
+    });
+
+    if (!simulation.valid) {
+      const evaluation = { result: null, normalizedCandidate, simulation };
+      cache.set(key, evaluation);
+      return evaluation;
+    }
+
+    const sustainability = options.requireSustainableCycle
+      ? evaluateSustainableCycle({
         catalog: options.catalog,
         character,
-        combo: normalizedCandidate.plan,
-        defaultActionContext: options.defaultActionContext,
-      });
-
-      if (!simulation.valid) {
-        cache.set(key, null);
-        return null;
-      }
-
-      const sustainability = options.requireSustainableCycle
-        ? evaluateSustainableCycle({
-          catalog: options.catalog,
-          character,
-          plan: normalizedCandidate.plan,
-          defaultActionContext: options.defaultActionContext,
-        })
-        : {
-          required: false,
-          sustainable: true,
-        };
-
-      if (!sustainability.sustainable) {
-        cache.set(key, null);
-        return null;
-      }
-
-      const result = {
-        id: serializeExperimentCandidate(normalizedCandidate),
-        passiveIds: normalizedCandidate.passiveIds,
         plan: normalizedCandidate.plan,
-        simulation,
-        score: options.requireSustainableCycle
-          ? scoreSustainableComboSimulation(simulation, character, options.criterion)
-          : scoreComboSimulation(simulation, options.criterion),
-        sustainability,
+        defaultActionContext: options.defaultActionContext,
+      })
+      : {
+        required: false,
+        sustainable: true,
       };
 
-      cache.set(key, result);
-      return result;
+    if (!sustainability.sustainable) {
+      const evaluation = { result: null, normalizedCandidate, simulation };
+      cache.set(key, evaluation);
+      return evaluation;
+    }
+
+    const result = {
+      id: serializeExperimentCandidate(normalizedCandidate),
+      passiveIds: normalizedCandidate.passiveIds,
+      plan: normalizedCandidate.plan,
+      simulation,
+      score: options.requireSustainableCycle
+        ? scoreSustainableComboSimulation(simulation, character, options.criterion)
+        : scoreComboSimulation(simulation, options.criterion),
+      sustainability,
+    };
+
+    const evaluation = { result, normalizedCandidate, simulation };
+    cache.set(key, evaluation);
+    return evaluation;
+  };
+
+  return {
+    evaluate(candidate) {
+      return evaluateDetailed(candidate).result;
     },
+    evaluateDetailed,
     getStats() {
       return { ...stats };
     },
@@ -483,6 +498,7 @@ function runHybridSingleEngine(context: EngineContext): OptimizerExperimentEngin
   const localRefinementInterval = Math.max(3, Math.floor(populationSize / 4));
   let population: Array<{ input: OptimizerExperimentCandidateInput; result: OptimizerExperimentCandidate }> = [];
   const eliteNeighborQueue: OptimizerExperimentCandidateInput[] = [];
+  const repairQueue: OptimizerExperimentCandidateInput[] = [];
   let attemptsSinceImprovement = 0;
 
   while (accumulator.attempts < context.options.budget.iterations && population.length < populationSize) {
@@ -490,13 +506,15 @@ function runHybridSingleEngine(context: EngineContext): OptimizerExperimentEngin
       break;
     }
     const input = context.sampler.next();
-    const { result, improved } = evaluateAndTrackImprovement(context, accumulator, input);
+    const { result, improved, repairCandidate } = evaluateAndTrackImprovement(context, accumulator, input);
     attemptsSinceImprovement = improved ? 0 : attemptsSinceImprovement + 1;
     if (result) {
       population.push({ input, result });
       if (improved) {
         enqueueHybridEliteNeighbors(eliteNeighborQueue, input, context, accumulator);
       }
+    } else {
+      enqueueHybridRepairCandidate(repairQueue, repairCandidate, context, accumulator);
     }
   }
 
@@ -509,7 +527,7 @@ function runHybridSingleEngine(context: EngineContext): OptimizerExperimentEngin
 
     if (population.length < 2) {
       const input = createHybridFreshCandidate(context, accumulator);
-      const { result, improved } = evaluateAndTrackImprovement(context, accumulator, input);
+      const { result, improved, repairCandidate } = evaluateAndTrackImprovement(context, accumulator, input);
       attemptsSinceImprovement = improved ? 0 : attemptsSinceImprovement + 1;
       if (result) {
         population.push({ input, result });
@@ -517,6 +535,8 @@ function runHybridSingleEngine(context: EngineContext): OptimizerExperimentEngin
           enqueueHybridEliteNeighbors(eliteNeighborQueue, input, context, accumulator);
         }
         population = rankPopulation(population).slice(0, populationSize);
+      } else {
+        enqueueHybridRepairCandidate(repairQueue, repairCandidate, context, accumulator);
       }
       continue;
     }
@@ -530,12 +550,17 @@ function runHybridSingleEngine(context: EngineContext): OptimizerExperimentEngin
       continue;
     }
 
-    const eliteNeighbor = eliteNeighborQueue.shift();
-    const shouldRefineLocally = !eliteNeighbor && accumulator.attempts % localRefinementInterval === 0;
-    const input = eliteNeighbor
+    const repairNeighbor = repairQueue.shift();
+    const eliteNeighbor = repairNeighbor ? undefined : eliteNeighborQueue.shift();
+    const shouldRefineLocally = !repairNeighbor && !eliteNeighbor && accumulator.attempts % localRefinementInterval === 0;
+    const input = repairNeighbor
+      ?? eliteNeighbor
       ?? (shouldRefineLocally
         ? createHybridLocalRefinement(population, context)
         : createHybridOffspring(population, context, accumulator));
+    if (repairNeighbor) {
+      accumulator.metrics.hybridRepairCandidates = (accumulator.metrics.hybridRepairCandidates ?? 0) + 1;
+    }
     if (eliteNeighbor) {
       accumulator.metrics.hybridEliteNeighborCandidates = (accumulator.metrics.hybridEliteNeighborCandidates ?? 0) + 1;
     }
@@ -543,7 +568,7 @@ function runHybridSingleEngine(context: EngineContext): OptimizerExperimentEngin
       accumulator.metrics.hybridLocalRefinements = (accumulator.metrics.hybridLocalRefinements ?? 0) + 1;
     }
 
-    const { result, improved } = evaluateAndTrackImprovement(context, accumulator, input);
+    const { result, improved, repairCandidate } = evaluateAndTrackImprovement(context, accumulator, input);
     attemptsSinceImprovement = improved ? 0 : attemptsSinceImprovement + 1;
     if (result) {
       population.push({ input, result });
@@ -551,6 +576,8 @@ function runHybridSingleEngine(context: EngineContext): OptimizerExperimentEngin
         enqueueHybridEliteNeighbors(eliteNeighborQueue, input, context, accumulator);
       }
       population = rankPopulation(population).slice(0, populationSize);
+    } else {
+      enqueueHybridRepairCandidate(repairQueue, repairCandidate, context, accumulator);
     }
   }
 
@@ -622,14 +649,57 @@ function evaluateAndTrackImprovement(
   context: EngineContext,
   accumulator: EngineAccumulator,
   input: OptimizerExperimentCandidateInput,
-): { result: OptimizerExperimentCandidate | null; improved: boolean } {
+): { result: OptimizerExperimentCandidate | null; improved: boolean; repairCandidate?: OptimizerExperimentCandidateInput } {
   const previousBest = accumulator.bestCandidate;
-  const result = evaluateAndRecord(context, accumulator, input);
+  const evaluation = evaluateAndRecordDetailed(context, accumulator, input);
+  const result = evaluation.result;
   const improved = !previousBest
     ? Boolean(accumulator.bestCandidate)
     : Boolean(accumulator.bestCandidate && compareCandidates(accumulator.bestCandidate, previousBest) < 0);
 
-  return { result, improved };
+  return {
+    result,
+    improved,
+    repairCandidate: result ? undefined : createHybridRepairCandidate(evaluation.normalizedCandidate, evaluation.simulation),
+  };
+}
+
+function createHybridRepairCandidate(
+  input: OptimizerExperimentCandidateInput,
+  simulation: ReturnType<typeof simulateCombo>,
+): OptimizerExperimentCandidateInput | undefined {
+  const violation = simulation.violations[0];
+  if (!violation || violation.type === "unknownSpell") {
+    return undefined;
+  }
+
+  const turn = input.plan.turns[violation.turnIndex];
+  if (!turn || violation.actionIndex < 0 || violation.actionIndex >= turn.actions.length || turn.actions.length <= 1) {
+    return undefined;
+  }
+
+  const candidate = cloneCandidateInput(input);
+  candidate.plan.turns[violation.turnIndex]!.actions.splice(violation.actionIndex, 1);
+  return candidate;
+}
+
+function enqueueHybridRepairCandidate(
+  queue: OptimizerExperimentCandidateInput[],
+  candidate: OptimizerExperimentCandidateInput | undefined,
+  context: EngineContext,
+  accumulator: EngineAccumulator,
+) {
+  if (!candidate || context.options.duration < 3 || queue.length >= 512) {
+    return;
+  }
+
+  const key = serializeExperimentCandidate(normalizeCandidate(candidate));
+  if (queue.some((queued) => serializeExperimentCandidate(normalizeCandidate(queued)) === key)) {
+    return;
+  }
+
+  queue.push(candidate);
+  accumulator.metrics.hybridRepairQueueCandidates = (accumulator.metrics.hybridRepairQueueCandidates ?? 0) + 1;
 }
 
 function injectHybridImmigrants(
@@ -970,6 +1040,7 @@ async function runHybridSingleEngineProgressive(context: EngineContext): Promise
   const localRefinementInterval = Math.max(3, Math.floor(populationSize / 4));
   let population: Array<{ input: OptimizerExperimentCandidateInput; result: OptimizerExperimentCandidate }> = [];
   const eliteNeighborQueue: OptimizerExperimentCandidateInput[] = [];
+  const repairQueue: OptimizerExperimentCandidateInput[] = [];
   let attemptsSinceImprovement = 0;
 
   while (accumulator.attempts < context.options.budget.iterations && population.length < populationSize) {
@@ -977,13 +1048,15 @@ async function runHybridSingleEngineProgressive(context: EngineContext): Promise
       break;
     }
     const input = context.sampler.next();
-    const { result, improved } = evaluateAndTrackImprovement(context, accumulator, input);
+    const { result, improved, repairCandidate } = evaluateAndTrackImprovement(context, accumulator, input);
     attemptsSinceImprovement = improved ? 0 : attemptsSinceImprovement + 1;
     if (result) {
       population.push({ input, result });
       if (improved) {
         enqueueHybridEliteNeighbors(eliteNeighborQueue, input, context, accumulator);
       }
+    } else {
+      enqueueHybridRepairCandidate(repairQueue, repairCandidate, context, accumulator);
     }
     await yieldHybridProgress(context, accumulator, population.length, populationSize);
   }
@@ -997,7 +1070,7 @@ async function runHybridSingleEngineProgressive(context: EngineContext): Promise
 
     if (population.length < 2) {
       const input = createHybridFreshCandidate(context, accumulator);
-      const { result, improved } = evaluateAndTrackImprovement(context, accumulator, input);
+      const { result, improved, repairCandidate } = evaluateAndTrackImprovement(context, accumulator, input);
       attemptsSinceImprovement = improved ? 0 : attemptsSinceImprovement + 1;
       if (result) {
         population.push({ input, result });
@@ -1005,6 +1078,8 @@ async function runHybridSingleEngineProgressive(context: EngineContext): Promise
           enqueueHybridEliteNeighbors(eliteNeighborQueue, input, context, accumulator);
         }
         population = rankPopulation(population).slice(0, populationSize);
+      } else {
+        enqueueHybridRepairCandidate(repairQueue, repairCandidate, context, accumulator);
       }
       await yieldHybridProgress(context, accumulator, population.length, populationSize);
       continue;
@@ -1020,12 +1095,17 @@ async function runHybridSingleEngineProgressive(context: EngineContext): Promise
       continue;
     }
 
-    const eliteNeighbor = eliteNeighborQueue.shift();
-    const shouldRefineLocally = !eliteNeighbor && accumulator.attempts % localRefinementInterval === 0;
-    const input = eliteNeighbor
+    const repairNeighbor = repairQueue.shift();
+    const eliteNeighbor = repairNeighbor ? undefined : eliteNeighborQueue.shift();
+    const shouldRefineLocally = !repairNeighbor && !eliteNeighbor && accumulator.attempts % localRefinementInterval === 0;
+    const input = repairNeighbor
+      ?? eliteNeighbor
       ?? (shouldRefineLocally
         ? createHybridLocalRefinement(population, context)
         : createHybridOffspring(population, context, accumulator));
+    if (repairNeighbor) {
+      accumulator.metrics.hybridRepairCandidates = (accumulator.metrics.hybridRepairCandidates ?? 0) + 1;
+    }
     if (eliteNeighbor) {
       accumulator.metrics.hybridEliteNeighborCandidates = (accumulator.metrics.hybridEliteNeighborCandidates ?? 0) + 1;
     }
@@ -1033,7 +1113,7 @@ async function runHybridSingleEngineProgressive(context: EngineContext): Promise
       accumulator.metrics.hybridLocalRefinements = (accumulator.metrics.hybridLocalRefinements ?? 0) + 1;
     }
 
-    const { result, improved } = evaluateAndTrackImprovement(context, accumulator, input);
+    const { result, improved, repairCandidate } = evaluateAndTrackImprovement(context, accumulator, input);
     attemptsSinceImprovement = improved ? 0 : attemptsSinceImprovement + 1;
     if (result) {
       population.push({ input, result });
@@ -1041,6 +1121,8 @@ async function runHybridSingleEngineProgressive(context: EngineContext): Promise
         enqueueHybridEliteNeighbors(eliteNeighborQueue, input, context, accumulator);
       }
       population = rankPopulation(population).slice(0, populationSize);
+    } else {
+      enqueueHybridRepairCandidate(repairQueue, repairCandidate, context, accumulator);
     }
     await yieldHybridProgress(context, accumulator, population.length, populationSize);
   }
@@ -1119,13 +1201,21 @@ function evaluateAndRecord(
   accumulator: EngineAccumulator,
   candidate: OptimizerExperimentCandidateInput,
 ): OptimizerExperimentCandidate | null {
+  return evaluateAndRecordDetailed(context, accumulator, candidate).result;
+}
+
+function evaluateAndRecordDetailed(
+  context: EngineContext,
+  accumulator: EngineAccumulator,
+  candidate: OptimizerExperimentCandidateInput,
+): OptimizerExperimentEvaluation {
   accumulator.attempts += 1;
-  const result = context.evaluator.evaluate(candidate);
-  if (result) {
+  const evaluation = context.evaluator.evaluateDetailed(candidate);
+  if (evaluation.result) {
     accumulator.validCandidates += 1;
-    addTopCandidate(context, accumulator, result);
-    if (!accumulator.bestCandidate || compareCandidates(result, accumulator.bestCandidate) < 0) {
-      accumulator.bestCandidate = result;
+    addTopCandidate(context, accumulator, evaluation.result);
+    if (!accumulator.bestCandidate || compareCandidates(evaluation.result, accumulator.bestCandidate) < 0) {
+      accumulator.bestCandidate = evaluation.result;
       recordProgress(context, accumulator);
     }
   } else {
@@ -1136,7 +1226,7 @@ function evaluateAndRecord(
     recordProgress(context, accumulator);
   }
 
-  return result;
+  return evaluation;
 }
 
 function recordProgress(context: EngineContext, accumulator: EngineAccumulator) {

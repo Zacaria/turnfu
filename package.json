@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "test": "node --test --experimental-strip-types \"src/**/*.test.ts\"",
+    "bench:hybrid": "node --experimental-strip-types scripts/benchmark-hybrid.ts",
     "validate:openspec:huppermage": "openspec validate catalog-huppermage-spells-effects --strict --no-interactive"
   },
   "dependencies": {

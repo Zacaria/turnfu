@@ -230,8 +230,16 @@ as full next-turn templates before falling back to single weighted actions.
 
 The elite-neighbor queue is intentionally bounded by bucket: expensive
 two-action replacement neighbors cannot consume the whole generated queue before
-deletions, appends, and single-action replacements are considered. Larger
-structured moves remain useful, for example:
+deletions, appends, and single-action replacements are considered.
+
+For three-turn searches, invalid candidates now contribute one repair candidate
+when the simulator reports a precise failing `turnIndex` and `actionIndex`. The
+repair removes that failing action and queues the shortened plan as a normal
+future hybrid candidate. This is intentionally limited to duration-three runs:
+benchmarks showed large T3 gains, while T2 capped searches lost useful
+exploration when repairs were prioritized.
+
+Larger structured moves remain useful, for example:
 
 - whole-turn template recombination;
-- validity-repair guided by simulator violation types.
+- richer validity-repair guided by simulator violation types.
