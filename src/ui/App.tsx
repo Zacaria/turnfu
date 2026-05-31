@@ -86,6 +86,8 @@ import {
   createBalancedElementSet,
   createBuild,
   createOptimizerRunReference,
+  deleteSavedCombo,
+  deleteSavedCombos,
   getBuildRuns,
   getBuildSavedCombos,
   getBuildSetups,
@@ -380,6 +382,14 @@ export function App() {
       criteriaSummary: summarizeOptimizerControls(controls),
       now: new Date().toISOString(),
     }));
+  }
+
+  function removeSavedCombo(comboId: string) {
+    setResearchWorkspace((workspace) => deleteSavedCombo(workspace, comboId));
+  }
+
+  function removeSavedCombos(comboIds: string[]) {
+    setResearchWorkspace((workspace) => deleteSavedCombos(workspace, { comboIds }));
   }
 
   function storeOptimizerSession(setupId: string, session: OptimizerWorkspaceSession) {
@@ -809,6 +819,8 @@ export function App() {
           setups={getBuildSetups(researchWorkspace, activeBuild.id)}
           savedCombos={getBuildSavedCombos(researchWorkspace, activeBuild.id)}
           onBack={() => setResearchRoute(returnToPrevious(researchRoute))}
+          onDeleteCombo={removeSavedCombo}
+          onDeleteVisibleCombos={removeSavedCombos}
           onOpenCombo={openSavedComboInBuilder}
         />
       </>

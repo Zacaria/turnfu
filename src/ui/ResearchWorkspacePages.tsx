@@ -1,4 +1,4 @@
-import { ArrowLeft, BarChart3, Boxes, Check, Pin, Play, Plus, Save, Search, Wrench, X } from "lucide-react";
+import { ArrowLeft, BarChart3, Boxes, Check, Pin, Play, Plus, Save, Search, Trash2, Wrench, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CatalogEntry } from "../core/catalog/types.ts";
 import {
@@ -316,12 +316,16 @@ export function OptimizerRunDetailPage({
 export function SavedComboComparisonPage({
   build,
   onBack,
+  onDeleteCombo,
+  onDeleteVisibleCombos,
   onOpenCombo,
   savedCombos,
   setups,
 }: {
   build: ResearchBuild;
   onBack: () => void;
+  onDeleteCombo: (comboId: string) => void;
+  onDeleteVisibleCombos: (comboIds: string[]) => void;
   onOpenCombo: (combo: SavedComboReference) => void;
   savedCombos: SavedComboReference[];
   setups: SetupSnapshot[];
@@ -337,7 +341,7 @@ export function SavedComboComparisonPage({
     [activeSetupId, savedCombos],
   );
   const [selectedDuration, setSelectedDuration] = useState(availableDurations[0] ?? 1);
-  const activeDuration = [1, 2, 3].includes(selectedDuration) ? selectedDuration : (availableDurations[0] ?? 1);
+  const activeDuration = availableDurations.includes(selectedDuration) ? selectedDuration : (availableDurations[0] ?? 1);
   const comparableRows = useMemo(
     () => filterSavedCombosForComparison(savedCombos, {
       duration: activeDuration,
@@ -345,10 +349,31 @@ export function SavedComboComparisonPage({
     }),
     [activeDuration, activeSetupId, savedCombos],
   );
+  const [confirmDeleteVisible, setConfirmDeleteVisible] = useState(false);
+  const visibleComboIds = useMemo(
+    () => comparableRows.map((row) => row.combo.id),
+    [comparableRows],
+  );
+  const visibleComboCount = comparableRows.length;
+  const visibleComboLabel = `${visibleComboCount} combo${visibleComboCount > 1 ? "s" : ""} visible${visibleComboCount > 1 ? "s" : ""}`;
+
+  useEffect(() => {
+    setConfirmDeleteVisible(false);
+  }, [activeDuration, activeSetupId, visibleComboCount]);
 
   function selectSetup(setupId: string) {
     setSelectedSetupId(setupId);
     setSelectedDuration(getSavedComboDurationsForSet(savedCombos, setupId)[0] ?? 1);
+  }
+
+  function deleteVisibleCombos() {
+    onDeleteVisibleCombos(visibleComboIds);
+    setConfirmDeleteVisible(false);
+  }
+
+  function deleteCombo(comboId: string) {
+    onDeleteCombo(comboId);
+    setConfirmDeleteVisible(false);
   }
 
   return (
@@ -384,9 +409,33 @@ export function SavedComboComparisonPage({
               </button>
             ))}
           </fieldset>
+          {visibleComboCount > 0 ? (
+            <button
+              className="danger-button"
+              type="button"
+              onClick={() => setConfirmDeleteVisible(true)}
+            >
+              <Trash2 size={15} />
+              Tout supprimer
+            </button>
+          ) : null}
         </div>
+        {confirmDeleteVisible ? (
+          <div className="comparison-confirmation" role="alert">
+            <p>Supprimer les {visibleComboLabel} pour ce set en {activeDuration}T ?</p>
+            <div>
+              <button className="danger-button" type="button" onClick={deleteVisibleCombos}>
+                Confirmer la suppression
+              </button>
+              <button className="secondary-button" type="button" onClick={() => setConfirmDeleteVisible(false)}>
+                Annuler
+              </button>
+            </div>
+          </div>
+        ) : null}
         <SavedComboExactDurationTable
           duration={activeDuration}
+          onDeleteCombo={deleteCombo}
           onOpenCombo={onOpenCombo}
           rows={comparableRows}
         />
@@ -1018,10 +1067,12 @@ function PassiveMiniIcon({ label, passiveId }: { label: string; passiveId: strin
 
 function SavedComboExactDurationTable({
   duration,
+  onDeleteCombo,
   onOpenCombo,
   rows,
 }: {
   duration: number;
+  onDeleteCombo: (comboId: string) => void;
   onOpenCombo: (combo: SavedComboReference) => void;
   rows: SavedComboComparisonRow[];
 }) {
@@ -1038,6 +1089,7 @@ function SavedComboExactDurationTable({
         <span>Actions</span>
         <span>Critères</span>
         <span>Inspection</span>
+        <span>Suppression</span>
       </div>
       {rows.map((row) => (
         <div className="comparison-row" role="row" key={row.combo.id}>
@@ -1049,6 +1101,17 @@ function SavedComboExactDurationTable({
           <span>
             <button className="secondary-button" type="button" onClick={() => onOpenCombo(row.combo)}>
               Ouvrir
+            </button>
+          </span>
+          <span>
+            <button
+              aria-label={`Supprimer ${row.combo.name}`}
+              className="icon-button danger-icon-button"
+              title={`Supprimer ${row.combo.name}`}
+              type="button"
+              onClick={() => onDeleteCombo(row.combo.id)}
+            >
+              <Trash2 size={15} />
             </button>
           </span>
         </div>

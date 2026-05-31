@@ -119,6 +119,11 @@ export type SaveOptimizerCandidateComboInput = {
   now?: string;
 };
 
+export type DeleteSavedCombosInput = {
+  comboIds: string[];
+  now?: string;
+};
+
 export type WorkspaceStorage = Pick<Storage, "getItem" | "removeItem" | "setItem">;
 
 export const researchWorkspaceStorageKey = "wakfu-turn-optimizer:research-workspace:v1";
@@ -360,6 +365,54 @@ export function saveOptimizerCandidateCombo(
     ...workspace,
     builds: appendBuildReference(workspace.builds, input.buildId, "savedComboIds", id, now),
     savedCombos: [...workspace.savedCombos, combo],
+  };
+}
+
+export function deleteSavedCombo(
+  workspace: ResearchWorkspaceData,
+  comboId: string,
+  now?: string,
+): ResearchWorkspaceData {
+  return deleteSavedCombos(workspace, { comboIds: [comboId], now });
+}
+
+export function deleteSavedCombos(
+  workspace: ResearchWorkspaceData,
+  input: DeleteSavedCombosInput,
+): ResearchWorkspaceData {
+  const comboIds = new Set(input.comboIds);
+  if (comboIds.size === 0) {
+    return workspace;
+  }
+
+  const now = input.now ?? new Date().toISOString();
+  const affectedBuildIds = new Set(
+    workspace.savedCombos
+      .filter((combo) => comboIds.has(combo.id))
+      .map((combo) => combo.buildId),
+  );
+  for (const build of workspace.builds) {
+    if (build.savedComboIds.some((comboId) => comboIds.has(comboId))) {
+      affectedBuildIds.add(build.id);
+    }
+  }
+
+  if (affectedBuildIds.size === 0) {
+    return workspace;
+  }
+
+  return {
+    ...workspace,
+    builds: workspace.builds.map((build) => (
+      affectedBuildIds.has(build.id)
+        ? {
+          ...build,
+          savedComboIds: build.savedComboIds.filter((comboId) => !comboIds.has(comboId)),
+          updatedAt: now,
+        }
+        : build
+    )),
+    savedCombos: workspace.savedCombos.filter((combo) => !comboIds.has(combo.id)),
   };
 }
 

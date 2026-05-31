@@ -8,6 +8,8 @@ import {
   createMemoryWorkspaceStorage,
   createOptimizerRunReference,
   createSeedResearchWorkspace,
+  deleteSavedCombo,
+  deleteSavedCombos,
   filterBuildsByClass,
   isWakfuClassSelectable,
   restoreResearchWorkspace,
@@ -134,6 +136,62 @@ test("creates optimizer run and saved combo references for a build setup", () =>
   assert.equal(combo.criteriaSummary, "2T · dégâts eau");
   assert.deepEqual(withCombo.builds[0].savedComboIds, [combo.id]);
   assert.equal(withCombo.builds[0].updatedAt, "2026-05-26T10:06:00.000Z");
+});
+
+test("deletes saved combo references from workspace and build", () => {
+  const workspace = createSeedResearchWorkspace({ now: "2026-05-26T10:00:00.000Z" });
+  const setup = workspace.setupSnapshots[0];
+  assert.ok(setup);
+  const withFirstCombo = saveOptimizerCandidateCombo(workspace, {
+    buildId: setup.buildId,
+    setupSnapshotId: setup.id,
+    name: "Combo 1",
+    plan: { turns: [{ actions: [{ spellId: "lueur-de-laube" }] }] },
+    now: "2026-05-26T10:05:00.000Z",
+  });
+  const withSecondCombo = saveOptimizerCandidateCombo(withFirstCombo, {
+    buildId: setup.buildId,
+    setupSnapshotId: setup.id,
+    name: "Combo 2",
+    plan: { turns: [{ actions: [{ spellId: "rayon-crepusculaire" }] }] },
+    now: "2026-05-26T10:06:00.000Z",
+  });
+  const firstCombo = withSecondCombo.savedCombos[0];
+  const secondCombo = withSecondCombo.savedCombos[1];
+  assert.ok(firstCombo);
+  assert.ok(secondCombo);
+
+  const withoutFirstCombo = deleteSavedCombo(withSecondCombo, firstCombo.id, "2026-05-26T10:07:00.000Z");
+
+  assert.deepEqual(withoutFirstCombo.savedCombos.map((combo) => combo.id), [secondCombo.id]);
+  assert.deepEqual(withoutFirstCombo.builds[0].savedComboIds, [secondCombo.id]);
+  assert.equal(withoutFirstCombo.builds[0].updatedAt, "2026-05-26T10:07:00.000Z");
+});
+
+test("deletes multiple saved combos in one workspace update", () => {
+  const workspace = createSeedResearchWorkspace({ now: "2026-05-26T10:00:00.000Z" });
+  const setup = workspace.setupSnapshots[0];
+  assert.ok(setup);
+  const withCombos = ["lueur-de-laube", "rayon-crepusculaire", "coeur-de-lumiere"].reduce(
+    (currentWorkspace, spellId, index) => saveOptimizerCandidateCombo(currentWorkspace, {
+      buildId: setup.buildId,
+      setupSnapshotId: setup.id,
+      name: `Combo ${index + 1}`,
+      plan: { turns: [{ actions: [{ spellId }] }] },
+      now: `2026-05-26T10:0${index + 1}:00.000Z`,
+    }),
+    workspace,
+  );
+  const idsToDelete = withCombos.savedCombos.slice(0, 2).map((combo) => combo.id);
+
+  const nextWorkspace = deleteSavedCombos(withCombos, {
+    comboIds: idsToDelete,
+    now: "2026-05-26T10:10:00.000Z",
+  });
+
+  assert.deepEqual(nextWorkspace.savedCombos.map((combo) => combo.name), ["Combo 3"]);
+  assert.deepEqual(nextWorkspace.builds[0].savedComboIds, [nextWorkspace.savedCombos[0].id]);
+  assert.equal(nextWorkspace.builds[0].updatedAt, "2026-05-26T10:10:00.000Z");
 });
 
 test("creates balanced element set variants without mutating the source set", () => {

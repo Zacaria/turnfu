@@ -1699,6 +1699,17 @@ body {
   outline: none;
 }
 
+.danger-icon-button {
+  border-color: #59362f;
+  color: #ffb6aa;
+}
+
+.danger-icon-button:hover,
+.danger-icon-button:focus-visible {
+  border-color: #ff8672;
+  color: #ffe9e5;
+}
+
 .icon-button:disabled {
   cursor: default;
   opacity: 0.85;
@@ -1994,8 +2005,25 @@ body {
   font-weight: 800;
 }
 
+.danger-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 34px;
+  border: 1px solid #6d3a32;
+  border-radius: 5px;
+  background: #211412;
+  color: #ffd7cf;
+  padding: 7px 11px;
+  font-size: 0.86rem;
+  font-weight: 800;
+}
+
 .secondary-button:hover,
 .secondary-button:focus-visible,
+.danger-button:hover,
+.danger-button:focus-visible,
 .primary-button:hover,
 .primary-button:focus-visible {
   border-color: #55d5d8;
@@ -2617,6 +2645,30 @@ body {
   outline: none;
 }
 
+.comparison-confirmation {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid #6d3a32;
+  background: #191211;
+}
+
+.comparison-confirmation p {
+  margin: 0;
+  color: #ffd7cf;
+  font-weight: 800;
+}
+
+.comparison-confirmation div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .saved-combo-groups {
   display: grid;
   gap: 14px;
@@ -2637,7 +2689,7 @@ body {
 }
 
 .saved-combo-table .comparison-row {
-  grid-template-columns: minmax(180px, 1.4fr) minmax(80px, 0.6fr) minmax(80px, 0.6fr) minmax(70px, 0.5fr) minmax(160px, 1fr) auto;
+  grid-template-columns: minmax(180px, 1.4fr) minmax(80px, 0.6fr) minmax(80px, 0.6fr) minmax(70px, 0.5fr) minmax(160px, 1fr) auto auto;
 }
 
 .saved-combo-table-with-set .comparison-row {
