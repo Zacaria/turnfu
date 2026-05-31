@@ -183,10 +183,31 @@ test("hybrid search restarts from fresh branches after stagnation while preservi
   assert.equal(hybrid.bestCandidate?.score.score, 144);
   assert.ok((hybrid.metrics.hybridRestarts ?? 0) > 0);
   assert.ok((hybrid.metrics.hybridImmigrants ?? 0) > 0);
-  assert.ok((hybrid.metrics.hybridLocalRefinements ?? 0) > 0);
   assert.ok((hybrid.metrics.hybridEliteNeighborCandidates ?? 0) > 0);
   assert.ok((hybrid.metrics.hybridResourceAwareCandidates ?? 0) > 0);
   assert.ok(hybrid.topCandidates.some((candidate) => candidate.score.score === 144));
+});
+
+test("hybrid search lets long per-island runs refine locally before queued elites", () => {
+  const result = runOptimizerExperiment({
+    catalog,
+    character,
+    duration: 2,
+    availableSpellIds: ["setup", "hit", "burst"],
+    engines: ["hybrid"],
+    seed: "hybrid-long-local-refinement",
+    budget: { iterations: 1_000 },
+    maxActionsPerTurn: 1,
+    maxCandidates: 4,
+  });
+
+  const hybrid = result.engineResults[0];
+
+  assert.ok(hybrid);
+  assert.equal(hybrid.engine, "hybrid");
+  assert.ok((hybrid.metrics.hybridLocalRefinements ?? 0) > 0);
+  assert.ok((hybrid.metrics.hybridEliteNeighborCandidates ?? 0) > 0);
+  assert.equal(hybrid.bestCandidate?.score.score, 144);
 });
 
 test("hybrid progressive search yields during long live runs", async () => {

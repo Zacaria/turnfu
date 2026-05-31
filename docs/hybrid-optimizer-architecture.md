@@ -107,6 +107,10 @@ stateDiagram-v2
 The important detail is the `QueueNeighbors` transition. Before this change, a
 new best could be found and then lost in broad random pressure. Now a new best
 immediately creates a compact queue of nearby candidates to test.
+Repair candidates still run first, but long per-island searches periodically
+let local refinement preempt the elite-neighbor queue. This keeps the local
+hill-climber from being starved by large neighbor queues while preserving the
+short-budget warmup behavior.
 
 ## Elite-neighbor generation
 
