@@ -33,7 +33,7 @@
 
 ## 5. Rust Hybrid Search
 
-- [ ] 5.1 Port seeded RNG and deterministic candidate encoding to Rust.
+- [x] 5.1 Port seeded RNG and deterministic candidate encoding to Rust.
 - [ ] 5.2 Implement Rust candidate sampler support for random and resource-aware fresh branches.
 - [ ] 5.3 Implement Rust island scheduling, population management, restart behavior, and immigrant injection.
 - [ ] 5.4 Implement Rust crossover, mutation, local refinement, repair queue, and elite-neighbor generation.

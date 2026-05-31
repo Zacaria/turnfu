@@ -488,8 +488,127 @@ pub struct BackendMetrics {
     pub request_available_passives: u32,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OptimizerCandidateInput {
+    #[serde(default)]
+    pub passive_ids: Vec<String>,
+    pub plan: CandidatePlan,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CandidatePlan {
+    #[serde(default)]
+    pub turns: Vec<CandidateTurn>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CandidateTurn {
+    #[serde(default)]
+    pub actions: Vec<CandidateAction>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CandidateAction {
+    pub spell_id: String,
+    #[serde(default)]
+    pub target: Option<CandidateActionTarget>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CandidateActionTarget {
+    pub kind: ActionTargetKind,
+}
+
+pub struct SeededRandom {
+    state: u32,
+}
+
 pub fn parse_optimizer_request(request_json: &str) -> Result<OptimizerRequest, serde_json::Error> {
     serde_json::from_str(request_json)
+}
+
+pub fn hash_seed(seed: &str) -> u32 {
+    let mut hash = 2_166_136_261_u32;
+    for byte in seed.as_bytes() {
+        hash ^= *byte as u32;
+        hash = hash.wrapping_mul(16_777_619);
+    }
+    hash
+}
+
+impl SeededRandom {
+    pub fn new(seed: &str) -> Self {
+        Self {
+            state: hash_seed(seed),
+        }
+    }
+
+    pub fn next(&mut self) -> f64 {
+        self.state = self.state.wrapping_add(0x6D2B79F5);
+        let mut value = self.state;
+        value = (value ^ (value >> 15)).wrapping_mul(value | 1);
+        value ^= value.wrapping_add((value ^ (value >> 7)).wrapping_mul(value | 61));
+        ((value ^ (value >> 14)) as f64) / 4_294_967_296.0
+    }
+
+    pub fn integer(&mut self, min: u32, max: u32) -> u32 {
+        ((self.next() * ((max - min + 1) as f64)).floor() as u32) + min
+    }
+}
+
+pub fn normalize_candidate(mut candidate: OptimizerCandidateInput) -> OptimizerCandidateInput {
+    candidate.passive_ids.sort();
+    candidate
+}
+
+pub fn encode_candidate(candidate: &OptimizerCandidateInput) -> String {
+    let mut passive_ids = candidate.passive_ids.clone();
+    passive_ids.sort();
+    format!(
+        "{}::{}",
+        passive_ids.join("+"),
+        candidate
+            .plan
+            .turns
+            .iter()
+            .map(encode_candidate_turn)
+            .collect::<Vec<_>>()
+            .join("|")
+    )
+}
+
+fn encode_candidate_turn(turn: &CandidateTurn) -> String {
+    turn.actions
+        .iter()
+        .map(encode_candidate_action)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn encode_candidate_action(action: &CandidateAction) -> String {
+    match &action.target {
+        Some(target) => format!(
+            "{}@{}",
+            action.spell_id,
+            action_target_kind_key(&target.kind)
+        ),
+        None => action.spell_id.clone(),
+    }
+}
+
+fn action_target_kind_key(kind: &ActionTargetKind) -> &'static str {
+    match kind {
+        ActionTargetKind::EmptyCell => "emptyCell",
+        ActionTargetKind::FeuFollet => "feuFollet",
+        ActionTargetKind::Fighter => "fighter",
+        ActionTargetKind::Ally => "ally",
+        ActionTargetKind::Enemy => "enemy",
+    }
 }
 
 pub fn resolve_action_context(context: Option<PartialActionContext>) -> ActionContext {
@@ -1888,6 +2007,22 @@ pub fn inspect_optimizer_request_json(request_json: &str) -> Result<String, JsVa
     })
 }
 
+#[wasm_bindgen]
+pub fn encode_candidate_json(candidate_json: &str) -> Result<String, JsValue> {
+    let candidate: OptimizerCandidateInput = serde_json::from_str(candidate_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid candidate JSON: {error}")))?;
+    Ok(encode_candidate(&candidate))
+}
+
+#[wasm_bindgen]
+pub fn sample_seeded_random_json(seed: &str, count: u32) -> Result<String, JsValue> {
+    let mut rng = SeededRandom::new(seed);
+    let values = (0..count).map(|_| rng.next()).collect::<Vec<_>>();
+    serde_json::to_string(&values).map_err(|error| {
+        JsValue::from_str(&format!("Failed to serialize seeded RNG samples: {error}"))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1942,6 +2077,53 @@ mod tests {
 
         assert!(!response.supported);
         assert_eq!(response.engine, "genetic");
+    }
+
+    #[test]
+    fn matches_typescript_seeded_rng_sequence() {
+        assert_eq!(hash_seed("same-seed"), 3_616_769_443);
+
+        let mut rng = SeededRandom::new("same-seed");
+        let values = [rng.next(), rng.next(), rng.next()];
+
+        assert!((values[0] - 0.14761148649267852).abs() < f64::EPSILON);
+        assert!((values[1] - 0.957765188999474).abs() < f64::EPSILON);
+        assert!((values[2] - 0.8598554644268006).abs() < f64::EPSILON);
+
+        let mut rng = SeededRandom::new("same-seed");
+        let integers = (0..5).map(|_| rng.integer(1, 4)).collect::<Vec<_>>();
+
+        assert_eq!(integers, vec![1, 4, 4, 3, 1]);
+    }
+
+    #[test]
+    fn encodes_candidates_like_typescript_cache_keys() {
+        let candidate: OptimizerCandidateInput = serde_json::from_str(
+            r#"{
+              "passiveIds":["passive-z","passive-a"],
+              "plan":{
+                "turns":[
+                  {
+                    "actions":[
+                      {"spellId":"ray","target":{"kind":"emptyCell"}},
+                      {"spellId":"hit"}
+                    ]
+                  },
+                  {"actions":[]}
+                ]
+              }
+            }"#,
+        )
+        .expect("candidate should parse");
+
+        assert_eq!(
+            encode_candidate(&candidate),
+            "passive-a+passive-z::ray@emptyCell,hit|"
+        );
+        assert_eq!(
+            normalize_candidate(candidate).passive_ids,
+            vec!["passive-a".to_string(), "passive-z".to_string()]
+        );
     }
 
     #[test]
