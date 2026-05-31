@@ -16,11 +16,11 @@
 
 - [x] 3.1 Port resource pools, spell costs, action context resolution, and resource validation to Rust.
 - [x] 3.2 Port damage calculation, resolved element logic, contextual mastery handling, critical/rear/block modifiers, and two-decimal rounding.
-- [ ] 3.3 Port Huppermage rune state, rune AP gains, Abondance, Feu-Follet state, Coeur de Lumiere, BQ conversion, and end-of-turn BQ rules.
-- [ ] 3.4 Port supported passive behavior including initial stat/resource modifiers and Huppermage BQ gain modifiers.
-- [ ] 3.5 Port cooldowns, cast limits, deck limits, target validation, and normalized violation reporting.
-- [ ] 3.6 Port combo turn transitions, carried WP/BQ, persistent Huppermage state, cooldown aging, and multi-turn invalid result handling.
-- [ ] 3.7 Port score breakdowns, resolved-element scoring, and sustainable-cycle evaluation.
+- [x] 3.3 Port Huppermage rune state, rune AP gains, Abondance, Feu-Follet state, Coeur de Lumiere, BQ conversion, and end-of-turn BQ rules.
+- [x] 3.4 Port supported passive behavior including initial stat/resource modifiers and Huppermage BQ gain modifiers.
+- [x] 3.5 Port cooldowns, cast limits, deck limits, target validation, and normalized violation reporting.
+- [x] 3.6 Port combo turn transitions, carried WP/BQ, persistent Huppermage state, cooldown aging, and multi-turn invalid result handling.
+- [x] 3.7 Port score breakdowns, resolved-element scoring, and sustainable-cycle evaluation.
 
 ## 4. Differential Validation
 
