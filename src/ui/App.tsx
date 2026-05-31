@@ -1747,8 +1747,18 @@ function CatalogLibrary({
   const [passiveSearch, setPassiveSearch] = useState("");
   const visibleSpells = getVisibleCatalogEntries(spells, hiddenEntries, showHiddenEntries)
     .filter((spell) => catalogSearchMatches(spell, spellSearch));
+  const activePassiveRank = new Map(activePassives.map((passiveId, index) => [passiveId, index]));
   const visiblePassives = getVisibleCatalogEntries(passives, hiddenEntries, showHiddenEntries)
-    .filter((passive) => catalogSearchMatches(passive, passiveSearch));
+    .filter((passive) => catalogSearchMatches(passive, passiveSearch))
+    .sort((left, right) => {
+      const leftActive = activePassiveRank.has(left.id);
+      const rightActive = activePassiveRank.has(right.id);
+      if (leftActive && rightActive) {
+        return (activePassiveRank.get(left.id) ?? 0) - (activePassiveRank.get(right.id) ?? 0);
+      }
+
+      return Number(rightActive) - Number(leftActive);
+    });
   const hiddenCount = countHiddenCatalogEntries(hiddenEntries);
   const usedDeckSpellIds = usedSpellIds.filter((spellId) => {
     const spell = spells.find((entry) => entry.id === spellId);
@@ -1757,7 +1767,7 @@ function CatalogLibrary({
   const usedSpellCount = usedDeckSpellIds.length;
   const deckFull = usedSpellCount >= deckSpellLimit;
   const activePassiveCount = activePassives.length;
-  const [spellTooltip, setSpellTooltip] = useState<{ entry: CatalogEntry; left: number; top: number } | null>(null);
+  const [catalogTooltip, setCatalogTooltip] = useState<{ entry: CatalogEntry; left: number; top: number } | null>(null);
   const catalogTooltipSuppressedRef = useRef(false);
 
   useEffect(() => {
@@ -1776,7 +1786,7 @@ function CatalogLibrary({
     };
   }, []);
 
-  function showSpellTooltip(event: React.MouseEvent<HTMLElement> | React.FocusEvent<HTMLElement>, entry: CatalogEntry) {
+  function showCatalogTooltip(event: React.MouseEvent<HTMLElement> | React.FocusEvent<HTMLElement>, entry: CatalogEntry) {
     if (catalogTooltipSuppressedRef.current) {
       return;
     }
@@ -1787,22 +1797,22 @@ function CatalogLibrary({
     const fallbackLeft = rect.right + 14;
     const left = preferredLeft >= 12 ? preferredLeft : Math.min(window.innerWidth - tooltipWidth - 12, fallbackLeft);
     const top = clamp(rect.top + rect.height / 2, 160, window.innerHeight - 24);
-    setSpellTooltip({ entry, left: Math.max(12, left), top });
+    setCatalogTooltip({ entry, left: Math.max(12, left), top });
   }
 
-  function hideSpellTooltip() {
-    setSpellTooltip(null);
+  function hideCatalogTooltip() {
+    setCatalogTooltip(null);
   }
 
-  function suppressSpellTooltip() {
+  function suppressCatalogTooltip() {
     catalogTooltipSuppressedRef.current = true;
-    hideSpellTooltip();
+    hideCatalogTooltip();
     onHoverEntry(null);
   }
 
-  function releaseSpellTooltip() {
+  function releaseCatalogTooltip() {
     catalogTooltipSuppressedRef.current = false;
-    hideSpellTooltip();
+    hideCatalogTooltip();
     onHoverEntry(null);
   }
 
@@ -1812,12 +1822,12 @@ function CatalogLibrary({
       return;
     }
 
-    suppressSpellTooltip();
+    suppressCatalogTooltip();
     onDragSpell(event, spellId);
   }
 
   function finishCatalogSpellDrag() {
-    releaseSpellTooltip();
+    releaseCatalogTooltip();
     onDragEnd();
   }
 
@@ -1868,32 +1878,32 @@ function CatalogLibrary({
                   type="button"
                   title={deckUnavailable ? t("deck.unavailableTitle") : temporaryAvailable ? formatUiMessage("deck.temporaryTitle", { element: formatElementLabel(temporaryUnlockedSpellElement) }) : spell.name}
                   onClick={() => {
-                    releaseSpellTooltip();
+                    releaseCatalogTooltip();
                     onSelectEntry(spell.id);
                   }}
                   onDragEnd={finishCatalogSpellDrag}
                   onDragStart={(event) => startCatalogSpellDrag(event, spell.id, deckUnavailable)}
-                  onMouseDown={suppressSpellTooltip}
-                  onMouseUp={releaseSpellTooltip}
-                  onPointerCancel={releaseSpellTooltip}
-                  onPointerDown={suppressSpellTooltip}
-                  onPointerUp={releaseSpellTooltip}
+                  onMouseDown={suppressCatalogTooltip}
+                  onMouseUp={releaseCatalogTooltip}
+                  onPointerCancel={releaseCatalogTooltip}
+                  onPointerDown={suppressCatalogTooltip}
+                  onPointerUp={releaseCatalogTooltip}
                   onMouseEnter={(event) => {
                     onHoverEntry(spell.id);
-                    showSpellTooltip(event, spell);
+                    showCatalogTooltip(event, spell);
                   }}
                   onMouseLeave={() => {
                     onHoverEntry(null);
-                    hideSpellTooltip();
+                    hideCatalogTooltip();
                   }}
-                  onMouseMove={(event) => showSpellTooltip(event, spell)}
+                  onMouseMove={(event) => showCatalogTooltip(event, spell)}
                   onFocus={(event) => {
                     onHoverEntry(spell.id);
-                    showSpellTooltip(event, spell);
+                    showCatalogTooltip(event, spell);
                   }}
                   onBlur={() => {
                     onHoverEntry(null);
-                    hideSpellTooltip();
+                    hideCatalogTooltip();
                   }}
                 >
                   <EntryIcon entryId={spell.id} label={spell.name} />
@@ -1933,9 +1943,24 @@ function CatalogLibrary({
               <div
                 key={passive.id}
                 className={`library-passive ${active ? "active" : ""} ${hidden ? "library-entry-hidden" : ""} ${passiveDisabled ? "library-entry-disabled" : ""}`}
-                title={passiveDisabled ? t("passive.limitReached") : passive.name}
-                onMouseEnter={() => onHoverEntry(passive.id)}
-                onMouseLeave={() => onHoverEntry(null)}
+                title={passiveDisabled ? t("passive.limitReached") : undefined}
+                onFocus={(event) => {
+                  onHoverEntry(passive.id);
+                  showCatalogTooltip(event, passive);
+                }}
+                onBlur={() => {
+                  onHoverEntry(null);
+                  hideCatalogTooltip();
+                }}
+                onMouseEnter={(event) => {
+                  onHoverEntry(passive.id);
+                  showCatalogTooltip(event, passive);
+                }}
+                onMouseLeave={() => {
+                  onHoverEntry(null);
+                  hideCatalogTooltip();
+                }}
+                onMouseMove={(event) => showCatalogTooltip(event, passive)}
               >
                 <label className="library-passive-choice">
                   <input
@@ -1943,8 +1968,6 @@ function CatalogLibrary({
                     checked={active}
                     disabled={passiveDisabled}
                     onChange={(event) => onTogglePassive(passive.id, event.target.checked)}
-                    onFocus={() => onHoverEntry(passive.id)}
-                    onBlur={() => onHoverEntry(null)}
                   />
                   <EntryIcon entryId={passive.id} label={passive.name} />
                   <span>
@@ -1964,10 +1987,10 @@ function CatalogLibrary({
           })}
         </div>
       </section>
-      {spellTooltip ? (
-        <SpellInfoTooltip
-          entry={spellTooltip.entry}
-          style={{ left: spellTooltip.left, top: spellTooltip.top }}
+      {catalogTooltip ? (
+        <CatalogInfoTooltip
+          entry={catalogTooltip.entry}
+          style={{ left: catalogTooltip.left, top: catalogTooltip.top }}
         />
       ) : null}
     </div>
@@ -2008,20 +2031,24 @@ function CatalogSearchField({
   );
 }
 
-function SpellInfoTooltip({ entry, style }: { entry: CatalogEntry; style: React.CSSProperties }) {
+function CatalogInfoTooltip({ entry, style }: { entry: CatalogEntry; style: React.CSSProperties }) {
+  const showSpellMeta = entry.kind === "spell";
+
   return (
     <aside className="spell-info-tooltip" style={style} role="tooltip">
       <div className="spell-info-header">
         <EntryIcon entryId={entry.id} label={entry.name} />
         <div>
-          <span>{t("detail.spell")} · niv. {entry.level}</span>
+          <span>{entry.kind === "passive" ? t("detail.passive") : `${t("detail.spell")} · niv. ${entry.level}`}</span>
           <strong>{entry.name}</strong>
         </div>
       </div>
-      <div className="spell-info-meta">
-        <CatalogMetaLine label={t("tooltip.cost")} tokens={getCatalogCostTokens(entry)} />
-        <CatalogMetaLine label={t("tooltip.range")} tokens={getCatalogRangeTokens(entry)} />
-      </div>
+      {showSpellMeta ? (
+        <div className="spell-info-meta">
+          <CatalogMetaLine label={t("tooltip.cost")} tokens={getCatalogCostTokens(entry)} />
+          <CatalogMetaLine label={t("tooltip.range")} tokens={getCatalogRangeTokens(entry)} />
+        </div>
+      ) : null}
       <CatalogEntryInfoSections entry={entry} compact />
     </aside>
   );
