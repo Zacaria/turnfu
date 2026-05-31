@@ -223,20 +223,21 @@ export function createOptimizerExperimentEvaluator(
   options: OptimizerExperimentEvaluatorOptions,
   cache: OptimizerExperimentEvaluationCache = new Map(),
 ): OptimizerExperimentEvaluator {
+  const cacheKeyPrefix = createCandidateCacheKeyPrefix(options);
   const stats = {
     cacheHits: 0,
     cacheMisses: 0,
   };
 
   const evaluateDetailed = (candidate: OptimizerExperimentCandidateInput): OptimizerExperimentEvaluation => {
-    const normalizedCandidate = normalizeCandidate(candidate);
-    const key = createCandidateCacheKey(options, normalizedCandidate);
+    const key = createCandidateCacheKey(cacheKeyPrefix, candidate);
     if (cache.has(key)) {
       stats.cacheHits += 1;
       return cache.get(key)!;
     }
 
     stats.cacheMisses += 1;
+    const normalizedCandidate = normalizeCandidate(candidate);
     const character = createCandidateCharacter(options.character, normalizedCandidate.passiveIds);
     const simulation = simulateCombo({
       catalog: options.catalog,
@@ -2939,21 +2940,30 @@ function normalizeCandidate(candidate: OptimizerExperimentCandidateInput): Requi
   };
 }
 
+function createCandidateCacheKeyPrefix(options: OptimizerExperimentEvaluatorOptions): string {
+  return [
+    options.character.id,
+    options.duration,
+    JSON.stringify(options.criterion ?? { type: "totalDamage" }),
+    options.requireSustainableCycle ? "sustainable" : "single",
+    "",
+  ].join("::");
+}
+
 function createCandidateCacheKey(
-  options: OptimizerExperimentEvaluatorOptions,
-  candidate: Required<OptimizerExperimentCandidateInput>,
+  prefix: string,
+  candidate: OptimizerExperimentCandidateInput,
 ): string {
-  return JSON.stringify({
-    characterId: options.character.id,
-    duration: options.duration,
-    criterion: options.criterion ?? { type: "totalDamage" },
-    requireSustainableCycle: options.requireSustainableCycle ?? false,
-    candidate: serializeExperimentCandidate(candidate),
-  });
+  return `${prefix}${serializeCandidateInput(candidate)}`;
 }
 
 function serializeExperimentCandidate(candidate: Required<OptimizerExperimentCandidateInput>): string {
   return `${candidate.passiveIds.join("+")}::${candidate.plan.turns.map((turn) => turn.actions.map(serializeAction).join(",")).join("|")}`;
+}
+
+function serializeCandidateInput(candidate: OptimizerExperimentCandidateInput): string {
+  const passiveKey = [...(candidate.passiveIds ?? [])].sort().join("+");
+  return `${passiveKey}::${candidate.plan.turns.map((turn) => turn.actions.map(serializeAction).join(",")).join("|")}`;
 }
 
 function serializeAction(action: Action): string {
