@@ -2199,7 +2199,7 @@ function mutateCandidate(candidate: OptimizerExperimentCandidateInput, context: 
     return createRandomCandidate(context.options, actions, context.rng);
   }
 
-  if (context.options.duration >= 3 && context.options.budget.iterations >= 1_000) {
+  if (context.options.duration >= 2 && context.options.budget.iterations >= 1_000) {
     const targetFlipSpellIds = new Set(actions
       .filter((action) => action.target?.kind === "emptyCell")
       .map((action) => action.spellId));
