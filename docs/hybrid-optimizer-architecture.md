@@ -242,6 +242,11 @@ The elite-neighbor queue is intentionally bounded by bucket: expensive
 two-action replacement neighbors cannot consume the whole generated queue before
 deletions, appends, and single-action replacements are considered.
 
+Mutation pressure is also adjusted for dense three-turn branches. Once a turn is
+at least 75% full, deletion is sampled more often than on sparse turns, which
+keeps long T3 offspring from repeatedly over-spending saturated suffixes while
+leaving T2 capped searches unchanged.
+
 For three-turn searches, invalid candidates now contribute one repair candidate
 when the simulator reports a precise failing `turnIndex` and `actionIndex`. The
 T3 repair trims the rest of the failing turn from that action onward, then queues

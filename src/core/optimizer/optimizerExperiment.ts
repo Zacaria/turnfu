@@ -2112,7 +2112,10 @@ function mutateCandidate(candidate: OptimizerExperimentCandidateInput, context: 
     return next;
   }
 
-  if (context.rng.chance(0.25) && turn.actions.length > 1) {
+  const deleteChance = context.options.duration >= 3 && turn.actions.length >= Math.ceil(context.options.maxActionsPerTurn * 0.75)
+    ? 0.45
+    : 0.25;
+  if (context.rng.chance(deleteChance) && turn.actions.length > 1) {
     turn.actions.splice(context.rng.integer(0, turn.actions.length - 1), 1);
     return next;
   }
