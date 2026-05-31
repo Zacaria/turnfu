@@ -12,11 +12,13 @@
 
 ## 3. Roadmap Follow-Up Changes
 
-- [ ] 3.1 Prepare a future change for combo search and optimization after exploring scoring criteria.
+- [x] 3.1 Prepare a future change for combo search and optimization after exploring scoring criteria.
 - [x] 3.2 Prepare and complete the MVP GUI change.
 - [ ] 3.3 Prepare later changes for real Wakfu constraints, sublimations, multi-objective scoring, and advanced visualizations.
 
 ## 4. Verification
 
 - [x] 4.1 Validate this epic change with OpenSpec strict validation.
-- [ ] 4.2 Decide whether to archive this epic after the combo optimizer direction is captured.
+- [x] 4.2 Decide whether to archive this epic after the combo optimizer direction is captured.
+
+Decision 2026-05-31: keep the epic open until the advanced Wakfu constraints, sublimations, multi-objective scoring, and advanced visualization follow-up direction is captured.
