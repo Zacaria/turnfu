@@ -41,6 +41,20 @@ export type RustWasmDifferentialWasmExports = {
     castsBySpellIdJson: string,
     huppermageStateJson: string,
   ) => string;
+  create_next_turn_state_json: (
+    baseResourcesJson: string,
+    previousResourcesJson: string,
+    previousHuppermageJson: string,
+    castsBySpellIdJson: string,
+  ) => string;
+  apply_feu_follet_recover_json: (
+    huppermageStateJson: string,
+  ) => string;
+  evaluate_sustainability_json: (
+    required: boolean,
+    firstSummaryJson: string,
+    replaySummaryJson: string,
+  ) => string;
 };
 
 export type RustWasmDifferentialMismatch = {
@@ -157,6 +171,33 @@ function runRustFixture(wasm: RustWasmDifferentialWasmExports, fixture: RustWasm
       JSON.stringify(fixture.castsBySpellId ?? {}),
       JSON.stringify(fixture.huppermageState),
     )));
+  }
+
+  if (fixture.kind === "multiTurn") {
+    if (fixture.operation === "nextTurnState") {
+      return JSON.parse(wasm.create_next_turn_state_json(
+        JSON.stringify(fixture.baseResources),
+        JSON.stringify(fixture.previousResources),
+        JSON.stringify(fixture.previousHuppermage),
+        JSON.stringify(fixture.castsBySpellId),
+      ));
+    }
+
+    if (fixture.operation === "feuFolletRecover") {
+      const result = JSON.parse(wasm.apply_feu_follet_recover_json(
+        JSON.stringify(fixture.huppermageState),
+      ));
+      return {
+        ...result,
+        state: result.state,
+      };
+    }
+
+    return JSON.parse(wasm.evaluate_sustainability_json(
+      fixture.required,
+      JSON.stringify(fixture.firstSummary),
+      JSON.stringify(fixture.replaySummary),
+    ));
   }
 
   return JSON.parse(wasm.apply_initial_passive_effects_json(

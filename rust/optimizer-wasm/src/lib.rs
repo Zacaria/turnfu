@@ -1780,6 +1780,68 @@ pub fn apply_initial_passive_effects_json(
     )
 }
 
+#[wasm_bindgen]
+pub fn create_next_turn_state_json(
+    base_resources_json: &str,
+    previous_resources_json: &str,
+    previous_huppermage_json: &str,
+    casts_by_spell_id_json: &str,
+) -> Result<String, JsValue> {
+    let base_resources: ResourcePool = serde_json::from_str(base_resources_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid base resources JSON: {error}")))?;
+    let previous_resources: ResourcePool = serde_json::from_str(previous_resources_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid previous resources JSON: {error}")))?;
+    let previous_huppermage: HuppermageState = serde_json::from_str(previous_huppermage_json)
+        .map_err(|error| {
+            JsValue::from_str(&format!("Invalid previous Huppermage state JSON: {error}"))
+        })?;
+    let casts_by_spell_id: BTreeMap<String, u32> = serde_json::from_str(casts_by_spell_id_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid casts JSON: {error}")))?;
+
+    serde_json::to_string(&create_next_turn_state(
+        base_resources,
+        previous_resources,
+        previous_huppermage,
+        &casts_by_spell_id,
+    ))
+    .map_err(|error| JsValue::from_str(&format!("Failed to serialize carried state: {error}")))
+}
+
+#[wasm_bindgen]
+pub fn apply_feu_follet_recover_json(huppermage_state_json: &str) -> Result<String, JsValue> {
+    let huppermage_state: HuppermageState = serde_json::from_str(huppermage_state_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid Huppermage state JSON: {error}")))?;
+
+    serde_json::to_string(&apply_feu_follet_recover(huppermage_state)).map_err(|error| {
+        JsValue::from_str(&format!(
+            "Failed to serialize Feu-Follet recovery result: {error}"
+        ))
+    })
+}
+
+#[wasm_bindgen]
+pub fn evaluate_sustainability_json(
+    required: bool,
+    first_summary_json: &str,
+    replay_summary_json: &str,
+) -> Result<String, JsValue> {
+    let first_summary: SimulationSummary = serde_json::from_str(first_summary_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid first summary JSON: {error}")))?;
+    let replay_summary: SimulationSummary = serde_json::from_str(replay_summary_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid replay summary JSON: {error}")))?;
+
+    serde_json::to_string(&evaluate_sustainability(
+        required,
+        &first_summary,
+        &replay_summary,
+    ))
+    .map_err(|error| {
+        JsValue::from_str(&format!(
+            "Failed to serialize sustainability result: {error}"
+        ))
+    })
+}
+
 pub fn inspect_optimizer_request(request: OptimizerRequest) -> OptimizerResponse {
     OptimizerResponse {
         schema_version: request.schema_version,

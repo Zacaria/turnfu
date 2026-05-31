@@ -16,14 +16,19 @@ import {
   createResources,
   payCost,
   resolveActionContext,
+  simulateCombo,
   simulateTurn,
   type ActionContext,
   type ActionTarget,
   type BaseStats,
+  type ComboPlan,
+  type ComboSimulationResult,
+  type ClassTurnState,
   type ResourcePool,
   type SimulationViolation,
   type SimulatedCharacter,
 } from "../simulation/index.ts";
+import { evaluateSustainableCycle } from "./comboOptimizer.ts";
 
 export type RustWasmDifferentialFixture =
   | {
@@ -68,6 +73,35 @@ export type RustWasmDifferentialFixture =
       castsBySpellId?: Record<string, number>;
       targetCastsBySpellId?: Record<string, number>;
       huppermageState?: ReturnType<typeof createRustHuppermageState>;
+      expected: unknown;
+    }
+  | {
+      kind: "multiTurn";
+      name: string;
+      operation: "nextTurnState";
+      turnIndex: number;
+      baseResources: ResourcePool;
+      previousResources: ResourcePool;
+      previousHuppermage: ReturnType<typeof normalizeHuppermageForRust>;
+      castsBySpellId: Record<string, number>;
+      expected: unknown;
+    }
+  | {
+      kind: "multiTurn";
+      name: string;
+      operation: "feuFolletRecover";
+      turnIndex: number;
+      actionIndex: number;
+      huppermageState: ReturnType<typeof normalizeHuppermageForRust>;
+      expected: unknown;
+    }
+  | {
+      kind: "multiTurn";
+      name: string;
+      operation: "sustainability";
+      required: boolean;
+      firstSummary: ReturnType<typeof createRustSimulationSummary>;
+      replaySummary: ReturnType<typeof createRustSimulationSummary>;
       expected: unknown;
     };
 
@@ -153,6 +187,7 @@ export function createRustWasmDifferentialFixtures(): RustWasmDifferentialFixtur
     ...createDamageFixtures(),
     ...createInitialPassiveFixtures(),
     ...createInvalidPlanFixtures(),
+    ...createMultiTurnFixtures(),
   ];
 }
 
@@ -359,6 +394,161 @@ function createInvalidPlanFixtures(): RustWasmDifferentialFixture[] {
   return fixtures;
 }
 
+function createMultiTurnFixtures(): RustWasmDifferentialFixture[] {
+  const fixtures: RustWasmDifferentialFixture[] = [];
+  const transitionCharacter = createBaseCharacter(createResources({ ap: 20, mp: 10, wp: 8, bq: 2_000 }));
+  const transitionCombo = simulateCombo({
+    catalog: huppermageCatalog,
+    character: transitionCharacter,
+    combo: {
+      turns: [
+        { actions: [{ spellId: "lueur-de-laube" }, { spellId: "fleche-de-lumiere" }] },
+        { actions: [] },
+        { actions: [] },
+      ],
+    },
+  });
+
+  fixtures.push(createNextTurnFixture("multi-turn:rune-resource-cooldown-carry", transitionCharacter, transitionCombo, 0));
+  fixtures.push(createNextTurnFixture("multi-turn:cooldown-aging", transitionCharacter, transitionCombo, 1));
+
+  const heartCharacter = createBaseCharacter(
+    createResources({ ap: 20, mp: 10, wp: 8, bq: 2_000 }),
+    { activePassives: ["extension-des-sens"] },
+  );
+  const heartCombo = simulateCombo({
+    catalog: huppermageCatalog,
+    character: heartCharacter,
+    combo: {
+      turns: [
+        { actions: [{ spellId: "lueur-de-laube" }, { spellId: "coeur-de-lumiere" }] },
+        { actions: [] },
+      ],
+    },
+  });
+  fixtures.push(createNextTurnFixture("multi-turn:stored-bq-and-passives", heartCharacter, heartCombo, 0));
+
+  const feuFolletCharacter = createBaseCharacter(
+    createResources({ ap: 20, mp: 10, wp: 8, bq: 2_000 }),
+    { activePassives: ["sauvegarde-runique"] },
+  );
+  const feuFolletCombo = simulateCombo({
+    catalog: huppermageCatalog,
+    character: feuFolletCharacter,
+    combo: {
+      turns: [
+        { actions: [{ spellId: "lueur-de-laube" }, { spellId: "feu-follet", target: { kind: "emptyCell" } }] },
+        { actions: [{ spellId: "feu-follet", target: { kind: "feuFollet" } }] },
+      ],
+    },
+  });
+  const recoveryAction = feuFolletCombo.turns[1]?.result.breakdown[0];
+  if (!recoveryAction?.classStateAfter.huppermage) {
+    throw new Error("Expected Feu-Follet recovery fixture to produce a recovery action.");
+  }
+  fixtures.push({
+    kind: "multiTurn",
+    name: "multi-turn:feu-follet-recovery",
+    operation: "feuFolletRecover",
+    turnIndex: 1,
+    actionIndex: 0,
+    huppermageState: normalizeHuppermageForRust(feuFolletCombo.turns[1].initialCharacter.classState?.huppermage),
+    expected: {
+      state: normalizeHuppermageForRust(recoveryAction.classStateAfter.huppermage),
+      operation: "recovered",
+      before: 1,
+      after: 0,
+      recoveredRunes: ["aquatic", "telluric", "aerial"],
+      temporaryUnlockedSpellElement: "air",
+    },
+  });
+
+  fixtures.push(createSustainabilityFixture(
+    "multi-turn:sustainable-cycle-replay",
+    { turns: [{ actions: [{ spellId: "lueur-de-laube" }] }] },
+    createBaseCharacter(createResources({ ap: 20, mp: 10, wp: 8, bq: 2_000 })),
+  ));
+  fixtures.push(createSustainabilityFixture(
+    "multi-turn:unsustainable-cycle-replay",
+    { turns: [{ actions: [{ spellId: "fleche-de-lumiere" }] }] },
+    createBaseCharacter(createResources({ ap: 20, mp: 10, wp: 8, bq: 2_000 })),
+  ));
+
+  return fixtures;
+}
+
+function createNextTurnFixture(
+  name: string,
+  baseCharacter: SimulatedCharacter,
+  simulation: ComboSimulationResult,
+  turnIndex: number,
+): RustWasmDifferentialFixture {
+  if (!simulation.valid) {
+    throw new Error(`Expected valid multi-turn fixture '${name}'.`);
+  }
+
+  const completedTurn = simulation.turns[turnIndex];
+  const nextTurn = simulation.turns[turnIndex + 1];
+  if (!completedTurn?.result.finalState.classState.huppermage || !nextTurn?.initialCharacter.classState?.huppermage) {
+    throw new Error(`Missing turn state for fixture '${name}'.`);
+  }
+
+  return {
+    kind: "multiTurn",
+    name,
+    operation: "nextTurnState",
+    turnIndex,
+    baseResources: baseCharacter.resources,
+    previousResources: completedTurn.result.finalState.remainingResources,
+    previousHuppermage: normalizeHuppermageForRust(completedTurn.result.finalState.classState.huppermage),
+    castsBySpellId: completedTurn.result.finalState.castsBySpellId,
+    expected: {
+      resources: nextTurn.initialCharacter.resources,
+      huppermage: normalizeHuppermageForRust(nextTurn.initialCharacter.classState.huppermage),
+    },
+  };
+}
+
+function createSustainabilityFixture(
+  name: string,
+  plan: ComboPlan,
+  character: SimulatedCharacter,
+): RustWasmDifferentialFixture {
+  const firstRun = simulateCombo({
+    catalog: huppermageCatalog,
+    character,
+    combo: plan,
+  });
+  const sustainability = evaluateSustainableCycle({
+    catalog: huppermageCatalog,
+    character,
+    plan,
+  });
+  if (!sustainability.replay) {
+    throw new Error(`Expected sustainability replay for fixture '${name}'.`);
+  }
+
+  return {
+    kind: "multiTurn",
+    name,
+    operation: "sustainability",
+    required: true,
+    firstSummary: createRustSimulationSummary(firstRun, character.resources),
+    replaySummary: createRustSimulationSummary(
+      sustainability.replay,
+      firstRun.finalState.remainingResources,
+    ),
+    expected: {
+      required: true,
+      sustainable: sustainability.sustainable,
+      initialWp: firstRun.finalState.remainingResources.wp,
+      finalWp: sustainability.replay.finalState.remainingResources.wp,
+      initialBq: firstRun.finalState.remainingResources.bq,
+      finalBq: sustainability.replay.finalState.remainingResources.bq,
+    },
+  };
+}
+
 function validateResourceCost(
   inputResources: ResourcePool,
   cost: Required<SpellCost>,
@@ -529,11 +719,20 @@ function createRustSpellRules(spell: CatalogEntry): RustSpellRules {
 function createRustHuppermageState(input: {
   activeRunes?: Partial<Record<Rune, boolean>>;
   lastGeneratedRune?: Rune | null;
+  runeApGainsThisTurn?: Partial<Record<Rune, boolean>>;
+  abundanceLevel?: number;
   activePassives?: string[];
   usedSpellIds?: string[];
   feuFolletsActive?: number;
+  feuFolletStoredRunes?: Rune[][];
+  feuFolletStoredLastRunes?: Array<Rune | null>;
   temporaryUnlockedSpellElement?: Element | null;
+  activeHeart?: string | null;
+  bqMax?: number;
+  storedBq?: number;
   cooldownsBySpellId?: Record<string, number>;
+  deckSpellLimit?: number;
+  passiveLimit?: number;
 } = {}) {
   return {
     runes: {
@@ -546,24 +745,76 @@ function createRustHuppermageState(input: {
       lastGeneratedRune: input.lastGeneratedRune ?? null,
     },
     runeApGainsThisTurn: {
-      incandescent: false,
-      aquatic: false,
-      telluric: false,
-      aerial: false,
+      incandescent: input.runeApGainsThisTurn?.incandescent ?? false,
+      aquatic: input.runeApGainsThisTurn?.aquatic ?? false,
+      telluric: input.runeApGainsThisTurn?.telluric ?? false,
+      aerial: input.runeApGainsThisTurn?.aerial ?? false,
     },
-    abundanceLevel: 0,
+    abundanceLevel: input.abundanceLevel ?? 0,
     feuFolletsActive: input.feuFolletsActive ?? 0,
-    feuFolletStoredRunes: [],
-    feuFolletStoredLastRunes: [],
+    feuFolletStoredRunes: input.feuFolletStoredRunes ?? [],
+    feuFolletStoredLastRunes: input.feuFolletStoredLastRunes ?? [],
     temporaryUnlockedSpellElement: input.temporaryUnlockedSpellElement ?? null,
     usedSpellIds: input.usedSpellIds ?? [],
     activePassives: input.activePassives ?? [],
-    activeHeart: null,
-    bqMax: 1_000,
-    storedBq: 0,
+    activeHeart: input.activeHeart ?? null,
+    bqMax: input.bqMax ?? 1_000,
+    storedBq: input.storedBq ?? 0,
     cooldownsBySpellId: input.cooldownsBySpellId ?? {},
-    deckSpellLimit: 12,
-    passiveLimit: 6,
+    deckSpellLimit: input.deckSpellLimit ?? 12,
+    passiveLimit: input.passiveLimit ?? 6,
+  };
+}
+
+function normalizeHuppermageForRust(
+  huppermage: ClassTurnState["huppermage"] | NonNullable<SimulatedCharacter["classState"]>["huppermage"],
+) {
+  const raw = huppermage as
+    | (NonNullable<ClassTurnState["huppermage"]> & { lastGeneratedRune?: Rune | null })
+    | undefined;
+  const runes = raw?.runes as { active?: Partial<Record<Rune, boolean>>; lastGeneratedRune?: Rune | null } | Partial<Record<Rune, boolean>> | undefined;
+  const activeRunes = runes && "active" in runes ? runes.active : runes;
+  const lastGeneratedRune = runes && "lastGeneratedRune" in runes
+    ? runes.lastGeneratedRune
+    : raw?.lastGeneratedRune;
+
+  return createRustHuppermageState({
+    activeRunes,
+    lastGeneratedRune: lastGeneratedRune ?? null,
+    activePassives: huppermage?.activePassives ?? [],
+    usedSpellIds: huppermage?.usedSpellIds ?? [],
+    feuFolletsActive: huppermage?.feuFolletsActive ?? 0,
+    temporaryUnlockedSpellElement: huppermage?.temporaryUnlockedSpellElement ?? null,
+    cooldownsBySpellId: huppermage?.cooldownsBySpellId ?? {},
+    runeApGainsThisTurn: huppermage?.runeApGainsThisTurn,
+    abundanceLevel: huppermage?.abundanceLevel,
+    feuFolletStoredRunes: huppermage?.feuFolletStoredRunes,
+    feuFolletStoredLastRunes: huppermage?.feuFolletStoredLastRunes,
+    activeHeart: huppermage?.activeHeart,
+    bqMax: huppermage?.bqMax,
+    storedBq: huppermage?.storedBq,
+    deckSpellLimit: huppermage?.deckSpellLimit,
+    passiveLimit: huppermage?.passiveLimit,
+  });
+}
+
+function createRustSimulationSummary(
+  simulation: ComboSimulationResult,
+  initialResources: ResourcePool,
+) {
+  return {
+    valid: simulation.valid,
+    totalDamage: simulation.totalDamage,
+    damageByResolvedElement: {
+      fire: 0,
+      water: 0,
+      earth: 0,
+      air: 0,
+      light: 0,
+      neutral: 0,
+    },
+    initialResources,
+    finalResources: simulation.finalState.remainingResources,
   };
 }
 
