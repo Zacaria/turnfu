@@ -10,19 +10,25 @@ import {
   createSeedResearchWorkspace,
   deleteSavedCombo,
   deleteSavedCombos,
+  deleteSetupSnapshot,
   filterBuildsByClass,
   isWakfuClassSelectable,
   restoreResearchWorkspace,
   saveResearchWorkspace,
   saveOptimizerCandidateCombo,
+  renameBuild,
+  renameSetupSnapshot,
+  saveSetupVersion,
 } from "./researchWorkspace.ts";
 import {
   createResearchRoute,
   openBuilderFromSetup,
   openBuild,
+  openOptimizerFromSetup,
   openOptimizerRun,
   openSavedComboComparison,
   openSetup,
+  retargetSetupRoute,
   returnToPrevious,
 } from "./researchNavigation.ts";
 
@@ -40,6 +46,71 @@ test("creates named Huppermage builds while keeping unsupported classes disabled
   assert.equal(nextWorkspace.builds.length, workspace.builds.length + 1);
   assert.equal(nextWorkspace.builds.at(-1)?.name, "Hupper cycle lumière");
   assert.equal(nextWorkspace.builds.at(-1)?.classId, "huppermage");
+});
+
+test("renames a build without changing its saved sets", () => {
+  const workspace = createSeedResearchWorkspace({ now: "2026-05-26T10:00:00.000Z" });
+  const build = workspace.builds[0];
+  assert.ok(build);
+
+  const nextWorkspace = renameBuild(workspace, {
+    buildId: build.id,
+    name: "Huppermage BQ édité",
+    now: "2026-05-26T10:10:00.000Z",
+  });
+
+  assert.equal(nextWorkspace.builds[0].name, "Huppermage BQ édité");
+  assert.equal(nextWorkspace.builds[0].updatedAt, "2026-05-26T10:10:00.000Z");
+  assert.deepEqual(nextWorkspace.builds[0].setupSnapshotIds, build.setupSnapshotIds);
+  assert.deepEqual(nextWorkspace.setupSnapshots, workspace.setupSnapshots);
+});
+
+test("ignores blank build names", () => {
+  const workspace = createSeedResearchWorkspace({ now: "2026-05-26T10:00:00.000Z" });
+  const build = workspace.builds[0];
+  assert.ok(build);
+
+  const nextWorkspace = renameBuild(workspace, {
+    buildId: build.id,
+    name: "   ",
+    now: "2026-05-26T10:10:00.000Z",
+  });
+
+  assert.equal(nextWorkspace, workspace);
+});
+
+test("renames a setup snapshot without changing saved assumptions", () => {
+  const workspace = createSeedResearchWorkspace({ now: "2026-05-26T10:00:00.000Z" });
+  const setup = workspace.setupSnapshots[0];
+  assert.ok(setup);
+
+  const nextWorkspace = renameSetupSnapshot(workspace, {
+    buildId: setup.buildId,
+    setupSnapshotId: setup.id,
+    name: "Set BQ 550",
+    now: "2026-05-26T10:10:00.000Z",
+  });
+
+  assert.equal(nextWorkspace.setupSnapshots[0].name, "Set BQ 550");
+  assert.equal(nextWorkspace.setupSnapshots[0].id, setup.id);
+  assert.equal(nextWorkspace.setupSnapshots[0].version, setup.version);
+  assert.deepEqual(nextWorkspace.setupSnapshots[0].character, setup.character);
+  assert.equal(nextWorkspace.builds[0].updatedAt, "2026-05-26T10:10:00.000Z");
+});
+
+test("ignores blank setup snapshot names", () => {
+  const workspace = createSeedResearchWorkspace({ now: "2026-05-26T10:00:00.000Z" });
+  const setup = workspace.setupSnapshots[0];
+  assert.ok(setup);
+
+  const nextWorkspace = renameSetupSnapshot(workspace, {
+    buildId: setup.buildId,
+    setupSnapshotId: setup.id,
+    name: "   ",
+    now: "2026-05-26T10:10:00.000Z",
+  });
+
+  assert.equal(nextWorkspace, workspace);
 });
 
 test("serializes setup snapshots with final stats, resources, equipment notes and initial state", () => {
@@ -194,6 +265,61 @@ test("deletes multiple saved combos in one workspace update", () => {
   assert.equal(nextWorkspace.builds[0].updatedAt, "2026-05-26T10:10:00.000Z");
 });
 
+test("deletes setup snapshots and their saved run and combo references", () => {
+  const workspace = createSeedResearchWorkspace({ now: "2026-05-26T10:00:00.000Z" });
+  const sourceSetup = workspace.setupSnapshots[0];
+  assert.ok(sourceSetup);
+  const withSecondSetup = createBalancedElementSet(workspace, {
+    buildId: sourceSetup.buildId,
+    sourceSetupSnapshotId: sourceSetup.id,
+    name: "Set à supprimer",
+    now: "2026-05-26T10:05:00.000Z",
+  });
+  const deletedSetup = withSecondSetup.setupSnapshots[1];
+  assert.ok(deletedSetup);
+  const withRun = createOptimizerRunReference(withSecondSetup, {
+    buildId: deletedSetup.buildId,
+    setupSnapshotId: deletedSetup.id,
+    criteriaSummary: "1T · dégâts totaux",
+    now: "2026-05-26T10:06:00.000Z",
+  });
+  const withCombo = saveOptimizerCandidateCombo(withRun, {
+    buildId: deletedSetup.buildId,
+    setupSnapshotId: deletedSetup.id,
+    name: "Combo lié au set",
+    plan: { turns: [{ actions: [{ spellId: "lueur-de-laube" }] }] },
+    now: "2026-05-26T10:07:00.000Z",
+  });
+
+  const nextWorkspace = deleteSetupSnapshot(withCombo, {
+    buildId: deletedSetup.buildId,
+    setupSnapshotId: deletedSetup.id,
+    now: "2026-05-26T10:08:00.000Z",
+  });
+
+  assert.deepEqual(nextWorkspace.setupSnapshots.map((setup) => setup.id), [sourceSetup.id]);
+  assert.deepEqual(nextWorkspace.builds[0].setupSnapshotIds, [sourceSetup.id]);
+  assert.deepEqual(nextWorkspace.builds[0].optimizerRunIds, []);
+  assert.deepEqual(nextWorkspace.builds[0].savedComboIds, []);
+  assert.deepEqual(nextWorkspace.optimizerRuns, []);
+  assert.deepEqual(nextWorkspace.savedCombos, []);
+  assert.equal(nextWorkspace.builds[0].updatedAt, "2026-05-26T10:08:00.000Z");
+});
+
+test("does not delete the last setup snapshot for a build", () => {
+  const workspace = createSeedResearchWorkspace({ now: "2026-05-26T10:00:00.000Z" });
+  const setup = workspace.setupSnapshots[0];
+  assert.ok(setup);
+
+  const nextWorkspace = deleteSetupSnapshot(workspace, {
+    buildId: setup.buildId,
+    setupSnapshotId: setup.id,
+    now: "2026-05-26T10:08:00.000Z",
+  });
+
+  assert.equal(nextWorkspace, workspace);
+});
+
 test("creates balanced element set variants without mutating the source set", () => {
   const workspace = createSeedResearchWorkspace({ now: "2026-05-26T10:00:00.000Z" });
   const sourceSetup = workspace.setupSnapshots[0];
@@ -296,4 +422,73 @@ test("setup snapshots are versioned instead of mutated", () => {
   assert.equal(edited.version, 2);
   assert.equal(setup.character.resources.bq, 500);
   assert.equal(edited.character.resources.bq, 375);
+});
+
+test("saves builder stat edits as a new setup version", () => {
+  const workspace = createSeedResearchWorkspace({ now: "2026-05-26T10:00:00.000Z" });
+  const setup = workspace.setupSnapshots[0];
+  assert.ok(setup);
+
+  const result = saveSetupVersion(workspace, {
+    buildId: setup.buildId,
+    sourceSetupSnapshotId: setup.id,
+    character: {
+      ...setup.character,
+      resources: createResources({ ...setup.character.resources, bq: 450 }),
+    },
+    now: "2026-05-26T12:00:00.000Z",
+  });
+  const editedSetup = result.workspace.setupSnapshots.find((candidate) => candidate.id === result.setupSnapshotId);
+
+  assert.equal(result.created, true);
+  assert.ok(editedSetup);
+  assert.notEqual(editedSetup.id, setup.id);
+  assert.equal(editedSetup.version, setup.version + 1);
+  assert.equal(editedSetup.character.resources.bq, 450);
+  assert.equal(setup.character.resources.bq, 500);
+  assert.deepEqual(result.workspace.builds[0].setupSnapshotIds, [setup.id, editedSetup.id]);
+});
+
+test("reuses an existing setup version for identical builder assumptions", () => {
+  const workspace = createSeedResearchWorkspace({ now: "2026-05-26T10:00:00.000Z" });
+  const setup = workspace.setupSnapshots[0];
+  assert.ok(setup);
+
+  const firstResult = saveSetupVersion(workspace, {
+    buildId: setup.buildId,
+    sourceSetupSnapshotId: setup.id,
+    character: {
+      ...setup.character,
+      resources: createResources({ ...setup.character.resources, bq: 450 }),
+    },
+    now: "2026-05-26T12:00:00.000Z",
+  });
+  const secondResult = saveSetupVersion(firstResult.workspace, {
+    buildId: setup.buildId,
+    sourceSetupSnapshotId: setup.id,
+    character: {
+      ...setup.character,
+      resources: createResources({ ...setup.character.resources, bq: 450 }),
+    },
+    now: "2026-05-26T12:05:00.000Z",
+  });
+
+  assert.equal(secondResult.created, false);
+  assert.equal(secondResult.setupSnapshotId, firstResult.setupSnapshotId);
+  assert.equal(secondResult.workspace.setupSnapshots.length, firstResult.workspace.setupSnapshots.length);
+});
+
+test("retargets optimizer return routes to an edited setup version", () => {
+  const workspace = createSeedResearchWorkspace({ now: "2026-05-26T10:00:00.000Z" });
+  const setup = workspace.setupSnapshots[0];
+  assert.ok(setup);
+
+  const optimizerRoute = openOptimizerFromSetup(openBuild(createResearchRoute(), setup.buildId), setup.buildId, setup.id);
+  const builderRoute = openBuilderFromSetup(optimizerRoute, setup.buildId, setup.id);
+  const returnedRoute = retargetSetupRoute(returnToPrevious(builderRoute), "setup-edited");
+
+  assert.equal(returnedRoute.page, "optimizer");
+  assert.equal(returnedRoute.setupSnapshotId, "setup-edited");
+  assert.equal(returnedRoute.returnTo?.page, "setup");
+  assert.equal(returnedRoute.returnTo?.setupSnapshotId, "setup-edited");
 });

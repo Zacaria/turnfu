@@ -1,4 +1,4 @@
-import { ArrowLeft, BarChart3, Boxes, Check, Pin, Play, Plus, Save, Search, Trash2, Wrench, X } from "lucide-react";
+import { ArrowLeft, BarChart3, Boxes, Check, Pencil, Pin, Play, Plus, Save, Search, Trash2, Wrench, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CatalogEntry } from "../core/catalog/types.ts";
 import {
@@ -191,11 +191,14 @@ export function BuildPage({
   build,
   onBack,
   onCreateBalancedSet,
+  onDeleteSetup,
   onOpenBuilder,
   onOpenOptimizer,
   onOpenRun,
   onOpenSavedCombos,
   onOpenSetup,
+  onRenameBuild,
+  onRenameSetup,
   runs,
   savedCombos,
   setups,
@@ -203,22 +206,41 @@ export function BuildPage({
   build: ResearchBuild;
   onBack: () => void;
   onCreateBalancedSet: (setup: SetupSnapshot) => void;
+  onDeleteSetup: (setup: SetupSnapshot) => void;
   onOpenBuilder: (setup: SetupSnapshot) => void;
   onOpenOptimizer: (setup: SetupSnapshot) => void;
   onOpenRun: (run: OptimizerRunReference) => void;
   onOpenSavedCombos: () => void;
   onOpenSetup: (setup: SetupSnapshot) => void;
+  onRenameBuild: (name: string) => void;
+  onRenameSetup: (setup: SetupSnapshot, name: string) => void;
   runs: ReturnType<typeof getBuildRuns>;
   savedCombos: ReturnType<typeof getBuildSavedCombos>;
   setups: SetupSnapshot[];
 }) {
+  const [setupPendingDeleteId, setSetupPendingDeleteId] = useState<string | null>(null);
+
+  useEffect(() => {
+    setSetupPendingDeleteId(null);
+  }, [build.id, setups.length]);
+
+  function deleteSetup(setup: SetupSnapshot) {
+    onDeleteSetup(setup);
+    setSetupPendingDeleteId(null);
+  }
+
   return (
     <main className="research-shell">
       <PageBackButton onBack={onBack} label="Builds" />
       <section className="build-header">
-        <div>
+        <div className="build-header-title">
           <span>{formatWakfuClassLabel(build.classId)} · {build.gameplayLabel}</span>
-          <h1>{build.name}</h1>
+          <EditableInlineName
+            ariaLabel="Nom du build"
+            className="build-title-input"
+            name={build.name}
+            onRename={onRenameBuild}
+          />
         </div>
         <span className="status-pill status-ok">localStorage</span>
       </section>
@@ -230,11 +252,17 @@ export function BuildPage({
           {setups.map((setup) => (
             <SetupSummary
               key={setup.id}
+              canDelete={setups.length > 1}
+              confirmDelete={setupPendingDeleteId === setup.id}
               setup={setup}
               onCreateBalancedSet={() => onCreateBalancedSet(setup)}
+              onCancelDelete={() => setSetupPendingDeleteId(null)}
+              onConfirmDelete={() => deleteSetup(setup)}
+              onDeleteSetup={() => setSetupPendingDeleteId(setup.id)}
               onOpenBuilder={() => onOpenBuilder(setup)}
               onOpenOptimizer={() => onOpenOptimizer(setup)}
               onOpenSetup={() => onOpenSetup(setup)}
+              onRenameSetup={(name) => onRenameSetup(setup, name)}
             />
           ))}
         </section>
@@ -268,6 +296,68 @@ export function BuildPage({
         </section>
       </section>
     </main>
+  );
+}
+
+function EditableInlineName({
+  ariaLabel,
+  className,
+  name,
+  onRename,
+}: {
+  ariaLabel: string;
+  className: string;
+  name: string;
+  onRename: (name: string) => void;
+}) {
+  const [draftName, setDraftName] = useState(name);
+  const skipNextCommitRef = useRef(false);
+
+  useEffect(() => {
+    setDraftName(name);
+  }, [name]);
+
+  function commitName(candidateName = draftName) {
+    if (skipNextCommitRef.current) {
+      skipNextCommitRef.current = false;
+      setDraftName(name);
+      return;
+    }
+
+    const nextName = candidateName.trim();
+    if (!nextName) {
+      setDraftName(name);
+      return;
+    }
+    if (nextName !== name) {
+      onRename(nextName);
+    }
+  }
+
+  function handleKeyDown(event: React.KeyboardEvent<HTMLInputElement>) {
+    if (event.key === "Enter") {
+      commitName(event.currentTarget.value);
+      event.currentTarget.blur();
+    }
+    if (event.key === "Escape") {
+      skipNextCommitRef.current = true;
+      setDraftName(name);
+      event.currentTarget.blur();
+    }
+  }
+
+  return (
+    <span className={`editable-inline-name ${className}-shell`}>
+      <input
+        aria-label={ariaLabel}
+        className={className}
+        value={draftName}
+        onBlur={(event) => commitName(event.currentTarget.value)}
+        onChange={(event) => setDraftName(event.target.value)}
+        onKeyDown={handleKeyDown}
+      />
+      <Pencil aria-hidden="true" className="editable-inline-name-icon" size={15} strokeWidth={2.2} />
+    </span>
   );
 }
 
@@ -449,12 +539,14 @@ export function SetupPage({
   onBack,
   onOpenBuilder,
   onOpenOptimizer,
+  onRenameSetup,
   setup,
 }: {
   build: ResearchBuild;
   onBack: () => void;
   onOpenBuilder: () => void;
   onOpenOptimizer: () => void;
+  onRenameSetup: (name: string) => void;
   setup: SetupSnapshot;
 }) {
   const stats = setup.character.stats;
@@ -462,9 +554,14 @@ export function SetupPage({
     <main className="research-shell">
       <PageBackButton onBack={onBack} label={build.name} />
       <section className="build-header">
-        <div>
+        <div className="build-header-title">
           <span>Set v{setup.version} · {formatWakfuClassLabel(setup.classId)}</span>
-          <h1>{setup.name}</h1>
+          <EditableInlineName
+            ariaLabel={`Nom du set v${setup.version}`}
+            className="build-title-input"
+            name={setup.name}
+            onRename={onRenameSetup}
+          />
         </div>
         <div className="header-actions">
           <button className="secondary-button" type="button" onClick={onOpenBuilder}>
@@ -935,24 +1032,43 @@ function BuildRow({
 }
 
 function SetupSummary({
+  canDelete,
+  confirmDelete,
+  onCancelDelete,
+  onConfirmDelete,
   onCreateBalancedSet,
+  onDeleteSetup,
   onOpenBuilder,
   onOpenOptimizer,
   onOpenSetup,
+  onRenameSetup,
   setup,
 }: {
+  canDelete: boolean;
+  confirmDelete: boolean;
+  onCancelDelete: () => void;
+  onConfirmDelete: () => void;
   onCreateBalancedSet: () => void;
+  onDeleteSetup: () => void;
   onOpenBuilder: () => void;
   onOpenOptimizer: () => void;
   onOpenSetup: () => void;
+  onRenameSetup: (name: string) => void;
   setup: SetupSnapshot;
 }) {
   return (
     <article className="setup-summary">
-      <button className="setup-summary-main" type="button" onClick={onOpenSetup}>
-        <b>{setup.name}</b>
-        <span>v{setup.version} · {setup.character.resources.ap} PA · {setup.character.resources.bq} BQ · stats sauvegardées</span>
-      </button>
+      <div className="setup-summary-main">
+        <EditableInlineName
+          ariaLabel={`Nom du set v${setup.version}`}
+          className="setup-name-input"
+          name={setup.name}
+          onRename={onRenameSetup}
+        />
+        <button className="setup-summary-open" type="button" onClick={onOpenSetup}>
+          v{setup.version} · {setup.character.resources.ap} PA · {setup.character.resources.bq} BQ · stats sauvegardées
+        </button>
+      </div>
       <div className="setup-summary-actions">
         <button className="secondary-button" type="button" onClick={onCreateBalancedSet}>
           <Plus size={15} />
@@ -960,7 +1076,31 @@ function SetupSummary({
         </button>
         <button className="secondary-button" type="button" onClick={onOpenBuilder}>Builder</button>
         <button className="primary-button" type="button" onClick={onOpenOptimizer}>Optimizer</button>
+        {canDelete ? (
+          <button
+            aria-label={`Supprimer ${setup.name} v${setup.version}`}
+            className="icon-button danger-icon-button"
+            title={`Supprimer ${setup.name} v${setup.version}`}
+            type="button"
+            onClick={onDeleteSetup}
+          >
+            <Trash2 size={15} />
+          </button>
+        ) : null}
       </div>
+      {confirmDelete ? (
+        <div className="setup-summary-confirmation" role="alert">
+          <p>Supprimer ce set et ses runs/combos sauvegardés ?</p>
+          <div>
+            <button className="danger-button" type="button" onClick={onConfirmDelete}>
+              Confirmer
+            </button>
+            <button className="secondary-button" type="button" onClick={onCancelDelete}>
+              Annuler
+            </button>
+          </div>
+        </div>
+      ) : null}
     </article>
   );
 }

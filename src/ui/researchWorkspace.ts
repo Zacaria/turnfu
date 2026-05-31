@@ -120,9 +120,41 @@ export type SaveOptimizerCandidateComboInput = {
   now?: string;
 };
 
+export type RenameBuildInput = {
+  buildId: string;
+  name: string;
+  now?: string;
+};
+
+export type RenameSetupSnapshotInput = {
+  buildId: string;
+  name: string;
+  now?: string;
+  setupSnapshotId: string;
+};
+
 export type DeleteSavedCombosInput = {
   comboIds: string[];
   now?: string;
+};
+
+export type DeleteSetupSnapshotInput = {
+  buildId: string;
+  now?: string;
+  setupSnapshotId: string;
+};
+
+export type SaveSetupVersionInput = {
+  buildId: string;
+  character: SimulatedCharacter;
+  now?: string;
+  sourceSetupSnapshotId: string;
+};
+
+export type SaveSetupVersionResult = {
+  created: boolean;
+  setupSnapshotId: string;
+  workspace: ResearchWorkspaceData;
 };
 
 export type WorkspaceStorage = Pick<Storage, "getItem" | "removeItem" | "setItem">;
@@ -302,6 +334,69 @@ export function createBalancedElementSet(
   };
 }
 
+export function saveSetupVersion(
+  workspace: ResearchWorkspaceData,
+  input: SaveSetupVersionInput,
+): SaveSetupVersionResult {
+  const sourceSetup = workspace.setupSnapshots.find((setup) => (
+    setup.id === input.sourceSetupSnapshotId && setup.buildId === input.buildId
+  ));
+  if (!sourceSetup) {
+    return { created: false, setupSnapshotId: input.sourceSetupSnapshotId, workspace };
+  }
+
+  const character = cloneCharacter(input.character);
+  const passiveIds = character.classState?.huppermage?.activePassives ?? sourceSetup.passiveIds;
+  const candidateSetup: SetupSnapshot = {
+    ...sourceSetup,
+    character,
+    initialClassState: character.classState ?? {},
+    passiveIds: [...passiveIds],
+  };
+  const candidateKey = createSetupAssumptionsKey(candidateSetup);
+  const sourceKey = createSetupAssumptionsKey(sourceSetup);
+  if (candidateKey === sourceKey) {
+    return { created: false, setupSnapshotId: sourceSetup.id, workspace };
+  }
+
+  const equivalentSetup = workspace.setupSnapshots.find((setup) => (
+    setup.buildId === input.buildId && createSetupAssumptionsKey(setup) === candidateKey
+  ));
+  if (equivalentSetup) {
+    return { created: false, setupSnapshotId: equivalentSetup.id, workspace };
+  }
+
+  const now = input.now ?? new Date().toISOString();
+  const nextVersion = Math.max(
+    sourceSetup.version,
+    ...workspace.setupSnapshots
+      .filter((setup) => setup.buildId === sourceSetup.buildId && setup.name === sourceSetup.name)
+      .map((setup) => setup.version),
+  ) + 1;
+  const setupId = createUniqueStableId(
+    "setup",
+    `${sourceSetup.name}-v${nextVersion}-${sourceSetup.id}`,
+    now,
+    workspace.setupSnapshots.map((setup) => setup.id),
+  );
+  const setup: SetupSnapshot = {
+    ...candidateSetup,
+    id: setupId,
+    version: nextVersion,
+    createdAt: now,
+  };
+
+  return {
+    created: true,
+    setupSnapshotId: setup.id,
+    workspace: {
+      ...workspace,
+      builds: appendBuildReference(workspace.builds, input.buildId, "setupSnapshotIds", setup.id, now),
+      setupSnapshots: [...workspace.setupSnapshots, setup],
+    },
+  };
+}
+
 export function createOptimizerRunReference(
   workspace: ResearchWorkspaceData,
   input: CreateOptimizerRunReferenceInput,
@@ -369,6 +464,65 @@ export function saveOptimizerCandidateCombo(
   };
 }
 
+export function renameBuild(workspace: ResearchWorkspaceData, input: RenameBuildInput): ResearchWorkspaceData {
+  const nextName = input.name.trim();
+  if (!nextName) {
+    return workspace;
+  }
+
+  let changed = false;
+  const now = input.now ?? new Date().toISOString();
+  const builds = workspace.builds.map((build) => {
+    if (build.id !== input.buildId || build.name === nextName) {
+      return build;
+    }
+
+    changed = true;
+    return {
+      ...build,
+      name: nextName,
+      updatedAt: now,
+    };
+  });
+
+  return changed ? { ...workspace, builds } : workspace;
+}
+
+export function renameSetupSnapshot(workspace: ResearchWorkspaceData, input: RenameSetupSnapshotInput): ResearchWorkspaceData {
+  const nextName = input.name.trim();
+  if (!nextName) {
+    return workspace;
+  }
+
+  let changed = false;
+  const now = input.now ?? new Date().toISOString();
+  const setupSnapshots = workspace.setupSnapshots.map((setup) => {
+    if (setup.id !== input.setupSnapshotId || setup.buildId !== input.buildId || setup.name === nextName) {
+      return setup;
+    }
+
+    changed = true;
+    return {
+      ...setup,
+      name: nextName,
+    };
+  });
+
+  if (!changed) {
+    return workspace;
+  }
+
+  return {
+    ...workspace,
+    builds: workspace.builds.map((build) => (
+      build.id === input.buildId
+        ? { ...build, updatedAt: now }
+        : build
+    )),
+    setupSnapshots,
+  };
+}
+
 export function deleteSavedCombo(
   workspace: ResearchWorkspaceData,
   comboId: string,
@@ -417,6 +571,53 @@ export function deleteSavedCombos(
   };
 }
 
+export function deleteSetupSnapshot(
+  workspace: ResearchWorkspaceData,
+  input: DeleteSetupSnapshotInput,
+): ResearchWorkspaceData {
+  const build = workspace.builds.find((candidate) => candidate.id === input.buildId);
+  if (!build || !build.setupSnapshotIds.includes(input.setupSnapshotId) || build.setupSnapshotIds.length <= 1) {
+    return workspace;
+  }
+
+  const setup = workspace.setupSnapshots.find((candidate) => (
+    candidate.id === input.setupSnapshotId && candidate.buildId === input.buildId
+  ));
+  if (!setup) {
+    return workspace;
+  }
+
+  const now = input.now ?? new Date().toISOString();
+  const deletedRunIds = new Set(
+    workspace.optimizerRuns
+      .filter((run) => run.setupSnapshotId === input.setupSnapshotId)
+      .map((run) => run.id),
+  );
+  const deletedComboIds = new Set(
+    workspace.savedCombos
+      .filter((combo) => combo.setupSnapshotId === input.setupSnapshotId)
+      .map((combo) => combo.id),
+  );
+
+  return {
+    ...workspace,
+    builds: workspace.builds.map((candidate) => (
+      candidate.id === input.buildId
+        ? {
+          ...candidate,
+          setupSnapshotIds: candidate.setupSnapshotIds.filter((setupId) => setupId !== input.setupSnapshotId),
+          optimizerRunIds: candidate.optimizerRunIds.filter((runId) => !deletedRunIds.has(runId)),
+          savedComboIds: candidate.savedComboIds.filter((comboId) => !deletedComboIds.has(comboId)),
+          updatedAt: now,
+        }
+        : candidate
+    )),
+    optimizerRuns: workspace.optimizerRuns.filter((run) => run.setupSnapshotId !== input.setupSnapshotId),
+    savedCombos: workspace.savedCombos.filter((combo) => combo.setupSnapshotId !== input.setupSnapshotId),
+    setupSnapshots: workspace.setupSnapshots.filter((candidate) => candidate.id !== input.setupSnapshotId),
+  };
+}
+
 export function filterBuildsByClass(builds: ResearchBuild[], classId: WakfuClassId | "all"): ResearchBuild[] {
   if (classId === "all") {
     return builds;
@@ -440,6 +641,17 @@ export function getBuildSavedCombos(workspace: ResearchWorkspaceData, buildId: s
 export function getSetupSupportedSpellIds(setup: SetupSnapshot, catalog: CatalogEntry[]): string[] {
   const catalogIds = new Set(catalog.map((entry) => entry.id));
   return setup.deckSpellIds.filter((spellId) => catalogIds.has(spellId));
+}
+
+export function createSetupAssumptionsKey(setup: SetupSnapshot): string {
+  return JSON.stringify({
+    character: setup.character,
+    defaultActionContext: setup.defaultActionContext,
+    equipmentNotes: setup.equipmentNotes,
+    initialClassState: setup.initialClassState,
+    passiveIds: setup.character.classState?.huppermage?.activePassives ?? setup.passiveIds,
+    target: setup.target,
+  });
 }
 
 export function saveResearchWorkspace(storage: WorkspaceStorage, workspace: ResearchWorkspaceData): void {
@@ -535,6 +747,18 @@ function createUniqueStableId(prefix: string, label: string, now: string, existi
     index += 1;
   }
   return `${baseId}-${index}`;
+}
+
+function cloneCharacter(character: SimulatedCharacter): SimulatedCharacter {
+  return {
+    ...character,
+    classState: character.classState ? JSON.parse(JSON.stringify(character.classState)) as SimulatedCharacter["classState"] : undefined,
+    resources: createResources({ ...character.resources }),
+    stats: {
+      ...character.stats,
+      elementalMastery: { ...character.stats.elementalMastery },
+    },
+  };
 }
 
 function hasBuildSetupPair(workspace: ResearchWorkspaceData, buildId: string, setupSnapshotId: string): boolean {

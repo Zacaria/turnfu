@@ -81,19 +81,24 @@ import {
   SavedComboComparisonPage,
   SetupPage,
   type OptimizerWorkspaceSession,
-} from "./ResearchWorkspacePages.tsx?v=save-run-feedback-v1";
+} from "./ResearchWorkspacePages.tsx?v=editable-title-icon-v2";
 import {
   createBalancedElementSet,
   createBuild,
   createOptimizerRunReference,
+  createSetupAssumptionsKey,
   deleteSavedCombo,
   deleteSavedCombos,
+  deleteSetupSnapshot,
   getBuildRuns,
   getBuildSavedCombos,
   getBuildSetups,
   restoreResearchWorkspace,
   saveResearchWorkspace,
+  renameBuild,
+  renameSetupSnapshot,
   saveOptimizerCandidateCombo,
+  saveSetupVersion,
   type ResearchWorkspaceData,
   type SavedComboReference,
   type SetupSnapshot,
@@ -107,6 +112,7 @@ import {
   openOptimizerRun,
   openSavedComboComparison,
   openSetup,
+  retargetSetupRoute,
   returnToBuild,
   returnToPrevious,
   type ResearchRoute,
@@ -197,6 +203,7 @@ export function App() {
   ));
   const [researchRoute, setResearchRoute] = useState<ResearchRoute>(() => createResearchRoute());
   const optimizerSessionsRef = useRef<Record<string, OptimizerWorkspaceSession>>({});
+  const builderBaselineRef = useRef<{ assumptionKey: string; setupSnapshotId: string } | null>(null);
   const [optimizerSessions, setOptimizerSessions] = useState<Record<string, OptimizerWorkspaceSession>>({});
   const [buildClassFilter, setBuildClassFilter] = useState<WakfuClassId | "all">("all");
   const [characterConfig, setCharacterConfig] = useState<SimulatedCharacter>(() => createDefaultCharacter());
@@ -325,6 +332,31 @@ export function App() {
     }));
   }
 
+  function removeSetupSnapshot(setup: SetupSnapshot) {
+    setResearchWorkspace((workspace) => deleteSetupSnapshot(workspace, {
+      buildId: setup.buildId,
+      setupSnapshotId: setup.id,
+      now: new Date().toISOString(),
+    }));
+  }
+
+  function renameResearchBuild(buildId: string, name: string) {
+    setResearchWorkspace((workspace) => renameBuild(workspace, {
+      buildId,
+      name,
+      now: new Date().toISOString(),
+    }));
+  }
+
+  function renameResearchSetup(setup: SetupSnapshot, name: string) {
+    setResearchWorkspace((workspace) => renameSetupSnapshot(workspace, {
+      buildId: setup.buildId,
+      setupSnapshotId: setup.id,
+      name,
+      now: new Date().toISOString(),
+    }));
+  }
+
   function openSetupInBuilder(setup: SetupSnapshot, candidate?: OptimizerCandidateViewModel) {
     if (!candidate) {
       openSetupPlanInBuilder(setup);
@@ -408,6 +440,15 @@ export function App() {
 
   function applySetupToBuilder(setup: SetupSnapshot, plan?: ComboPlan) {
     const distribution = createDefaultAptitudeDistribution(setup.character.stats.level ?? 200);
+    const builderSetup: SetupSnapshot = {
+      ...setup,
+      initialClassState: setup.character.classState ?? {},
+      passiveIds: setup.character.classState?.huppermage?.activePassives ?? setup.passiveIds,
+    };
+    builderBaselineRef.current = {
+      assumptionKey: createSetupAssumptionsKey(builderSetup),
+      setupSnapshotId: setup.id,
+    };
     setAptitudeDistribution(distribution);
     setCharacterConfig(setup.character);
     setEquipmentCharacter(createEquipmentCharacterFromFinalCharacter(setup.character, distribution));
@@ -420,6 +461,39 @@ export function App() {
     setSelectedTimelineUid(nextTurns[0]?.[0]?.uid ?? null);
     setSelectedCatalogEntryId(null);
     setSelectedStep(0);
+  }
+
+  function returnFromBuilder() {
+    if (researchRoute.page !== "builder" || !researchRoute.buildId || !researchRoute.setupSnapshotId || !activeSetup) {
+      setResearchRoute(returnToPrevious(researchRoute));
+      return;
+    }
+
+    const builderSetup: SetupSnapshot = {
+      ...activeSetup,
+      character,
+      initialClassState: character.classState ?? {},
+      passiveIds: character.classState?.huppermage?.activePassives ?? activeSetup.passiveIds,
+    };
+    const currentAssumptionKey = createSetupAssumptionsKey(builderSetup);
+    const baseline = builderBaselineRef.current;
+    if (baseline?.setupSnapshotId === researchRoute.setupSnapshotId && baseline.assumptionKey === currentAssumptionKey) {
+      setResearchRoute(returnToPrevious(researchRoute));
+      return;
+    }
+
+    const result = saveSetupVersion(researchWorkspace, {
+      buildId: researchRoute.buildId,
+      sourceSetupSnapshotId: researchRoute.setupSnapshotId,
+      character,
+      now: new Date().toISOString(),
+    });
+    builderBaselineRef.current = {
+      assumptionKey: currentAssumptionKey,
+      setupSnapshotId: result.setupSnapshotId,
+    };
+    setResearchWorkspace(result.workspace);
+    setResearchRoute(retargetSetupRoute(returnToPrevious(researchRoute), result.setupSnapshotId));
   }
 
   function insertAction(spellId: string, index = timeline.length) {
@@ -788,11 +862,14 @@ export function App() {
           setups={setups}
           onBack={() => setResearchRoute({ page: "library" })}
           onCreateBalancedSet={createBalancedSetFromSetup}
+          onDeleteSetup={removeSetupSnapshot}
           onOpenBuilder={(setup) => openSetupInBuilder(setup)}
           onOpenOptimizer={(setup) => setResearchRoute(openOptimizerFromSetup(researchRoute, activeBuild.id, setup.id))}
           onOpenRun={(run) => setResearchRoute(openOptimizerRun(researchRoute, activeBuild.id, run.id))}
           onOpenSavedCombos={() => setResearchRoute(openSavedComboComparison(researchRoute, activeBuild.id))}
           onOpenSetup={(setup) => setResearchRoute(openSetup(researchRoute, activeBuild.id, setup.id))}
+          onRenameBuild={(name) => renameResearchBuild(activeBuild.id, name)}
+          onRenameSetup={renameResearchSetup}
         />
       </>
     );
@@ -842,6 +919,7 @@ export function App() {
           onBack={() => setResearchRoute(returnToPrevious(researchRoute))}
           onOpenBuilder={() => openSetupInBuilder(activeSetup)}
           onOpenOptimizer={() => setResearchRoute(openOptimizerFromSetup(researchRoute, activeBuild.id, activeSetup.id))}
+          onRenameSetup={(name) => renameResearchSetup(activeSetup, name)}
         />
       </>
     );
@@ -884,7 +962,7 @@ export function App() {
 
       <main className="app-shell">
         {researchRoute.page === "builder" && researchRoute.returnTo ? (
-          <button className="back-button builder-back-button" type="button" onClick={() => setResearchRoute(returnToPrevious(researchRoute))}>
+          <button className="back-button builder-back-button" type="button" onClick={returnFromBuilder}>
             <ArrowLeft size={16} />
             {getBuilderBackLabel(researchRoute)}
           </button>

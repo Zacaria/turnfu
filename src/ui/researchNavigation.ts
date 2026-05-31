@@ -128,3 +128,22 @@ export function returnToBuild(route: ResearchRoute): ResearchRoute {
 export function returnToPrevious(route: ResearchRoute): ResearchRoute {
   return route.returnTo ?? returnToBuild(route);
 }
+
+export function retargetSetupRoute(route: ResearchRoute, setupSnapshotId: string): ResearchRoute {
+  const returnTo = route.returnTo ? retargetSetupRoute(route.returnTo, setupSnapshotId) : undefined;
+
+  switch (route.page) {
+    case "setup":
+    case "optimizer":
+    case "builder":
+      if (!route.setupSnapshotId) {
+        return returnTo ? { ...route, returnTo } : route;
+      }
+      return returnTo ? { ...route, setupSnapshotId, returnTo } : { ...route, setupSnapshotId };
+    case "library":
+    case "build":
+    case "optimizerRun":
+    case "savedCombos":
+      return returnTo ? { ...route, returnTo } : route;
+  }
+}
