@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 import { runRustWasmDifferentialSuite } from "../src/core/optimizer/rustWasmDifferential.ts";
 
 const wasmPackagePath = resolve("src/wasm/optimizer_wasm_pkg/optimizer_wasm.js");
-const shouldBuild = process.argv.includes("--build") || !existsSync(wasmPackagePath);
+const shouldBuild = !process.argv.includes("--no-build") || !existsSync(wasmPackagePath);
 
 if (shouldBuild) {
   const build = spawnSync("wasm-pack", [

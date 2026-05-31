@@ -1,5 +1,6 @@
 import {
   createRustWasmDifferentialFixtures,
+  normalizeViolation,
   type RustWasmDifferentialFixture,
 } from "./rustWasmDifferentialFixtures.ts";
 
@@ -20,6 +21,25 @@ export type RustWasmDifferentialWasmExports = {
     statsJson: string,
     resourcesJson: string,
     passivesJson: string,
+  ) => string;
+  create_unknown_spell_violation_json: (
+    spellId: string,
+    actionIndex: number,
+  ) => string;
+  validate_spell_rules_json: (
+    spellJson: string,
+    actionIndex: number,
+    targetJson: string | undefined,
+    castsBySpellIdJson: string,
+    targetCastsBySpellIdJson: string,
+    huppermageStateJson: string,
+  ) => string;
+  validate_huppermage_class_action_json: (
+    spellId: string,
+    actionIndex: number,
+    targetJson: string | undefined,
+    castsBySpellIdJson: string,
+    huppermageStateJson: string,
   ) => string;
 };
 
@@ -101,11 +121,70 @@ function runRustFixture(wasm: RustWasmDifferentialWasmExports, fixture: RustWasm
     ));
   }
 
+  if (fixture.kind === "invalidPlan") {
+    if (fixture.operation === "unknownSpell") {
+      return normalizeRustViolation(JSON.parse(wasm.create_unknown_spell_violation_json(
+        fixture.spellId,
+        fixture.actionIndex,
+      )));
+    }
+
+    if (fixture.operation === "resourceCost") {
+      const result = JSON.parse(wasm.validate_resource_cost_json(
+        JSON.stringify(fixture.resources),
+        JSON.stringify(fixture.cost),
+        fixture.spellId,
+        fixture.actionIndex,
+      ));
+      return normalizeRustViolation(result.violation);
+    }
+
+    if (fixture.operation === "spellRules") {
+      return normalizeRustViolation(JSON.parse(wasm.validate_spell_rules_json(
+        JSON.stringify(fixture.spellRules),
+        fixture.actionIndex,
+        fixture.target ? JSON.stringify(fixture.target) : undefined,
+        JSON.stringify(fixture.castsBySpellId ?? {}),
+        JSON.stringify(fixture.targetCastsBySpellId ?? {}),
+        JSON.stringify(fixture.huppermageState),
+      )));
+    }
+
+    return normalizeRustViolation(JSON.parse(wasm.validate_huppermage_class_action_json(
+      fixture.spellId,
+      fixture.actionIndex,
+      fixture.target ? JSON.stringify(fixture.target) : undefined,
+      JSON.stringify(fixture.castsBySpellId ?? {}),
+      JSON.stringify(fixture.huppermageState),
+    )));
+  }
+
   return JSON.parse(wasm.apply_initial_passive_effects_json(
     JSON.stringify(fixture.stats),
     JSON.stringify(fixture.resources),
     JSON.stringify(fixture.passives),
   ));
+}
+
+function normalizeRustViolation(violation: Record<string, unknown> | null): Record<string, unknown> | null {
+  if (!violation) {
+    return null;
+  }
+
+  return normalizeViolation({
+    type: violation.violationType as never,
+    actionIndex: violation.actionIndex as number,
+    spellId: nullToUndefined(violation.spellId) as string | undefined,
+    resource: nullToUndefined(violation.resource) as never,
+    required: nullToUndefined(violation.required) as number | undefined,
+    available: nullToUndefined(violation.available) as number | undefined,
+    scope: nullToUndefined(violation.scope) as never,
+    message: "",
+  });
+}
+
+function nullToUndefined(value: unknown): unknown {
+  return value === null ? undefined : value;
 }
 
 function findFirstMismatch(

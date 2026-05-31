@@ -912,7 +912,7 @@ pub fn validate_spell_rules(
                 violation_type: "cooldownActive".to_string(),
                 action_index,
                 spell_id: Some(spell.id.clone()),
-                required: Some(0),
+                required: spell.cooldown_turns.map(|turns| turns as i32),
                 available: Some(*cooldown_remaining as i32),
                 scope: None,
                 message: format!("Spell '{}' is on cooldown.", spell.id),
@@ -984,6 +984,154 @@ pub fn validate_spell_rules(
                 "Spell '{}' is not in the current deck and the deck limit is reached.",
                 spell.id
             ),
+        });
+    }
+
+    None
+}
+
+pub fn create_unknown_spell_violation(spell_id: &str, action_index: u32) -> SimulationViolation {
+    SimulationViolation {
+        violation_type: "unknownSpell".to_string(),
+        action_index,
+        spell_id: Some(spell_id.to_string()),
+        required: None,
+        available: None,
+        scope: None,
+        message: format!("Unknown spell id '{}'.", spell_id),
+    }
+}
+
+pub fn validate_huppermage_class_action(
+    spell_id: &str,
+    action_index: u32,
+    target: Option<ActionTargetKind>,
+    casts_by_spell_id: &BTreeMap<String, u32>,
+    huppermage_state: &HuppermageState,
+) -> Option<SimulationViolation> {
+    if spell_id == "coeur-de-lumiere" && huppermage_state.runes.last_generated_rune.is_none() {
+        return Some(SimulationViolation {
+            violation_type: "invalidClassStateAction".to_string(),
+            action_index,
+            spell_id: Some(spell_id.to_string()),
+            required: None,
+            available: None,
+            scope: None,
+            message: format!("Spell '{}' requires a last generated rune.", spell_id),
+        });
+    }
+
+    if is_runification_spell_id(spell_id) && get_active_rune_count(huppermage_state) <= 0 {
+        return Some(SimulationViolation {
+            violation_type: "invalidClassStateAction".to_string(),
+            action_index,
+            spell_id: Some(spell_id.to_string()),
+            required: None,
+            available: None,
+            scope: None,
+            message: format!("Spell '{}' requires at least one active rune.", spell_id),
+        });
+    }
+
+    if !is_feu_follet_spell_id(spell_id) {
+        return None;
+    }
+
+    if target == Some(ActionTargetKind::EmptyCell) && get_active_rune_count(huppermage_state) <= 0 {
+        return Some(SimulationViolation {
+            violation_type: "invalidClassStateAction".to_string(),
+            action_index,
+            spell_id: Some(spell_id.to_string()),
+            required: None,
+            available: None,
+            scope: None,
+            message: format!(
+                "Spell '{}' cannot place a Feu-Follet without an active rune.",
+                spell_id
+            ),
+        });
+    }
+
+    if target == Some(ActionTargetKind::EmptyCell)
+        && get_feu_follet_stored_rune(huppermage_state).is_none()
+    {
+        return Some(SimulationViolation {
+            violation_type: "invalidClassStateAction".to_string(),
+            action_index,
+            spell_id: Some(spell_id.to_string()),
+            required: None,
+            available: None,
+            scope: None,
+            message: format!(
+                "Spell '{}' cannot place a Feu-Follet because the last generated rune is not active.",
+                spell_id
+            ),
+        });
+    }
+
+    if target == Some(ActionTargetKind::EmptyCell)
+        && huppermage_state.feu_follets_active >= get_feu_follet_maximum(huppermage_state)
+    {
+        return Some(SimulationViolation {
+            violation_type: "invalidClassStateAction".to_string(),
+            action_index,
+            spell_id: Some(spell_id.to_string()),
+            required: None,
+            available: None,
+            scope: None,
+            message: format!("Spell '{}' cannot place more active Feu-Follets.", spell_id),
+        });
+    }
+
+    if target == Some(ActionTargetKind::EmptyCell) {
+        if let Some(limit) = get_feu_follet_cast_limit(huppermage_state) {
+            let current = casts_by_spell_id.get(spell_id).copied().unwrap_or(0);
+            if current >= limit {
+                return Some(SimulationViolation {
+                    violation_type: "castLimitExceeded".to_string(),
+                    action_index,
+                    spell_id: Some(spell_id.to_string()),
+                    required: Some(limit as i32),
+                    available: Some(current as i32),
+                    scope: None,
+                    message: format!(
+                        "Spell '{}' exceeds Feu-Follet max casts per turn ({}).",
+                        spell_id, limit
+                    ),
+                });
+            }
+        }
+    }
+
+    if target == Some(ActionTargetKind::FeuFollet) && huppermage_state.feu_follets_active <= 0 {
+        return Some(SimulationViolation {
+            violation_type: "invalidClassStateAction".to_string(),
+            action_index,
+            spell_id: Some(spell_id.to_string()),
+            required: None,
+            available: None,
+            scope: None,
+            message: format!(
+                "Spell '{}' cannot recover a Feu-Follet because none is active.",
+                spell_id
+            ),
+        });
+    }
+
+    if matches!(
+        target,
+        Some(ActionTargetKind::Fighter)
+            | Some(ActionTargetKind::Ally)
+            | Some(ActionTargetKind::Enemy)
+    ) {
+        return Some(SimulationViolation {
+            violation_type: "invalidClassStateAction".to_string(),
+            action_index,
+            spell_id: Some(spell_id.to_string()),
+            required: None,
+            available: None,
+            scope: None,
+            message: format!("Spell '{}' cannot target an entity.", spell_id),
         });
     }
 
@@ -1172,6 +1320,30 @@ fn has_passive(state: &HuppermageState, passive_id: &str) -> bool {
         .active_passives
         .iter()
         .any(|passive| passive == passive_id)
+}
+
+fn is_runification_spell_id(spell_id: &str) -> bool {
+    spell_id == "runification" || spell_id == "runification-test"
+}
+
+fn is_feu_follet_spell_id(spell_id: &str) -> bool {
+    spell_id == "feu-follet"
+}
+
+fn get_feu_follet_maximum(state: &HuppermageState) -> u32 {
+    if has_passive(state, "nouveau-souffle") {
+        1
+    } else {
+        2
+    }
+}
+
+fn get_feu_follet_cast_limit(state: &HuppermageState) -> Option<u32> {
+    if has_passive(state, "sauvegarde-runique") {
+        Some(1)
+    } else {
+        None
+    }
 }
 
 fn is_rune_active(tracker: &RuneTracker, rune: &Rune) -> bool {
@@ -1487,6 +1659,82 @@ pub fn validate_resource_cost_json(
     .map_err(|error| {
         JsValue::from_str(&format!("Failed to serialize resource validation: {error}"))
     })
+}
+
+#[wasm_bindgen]
+pub fn create_unknown_spell_violation_json(
+    spell_id: &str,
+    action_index: u32,
+) -> Result<String, JsValue> {
+    serde_json::to_string(&create_unknown_spell_violation(spell_id, action_index))
+        .map_err(|error| JsValue::from_str(&format!("Failed to serialize violation: {error}")))
+}
+
+#[wasm_bindgen]
+pub fn validate_spell_rules_json(
+    spell_json: &str,
+    action_index: u32,
+    target_json: Option<String>,
+    casts_by_spell_id_json: &str,
+    target_casts_by_spell_id_json: &str,
+    huppermage_state_json: &str,
+) -> Result<String, JsValue> {
+    let spell: SpellRules = serde_json::from_str(spell_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid spell rules JSON: {error}")))?;
+    let target: Option<ActionTargetKind> = match target_json {
+        Some(json) => Some(
+            serde_json::from_str(&json)
+                .map_err(|error| JsValue::from_str(&format!("Invalid target JSON: {error}")))?,
+        ),
+        None => None,
+    };
+    let casts_by_spell_id: BTreeMap<String, u32> = serde_json::from_str(casts_by_spell_id_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid casts JSON: {error}")))?;
+    let target_casts_by_spell_id: BTreeMap<String, u32> =
+        serde_json::from_str(target_casts_by_spell_id_json)
+            .map_err(|error| JsValue::from_str(&format!("Invalid target casts JSON: {error}")))?;
+    let huppermage_state: HuppermageState = serde_json::from_str(huppermage_state_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid Huppermage state JSON: {error}")))?;
+
+    serde_json::to_string(&validate_spell_rules(
+        &spell,
+        action_index,
+        target,
+        &casts_by_spell_id,
+        &target_casts_by_spell_id,
+        &huppermage_state,
+    ))
+    .map_err(|error| JsValue::from_str(&format!("Failed to serialize violation: {error}")))
+}
+
+#[wasm_bindgen]
+pub fn validate_huppermage_class_action_json(
+    spell_id: &str,
+    action_index: u32,
+    target_json: Option<String>,
+    casts_by_spell_id_json: &str,
+    huppermage_state_json: &str,
+) -> Result<String, JsValue> {
+    let target: Option<ActionTargetKind> = match target_json {
+        Some(json) => Some(
+            serde_json::from_str(&json)
+                .map_err(|error| JsValue::from_str(&format!("Invalid target JSON: {error}")))?,
+        ),
+        None => None,
+    };
+    let casts_by_spell_id: BTreeMap<String, u32> = serde_json::from_str(casts_by_spell_id_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid casts JSON: {error}")))?;
+    let huppermage_state: HuppermageState = serde_json::from_str(huppermage_state_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid Huppermage state JSON: {error}")))?;
+
+    serde_json::to_string(&validate_huppermage_class_action(
+        spell_id,
+        action_index,
+        target,
+        &casts_by_spell_id,
+        &huppermage_state,
+    ))
+    .map_err(|error| JsValue::from_str(&format!("Failed to serialize violation: {error}")))
 }
 
 #[wasm_bindgen]

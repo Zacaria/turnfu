@@ -4,8 +4,10 @@ import {
   huppermageCatalog,
   type CatalogEntry,
   type DamageEffect,
+  type Element,
   type Effect,
   type Resource,
+  type Rune,
   type SpellCost,
   type StatModifierEffect,
 } from "../catalog/index.ts";
@@ -16,8 +18,10 @@ import {
   resolveActionContext,
   simulateTurn,
   type ActionContext,
+  type ActionTarget,
   type BaseStats,
   type ResourcePool,
+  type SimulationViolation,
   type SimulatedCharacter,
 } from "../simulation/index.ts";
 
@@ -50,6 +54,21 @@ export type RustWasmDifferentialFixture =
       resources: ResourcePool;
       passives: RustPassiveEntry[];
       expected: unknown;
+    }
+  | {
+      kind: "invalidPlan";
+      name: string;
+      operation: RustInvalidPlanOperation;
+      spellId: string;
+      actionIndex: number;
+      resources?: ResourcePool;
+      cost?: Required<SpellCost>;
+      target?: ActionTarget["kind"];
+      spellRules?: RustSpellRules;
+      castsBySpellId?: Record<string, number>;
+      targetCastsBySpellId?: Record<string, number>;
+      huppermageState?: ReturnType<typeof createRustHuppermageState>;
+      expected: unknown;
     };
 
 type RustPassiveEntry = {
@@ -70,6 +89,22 @@ type RustPassiveEntry = {
         note?: string;
       }
   >;
+};
+
+type RustInvalidPlanOperation =
+  | "unknownSpell"
+  | "resourceCost"
+  | "spellRules"
+  | "huppermageClassAction";
+
+type RustSpellRules = {
+  id: string;
+  element?: Element;
+  isDeckTracked: boolean;
+  maxCastsPerTurn?: number;
+  maxCastsPerTarget?: number;
+  cooldownTurns?: number;
+  requiredTarget?: ActionTarget["kind"];
 };
 
 const resources = ["ap", "mp", "wp", "bq"] as const;
@@ -117,6 +152,7 @@ export function createRustWasmDifferentialFixtures(): RustWasmDifferentialFixtur
     ...createSpellCostFixtures(),
     ...createDamageFixtures(),
     ...createInitialPassiveFixtures(),
+    ...createInvalidPlanFixtures(),
   ];
 }
 
@@ -187,6 +223,142 @@ function createInitialPassiveFixtures(): RustWasmDifferentialFixture[] {
   });
 }
 
+function createInvalidPlanFixtures(): RustWasmDifferentialFixture[] {
+  const enoughResources = createResources({ ap: 20, mp: 10, wp: 10, bq: 2_000 });
+  const fixtures: RustWasmDifferentialFixture[] = [];
+
+  fixtures.push({
+    kind: "invalidPlan",
+    name: "invalid-plan:unknown-spell",
+    operation: "unknownSpell",
+    spellId: "missing-huppermage-spell",
+    actionIndex: 0,
+    expected: simulateInvalidPlan([{ spellId: "missing-huppermage-spell" }], createBaseCharacter(enoughResources)),
+  });
+
+  const expensiveSpell = requireSpell("fleche-de-lumiere");
+  fixtures.push({
+    kind: "invalidPlan",
+    name: "invalid-plan:insufficient-resource",
+    operation: "resourceCost",
+    spellId: expensiveSpell.id,
+    actionIndex: 0,
+    resources: createResources({ ap: 1, mp: 6, wp: 6, bq: 0 }),
+    cost: normalizeCost(expensiveSpell.cost),
+    expected: simulateInvalidPlan([{ spellId: expensiveSpell.id }], createBaseCharacter(createResources({ ap: 1, mp: 6, wp: 6, bq: 0 }))),
+  });
+
+  const heartSpell = requireSpell("coeur-de-lumiere");
+  fixtures.push({
+    kind: "invalidPlan",
+    name: "invalid-plan:cast-limit",
+    operation: "spellRules",
+    spellId: heartSpell.id,
+    actionIndex: 1,
+    spellRules: createRustSpellRules(heartSpell),
+    castsBySpellId: { [heartSpell.id]: 1 },
+    targetCastsBySpellId: {},
+    huppermageState: createRustHuppermageState({ lastGeneratedRune: "incandescent" }),
+    expected: simulateInvalidPlan(
+      [{ spellId: heartSpell.id }, { spellId: heartSpell.id }],
+      createBaseCharacter(enoughResources, { lastGeneratedRune: "incandescent" }),
+    ),
+  });
+
+  fixtures.push({
+    kind: "invalidPlan",
+    name: "invalid-plan:cooldown",
+    operation: "spellRules",
+    spellId: expensiveSpell.id,
+    actionIndex: 0,
+    spellRules: createRustSpellRules(expensiveSpell),
+    castsBySpellId: {},
+    targetCastsBySpellId: {},
+    huppermageState: createRustHuppermageState({ cooldownsBySpellId: { [expensiveSpell.id]: 2 } }),
+    expected: simulateInvalidPlan(
+      [{ spellId: expensiveSpell.id }],
+      createBaseCharacter(enoughResources, { cooldownsBySpellId: { [expensiveSpell.id]: 2 } }),
+    ),
+  });
+
+  const deckLimitedSpell = requireSpell("mirage");
+  const usedSpellIds = getDeckLimitUsedSpellIds(deckLimitedSpell.id);
+  fixtures.push({
+    kind: "invalidPlan",
+    name: "invalid-plan:deck-limit",
+    operation: "spellRules",
+    spellId: deckLimitedSpell.id,
+    actionIndex: 0,
+    spellRules: createRustSpellRules(deckLimitedSpell),
+    castsBySpellId: {},
+    targetCastsBySpellId: {},
+    huppermageState: createRustHuppermageState({ usedSpellIds }),
+    expected: simulateInvalidPlan(
+      [{ spellId: deckLimitedSpell.id }],
+      createBaseCharacter(enoughResources, { usedSpellIds }),
+    ),
+  });
+
+  fixtures.push({
+    kind: "invalidPlan",
+    name: "invalid-plan:coeur-missing-last-rune",
+    operation: "huppermageClassAction",
+    spellId: heartSpell.id,
+    actionIndex: 0,
+    castsBySpellId: {},
+    huppermageState: createRustHuppermageState(),
+    expected: simulateInvalidPlan([{ spellId: heartSpell.id }], createBaseCharacter(enoughResources)),
+  });
+
+  const runificationSpell = requireSpell("runification");
+  fixtures.push({
+    kind: "invalidPlan",
+    name: "invalid-plan:runification-no-rune",
+    operation: "huppermageClassAction",
+    spellId: runificationSpell.id,
+    actionIndex: 0,
+    castsBySpellId: {},
+    huppermageState: createRustHuppermageState(),
+    expected: simulateInvalidPlan([{ spellId: runificationSpell.id }], createBaseCharacter(enoughResources)),
+  });
+
+  const feuFolletSpell = requireSpell("feu-follet");
+  fixtures.push({
+    kind: "invalidPlan",
+    name: "invalid-plan:feu-follet-no-rune",
+    operation: "huppermageClassAction",
+    spellId: feuFolletSpell.id,
+    actionIndex: 0,
+    target: "emptyCell",
+    castsBySpellId: {},
+    huppermageState: createRustHuppermageState(),
+    expected: simulateInvalidPlan(
+      [{ spellId: feuFolletSpell.id, target: { kind: "emptyCell" } }],
+      createBaseCharacter(enoughResources),
+    ),
+  });
+
+  const targetSpell = requireSpell("mur-energie");
+  fixtures.push({
+    kind: "invalidPlan",
+    name: "invalid-plan:invalid-target",
+    operation: "spellRules",
+    spellId: targetSpell.id,
+    actionIndex: 0,
+    target: "fighter",
+    spellRules: createRustSpellRules(targetSpell),
+    castsBySpellId: {},
+    targetCastsBySpellId: {},
+    huppermageState: createRustHuppermageState(),
+    expected: simulateInvalidPlan(
+      [{ spellId: targetSpell.id, target: { kind: "fighter" } }],
+      createBaseCharacter(enoughResources),
+    ),
+  });
+
+  return fixtures;
+}
+
 function validateResourceCost(
   inputResources: ResourcePool,
   cost: Required<SpellCost>,
@@ -234,6 +406,55 @@ function createPassiveFixtureCharacter(passiveId: string, resources: ResourcePoo
       },
     },
   };
+}
+
+function createBaseCharacter(
+  resources: ResourcePool,
+  huppermage: NonNullable<SimulatedCharacter["classState"]>["huppermage"] = {},
+): SimulatedCharacter {
+  return {
+    id: "rust-wasm-invalid-plan-fixture",
+    className: "huppermage",
+    resources,
+    stats: baseStats,
+    classState: {
+      huppermage,
+    },
+  };
+}
+
+function simulateInvalidPlan(
+  actions: Array<{ spellId: string; target?: ActionTarget }>,
+  character: SimulatedCharacter,
+) {
+  const simulation = simulateTurn({
+    catalog: huppermageCatalog,
+    character,
+    sequence: { actions },
+    includeTurnEnd: false,
+  });
+
+  if (simulation.valid || !simulation.violations[0]) {
+    throw new Error(`Expected invalid fixture for '${actions[0]?.spellId ?? "empty"}'.`);
+  }
+
+  return normalizeViolation(simulation.violations[0]);
+}
+
+export function normalizeViolation(violation: SimulationViolation | undefined): Record<string, unknown> | null {
+  if (!violation) {
+    return null;
+  }
+
+  return pruneUndefined({
+    violationType: violation.type,
+    actionIndex: violation.actionIndex,
+    spellId: violation.spellId,
+    resource: violation.resource,
+    required: violation.required,
+    available: violation.available,
+    scope: violation.scope,
+  });
 }
 
 function collectDamageEffects(effects: Effect[]): DamageEffect[] {
@@ -291,6 +512,96 @@ function normalizePassiveForRust(passive: CatalogEntry): RustPassiveEntry {
     id: passive.id,
     effects,
   };
+}
+
+function createRustSpellRules(spell: CatalogEntry): RustSpellRules {
+  return pruneUndefined({
+    id: spell.id,
+    element: spell.element,
+    isDeckTracked: spell.id !== "coeur-de-lumiere" && spell.id !== "cycle-elementaire" && spell.id !== "feu-follet",
+    maxCastsPerTurn: getConstraintValue(spell, "maxCastsPerTurn"),
+    maxCastsPerTarget: getConstraintValue(spell, "maxCastsPerTarget"),
+    cooldownTurns: getConstraintValue(spell, "cooldownTurns"),
+    requiredTarget: getRequiredTarget(spell),
+  }) as RustSpellRules;
+}
+
+function createRustHuppermageState(input: {
+  activeRunes?: Partial<Record<Rune, boolean>>;
+  lastGeneratedRune?: Rune | null;
+  activePassives?: string[];
+  usedSpellIds?: string[];
+  feuFolletsActive?: number;
+  temporaryUnlockedSpellElement?: Element | null;
+  cooldownsBySpellId?: Record<string, number>;
+} = {}) {
+  return {
+    runes: {
+      active: {
+        incandescent: input.activeRunes?.incandescent ?? false,
+        aquatic: input.activeRunes?.aquatic ?? false,
+        telluric: input.activeRunes?.telluric ?? false,
+        aerial: input.activeRunes?.aerial ?? false,
+      },
+      lastGeneratedRune: input.lastGeneratedRune ?? null,
+    },
+    runeApGainsThisTurn: {
+      incandescent: false,
+      aquatic: false,
+      telluric: false,
+      aerial: false,
+    },
+    abundanceLevel: 0,
+    feuFolletsActive: input.feuFolletsActive ?? 0,
+    feuFolletStoredRunes: [],
+    feuFolletStoredLastRunes: [],
+    temporaryUnlockedSpellElement: input.temporaryUnlockedSpellElement ?? null,
+    usedSpellIds: input.usedSpellIds ?? [],
+    activePassives: input.activePassives ?? [],
+    activeHeart: null,
+    bqMax: 1_000,
+    storedBq: 0,
+    cooldownsBySpellId: input.cooldownsBySpellId ?? {},
+    deckSpellLimit: 12,
+    passiveLimit: 6,
+  };
+}
+
+function getConstraintValue(
+  spell: CatalogEntry,
+  type: "maxCastsPerTurn" | "maxCastsPerTarget" | "cooldownTurns",
+): number | undefined {
+  const constraint = spell.constraints.find((constraint) => constraint.type === type);
+  return constraint && "value" in constraint ? constraint.value : undefined;
+}
+
+function getRequiredTarget(spell: CatalogEntry): ActionTarget["kind"] | undefined {
+  const constraint = spell.constraints.find((constraint) => constraint.type === "requiresTarget");
+  return constraint?.type === "requiresTarget" ? constraint.target : undefined;
+}
+
+function requireSpell(spellId: string): CatalogEntry {
+  const spell = huppermageCatalog.find((entry) => entry.id === spellId && entry.kind === "spell");
+  if (!spell) {
+    throw new Error(`Missing Huppermage spell fixture '${spellId}'.`);
+  }
+  return spell;
+}
+
+function getDeckLimitUsedSpellIds(excludedSpellId: string): string[] {
+  return getHuppermageSpells()
+    .map((spell) => spell.id)
+    .filter((spellId) =>
+      spellId !== excludedSpellId
+      && spellId !== "coeur-de-lumiere"
+      && spellId !== "cycle-elementaire"
+      && spellId !== "feu-follet"
+    )
+    .slice(0, 12);
+}
+
+function pruneUndefined<T extends Record<string, unknown>>(value: T): T {
+  return Object.fromEntries(Object.entries(value).filter(([, entryValue]) => entryValue !== undefined)) as T;
 }
 
 function normalizeStatsForRust(stats: BaseStats) {
