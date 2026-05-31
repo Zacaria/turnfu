@@ -864,12 +864,15 @@ function enqueueHybridEliteNeighbors(
   const maxGenerated = 640;
   const actions = getTopWeightedActions(context.options, Math.min(20, getSearchActions(context.options).length));
   const pairReplacementActions = getHybridPairReplacementActions(context.options);
+  const entriesBySpellId = new Map(context.options.catalog.map((entry) => [entry.id, entry]));
+  const costIsomorphicActions = getCostIsomorphicActionGroups(actions, entriesBySpellId);
   const seen = new Set(queue.map((candidate) => serializeExperimentCandidate(normalizeCandidate(candidate))));
   let generated = 0;
   let pairReplacementGenerated = 0;
   let relocateGenerated = 0;
   let targetFlipGenerated = 0;
   let pivotInsertionGenerated = 0;
+  let isomorphicReplacementGenerated = 0;
 
   const addCandidate = (candidate: OptimizerExperimentCandidateInput, metric?: string): boolean => {
     if (queue.length >= maxQueueSize || generated >= maxGenerated) {
@@ -1071,6 +1074,31 @@ function enqueueHybridEliteNeighbors(
       }
     }
 
+    if (
+      context.options.budget.iterations >= 80
+      && (context.options.duration >= 3 || context.options.maxActionsPerTurn >= 8)
+    ) {
+      for (let actionIndex = 0; actionIndex < turn.actions.length; actionIndex += 1) {
+        if (isomorphicReplacementGenerated >= 96) {
+          break;
+        }
+        const currentAction = turn.actions[actionIndex]!;
+        for (const action of getCostIsomorphicActions(currentAction, costIsomorphicActions, entriesBySpellId)) {
+          if (isomorphicReplacementGenerated >= 96) {
+            break;
+          }
+          if (serializeAction(currentAction) === serializeAction(action)) {
+            continue;
+          }
+          const candidate = cloneCandidateInput(input);
+          candidate.plan.turns[turnIndex]!.actions[actionIndex] = cloneAction(action);
+          if (addCandidate(candidate, "hybridIsomorphicReplacementCandidates")) {
+            isomorphicReplacementGenerated += 1;
+          }
+        }
+      }
+    }
+
     for (let firstIndex = 0; firstIndex < turn.actions.length - 1; firstIndex += 1) {
       for (let secondIndex = firstIndex + 1; secondIndex < turn.actions.length; secondIndex += 1) {
         for (const firstAction of pairReplacementActions) {
@@ -1142,6 +1170,45 @@ function getHybridPairReplacementActions(options: NormalizedExperimentOptions): 
       && getSoftCostAmount(spell.cost, "wp") === 0
       && getSoftCostAmount(spell.cost, "bq") === 0;
   });
+}
+
+function getCostIsomorphicActions(
+  action: Action,
+  actionsByCost: Map<string, Action[]>,
+  entriesBySpellId: Map<string, CatalogEntry>,
+): Action[] {
+  const spell = entriesBySpellId.get(action.spellId);
+  if (!spell) {
+    return [];
+  }
+  return (actionsByCost.get(createSoftCostSignature(spell)) ?? [])
+    .filter((candidate) => candidate.spellId !== action.spellId)
+    .slice(0, 8);
+}
+
+function getCostIsomorphicActionGroups(
+  actions: Action[],
+  entriesBySpellId: Map<string, CatalogEntry>,
+): Map<string, Action[]> {
+  const groups = new Map<string, Action[]>();
+  for (const action of actions) {
+    const spell = entriesBySpellId.get(action.spellId);
+    if (!spell) {
+      continue;
+    }
+    const signature = createSoftCostSignature(spell);
+    groups.set(signature, [...(groups.get(signature) ?? []), action]);
+  }
+  return groups;
+}
+
+function createSoftCostSignature(spell: CatalogEntry): string {
+  return [
+    getSoftCostAmount(spell.cost, "ap"),
+    getSoftCostAmount(spell.cost, "mp"),
+    getSoftCostAmount(spell.cost, "wp"),
+    getSoftCostAmount(spell.cost, "bq"),
+  ].join(":");
 }
 
 function getTopWeightedActions(options: NormalizedExperimentOptions, limit: number): Action[] {

@@ -128,12 +128,14 @@ flowchart TD
     A --> D["Action deletions"]
     A --> E["Double elemental replacements"]
     A --> H["Duration-2 relocations"]
+    A --> I["Cost-isomorphic replacements"]
 
     B --> F["Queue, dedupe, cap"]
     C --> F
     D --> F
     E --> F
     H --> F
+    I --> F
     F --> G["Evaluate before normal offspring"]
 ```
 
@@ -149,7 +151,11 @@ That raised the best score from `76186.46` to `77414.10`. Duration-two searches
 also get a bounded relocate neighborhood: one action can move to another slot in
 the same turn. This is intentionally disabled for duration-three searches after
 benchmarks showed it can spend useful T3 queue capacity without improving the
-best long-line score.
+best long-line score. Long T3 searches and the wider two-turn 8-action setup
+also get a small set of cost-isomorphic single-action replacements. These keep
+the AP/PM/PW/BQ vector unchanged, which lets the neighbor search substitute
+damage or setup spells without immediately breaking the resource shape of an
+elite branch.
 
 ## Resource-aware fresh branches
 
