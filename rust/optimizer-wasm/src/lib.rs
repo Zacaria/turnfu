@@ -551,6 +551,30 @@ pub struct HybridRestartResult {
     pub metrics: BTreeMap<String, u32>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HybridViolationInput {
+    pub violation_type: String,
+    pub turn_index: u32,
+    pub action_index: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HybridRepairQueueResult {
+    pub queue: Vec<OptimizerCandidateInput>,
+    pub enqueued: bool,
+    pub metrics: BTreeMap<String, u32>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HybridNeighborResult {
+    pub queue: Vec<OptimizerCandidateInput>,
+    pub generated: u32,
+    pub metrics: BTreeMap<String, u32>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct OptimizerCandidateInput {
@@ -838,6 +862,343 @@ pub fn inject_hybrid_immigrants(
     })
 }
 
+pub fn crossover_candidates(
+    request: &OptimizerRequest,
+    parent_a: &OptimizerCandidateInput,
+    parent_b: &OptimizerCandidateInput,
+    rng: &mut SeededRandom,
+) -> Result<OptimizerCandidateInput, String> {
+    let catalog = read_search_catalog(request)?;
+    let turns = parent_a
+        .plan
+        .turns
+        .iter()
+        .enumerate()
+        .map(|(index, turn)| {
+            if rng.chance(0.5) {
+                turn.clone()
+            } else {
+                parent_b
+                    .plan
+                    .turns
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_else(|| turn.clone())
+            }
+        })
+        .collect();
+    let passive_ids = crossover_passive_ids(
+        &parent_a.passive_ids,
+        &parent_b.passive_ids,
+        request,
+        &catalog,
+        rng,
+    );
+
+    Ok(OptimizerCandidateInput {
+        passive_ids,
+        plan: CandidatePlan { turns },
+    })
+}
+
+pub fn mutate_candidate(
+    request: &OptimizerRequest,
+    candidate: &OptimizerCandidateInput,
+    rng: &mut SeededRandom,
+) -> Result<OptimizerCandidateInput, String> {
+    let catalog = read_search_catalog(request)?;
+    let actions = get_search_actions(request, &catalog);
+    if actions.is_empty() {
+        return Err("Cannot mutate Rust candidate without available spells.".to_string());
+    }
+
+    let mut next = candidate.clone();
+    if rng.chance(0.35) {
+        next.passive_ids = mutate_passive_ids(&next.passive_ids, request, &catalog, rng);
+    }
+
+    let Some(turn_index) = select_mutation_turn_index(request, &next, rng) else {
+        return Ok(create_random_candidate(request, &catalog, &actions, rng));
+    };
+    if next.plan.turns.get(turn_index).is_none() {
+        return Ok(create_random_candidate(request, &catalog, &actions, rng));
+    }
+
+    if request.duration >= 2 && request.iterations >= 80 {
+        let target_flip_spell_ids = actions
+            .iter()
+            .filter(|action| {
+                action
+                    .target
+                    .as_ref()
+                    .is_some_and(|target| target.kind == ActionTargetKind::EmptyCell)
+            })
+            .map(|action| action.spell_id.clone())
+            .collect::<BTreeSet<_>>();
+
+        let flippable_turn_index = if request.iterations >= 160
+            && !turn_has_target_flip(&next.plan.turns[turn_index], &target_flip_spell_ids)
+        {
+            next.plan
+                .turns
+                .iter()
+                .position(|turn| turn_has_target_flip(turn, &target_flip_spell_ids))
+                .unwrap_or(turn_index)
+        } else {
+            turn_index
+        };
+        let flippable_indexes = next.plan.turns[flippable_turn_index]
+            .actions
+            .iter()
+            .enumerate()
+            .filter(|(_, action)| target_flip_spell_ids.contains(&action.spell_id))
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+
+        if !flippable_indexes.is_empty() {
+            let index = *rng.pick(&flippable_indexes);
+            let action = &mut next.plan.turns[flippable_turn_index].actions[index];
+            action.target = if action
+                .target
+                .as_ref()
+                .is_some_and(|target| target.kind == ActionTargetKind::EmptyCell)
+            {
+                None
+            } else {
+                Some(CandidateActionTarget {
+                    kind: ActionTargetKind::EmptyCell,
+                })
+            };
+            return Ok(next);
+        }
+    }
+
+    let turn = next
+        .plan
+        .turns
+        .get_mut(turn_index)
+        .expect("turn should exist after index check");
+    if rng.chance(0.25) && turn.actions.len() < request.max_actions_per_turn as usize {
+        turn.actions.push(rng.pick(&actions).clone());
+        return Ok(next);
+    }
+
+    let delete_chance = if request.duration >= 3
+        && turn.actions.len() >= ((request.max_actions_per_turn as f64) * 0.75).ceil() as usize
+    {
+        0.45
+    } else {
+        0.25
+    };
+    if rng.chance(delete_chance) && turn.actions.len() > 1 {
+        let index = rng.integer(0, (turn.actions.len() - 1) as u32) as usize;
+        turn.actions.remove(index);
+        return Ok(next);
+    }
+
+    if !turn.actions.is_empty() {
+        let index = rng.integer(0, (turn.actions.len() - 1) as u32) as usize;
+        turn.actions[index] = rng.pick(&actions).clone();
+    }
+    Ok(next)
+}
+
+pub fn create_hybrid_local_refinement(
+    request: &OptimizerRequest,
+    population: Vec<HybridPopulationEntry>,
+    rng: &mut SeededRandom,
+) -> Result<OptimizerCandidateInput, String> {
+    if population.is_empty() {
+        return sample_candidate_with_rng(request, "random", rng);
+    }
+
+    let ranked = rank_population(population);
+    let parent_index = rng.integer(0, std::cmp::min(4, ranked.len() as u32 - 1)) as usize;
+    let mut candidate = ranked[parent_index].candidate.clone();
+    let mutation_count = rng.integer(1, 3);
+    for _index in 0..mutation_count {
+        candidate = mutate_candidate(request, &candidate, rng)?;
+    }
+    Ok(candidate)
+}
+
+pub fn create_hybrid_repair_candidate(
+    input: &OptimizerCandidateInput,
+    violation: &HybridViolationInput,
+) -> Option<OptimizerCandidateInput> {
+    if violation.violation_type == "unknownSpell" {
+        return None;
+    }
+
+    let turn_index = violation.turn_index as usize;
+    let action_index = violation.action_index as usize;
+    let turn = input.plan.turns.get(turn_index)?;
+    if action_index >= turn.actions.len() || turn.actions.len() <= 1 {
+        return None;
+    }
+
+    let mut candidate = input.clone();
+    let actions = &mut candidate.plan.turns[turn_index].actions;
+    let delete_count = if input.plan.turns.len() >= 2 {
+        actions.len() - action_index
+    } else {
+        1
+    };
+    actions.drain(action_index..action_index + delete_count);
+    Some(candidate)
+}
+
+pub fn enqueue_hybrid_repair_candidate(
+    request: &OptimizerRequest,
+    mut queue: Vec<OptimizerCandidateInput>,
+    candidate: Option<OptimizerCandidateInput>,
+) -> HybridRepairQueueResult {
+    let mut metrics = BTreeMap::new();
+    let Some(candidate) = candidate else {
+        return HybridRepairQueueResult {
+            queue,
+            enqueued: false,
+            metrics,
+        };
+    };
+
+    if queue.len() >= 512 || (request.duration < 3 && request.iterations < 80) {
+        return HybridRepairQueueResult {
+            queue,
+            enqueued: false,
+            metrics,
+        };
+    }
+
+    let key = encode_candidate(&normalize_candidate(candidate.clone()));
+    if queue
+        .iter()
+        .any(|queued| encode_candidate(&normalize_candidate(queued.clone())) == key)
+    {
+        return HybridRepairQueueResult {
+            queue,
+            enqueued: false,
+            metrics,
+        };
+    }
+
+    queue.push(normalize_candidate(candidate));
+    metrics.insert("hybridRepairQueueCandidates".to_string(), 1);
+    HybridRepairQueueResult {
+        queue,
+        enqueued: true,
+        metrics,
+    }
+}
+
+pub fn enqueue_hybrid_elite_neighbors(
+    request: &OptimizerRequest,
+    mut queue: Vec<OptimizerCandidateInput>,
+    input: &OptimizerCandidateInput,
+) -> Result<HybridNeighborResult, String> {
+    let catalog = read_search_catalog(request)?;
+    let actions = get_top_weighted_actions(request, &catalog, 20);
+    let mut seen = queue
+        .iter()
+        .map(|candidate| encode_candidate(&normalize_candidate(candidate.clone())))
+        .collect::<BTreeSet<_>>();
+    let mut metrics = BTreeMap::new();
+    let mut generated = 0_u32;
+
+    add_passive_neighbors(
+        request,
+        &catalog,
+        &mut queue,
+        input,
+        &mut seen,
+        &mut metrics,
+        &mut generated,
+    );
+
+    for turn_index in (0..input.plan.turns.len()).rev() {
+        let turn = &input.plan.turns[turn_index];
+        for action_index in 0..turn.actions.len().saturating_sub(1) {
+            if encode_candidate_action(&turn.actions[action_index])
+                == encode_candidate_action(&turn.actions[action_index + 1])
+            {
+                continue;
+            }
+            let mut candidate = input.clone();
+            candidate.plan.turns[turn_index]
+                .actions
+                .swap(action_index, action_index + 1);
+            add_elite_neighbor(
+                &mut queue,
+                candidate,
+                &mut seen,
+                &mut metrics,
+                &mut generated,
+                Some("hybridOrderNeighborCandidates"),
+            );
+        }
+
+        if turn.actions.len() > 1 {
+            for action_index in 0..turn.actions.len() {
+                let mut candidate = input.clone();
+                candidate.plan.turns[turn_index]
+                    .actions
+                    .remove(action_index);
+                add_elite_neighbor(
+                    &mut queue,
+                    candidate,
+                    &mut seen,
+                    &mut metrics,
+                    &mut generated,
+                    None,
+                );
+            }
+        }
+
+        if turn.actions.len() < request.max_actions_per_turn as usize {
+            for action in actions.iter().take(4) {
+                let mut candidate = input.clone();
+                candidate.plan.turns[turn_index]
+                    .actions
+                    .push(action.clone());
+                add_elite_neighbor(
+                    &mut queue,
+                    candidate,
+                    &mut seen,
+                    &mut metrics,
+                    &mut generated,
+                    None,
+                );
+            }
+        }
+
+        for action_index in 0..turn.actions.len() {
+            for action in &actions {
+                if encode_candidate_action(&turn.actions[action_index])
+                    == encode_candidate_action(action)
+                {
+                    continue;
+                }
+                let mut candidate = input.clone();
+                candidate.plan.turns[turn_index].actions[action_index] = action.clone();
+                add_elite_neighbor(
+                    &mut queue,
+                    candidate,
+                    &mut seen,
+                    &mut metrics,
+                    &mut generated,
+                    Some("hybridReplacementNeighborCandidates"),
+                );
+            }
+        }
+    }
+
+    Ok(HybridNeighborResult {
+        queue,
+        generated,
+        metrics,
+    })
+}
+
 fn compare_population_entries(
     left: &HybridPopulationEntry,
     right: &HybridPopulationEntry,
@@ -959,6 +1320,282 @@ fn descriptor_distance(left: &[String], right: &[String]) -> f64 {
     } else {
         1.0 - (intersection as f64 / union as f64)
     }
+}
+
+fn crossover_passive_ids(
+    parent_a_passive_ids: &[String],
+    parent_b_passive_ids: &[String],
+    request: &OptimizerRequest,
+    catalog: &[SearchCatalogEntry],
+    rng: &mut SeededRandom,
+) -> Vec<String> {
+    let available = get_available_passive_ids(request, catalog)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let mut inherited = parent_a_passive_ids
+        .iter()
+        .chain(parent_b_passive_ids.iter())
+        .filter(|passive_id| available.contains(*passive_id))
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    inherited.sort();
+
+    let mut selected = Vec::new();
+    for passive_id in inherited {
+        if selected.len() >= request.max_passive_count as usize {
+            break;
+        }
+        let in_parent_a = parent_a_passive_ids.contains(&passive_id);
+        let in_parent_b = parent_b_passive_ids.contains(&passive_id);
+        if (in_parent_a && in_parent_b) || rng.chance(0.5) {
+            selected.push(passive_id);
+        }
+    }
+
+    selected.sort();
+    selected
+}
+
+fn mutate_passive_ids(
+    current_passive_ids: &[String],
+    request: &OptimizerRequest,
+    catalog: &[SearchCatalogEntry],
+    rng: &mut SeededRandom,
+) -> Vec<String> {
+    let available_passive_ids = get_available_passive_ids(request, catalog);
+    if available_passive_ids.is_empty() || request.max_passive_count == 0 {
+        return Vec::new();
+    }
+
+    let available = available_passive_ids.iter().collect::<BTreeSet<_>>();
+    let mut next = current_passive_ids
+        .iter()
+        .filter(|passive_id| available.contains(passive_id))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let missing = available_passive_ids
+        .iter()
+        .filter(|passive_id| !next.contains(*passive_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let can_add = next.len()
+        < std::cmp::min(
+            request.max_passive_count as usize,
+            available_passive_ids.len(),
+        )
+        && !missing.is_empty();
+    let can_remove = !next.is_empty();
+
+    if can_add && (!can_remove || rng.chance(0.45)) {
+        next.insert(pick_weighted_passive_id(&missing, request, catalog, rng));
+    } else if can_remove && (!can_add || rng.chance(0.35)) {
+        let choices = next.iter().cloned().collect::<Vec<_>>();
+        next.remove(rng.pick(&choices));
+    } else if can_add && can_remove {
+        let choices = next.iter().cloned().collect::<Vec<_>>();
+        next.remove(rng.pick(&choices));
+        next.insert(pick_weighted_passive_id(&missing, request, catalog, rng));
+    }
+
+    next.into_iter().collect()
+}
+
+fn select_mutation_turn_index(
+    request: &OptimizerRequest,
+    candidate: &OptimizerCandidateInput,
+    rng: &mut SeededRandom,
+) -> Option<usize> {
+    if candidate.plan.turns.is_empty() {
+        return None;
+    }
+
+    if request.iterations >= 160
+        && request.iterations < 240
+        && request.duration == 3
+        && request.max_actions_per_turn >= 12
+        && request.max_passive_count > 3
+        && rng.chance(0.25)
+    {
+        let max_action_count = candidate
+            .plan
+            .turns
+            .iter()
+            .map(|turn| turn.actions.len())
+            .max()
+            .unwrap_or(0);
+        let densest_indexes = candidate
+            .plan
+            .turns
+            .iter()
+            .enumerate()
+            .filter(|(_, turn)| turn.actions.len() == max_action_count)
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        return Some(*rng.pick(&densest_indexes));
+    }
+
+    Some(rng.integer(0, (candidate.plan.turns.len() - 1) as u32) as usize)
+}
+
+fn turn_has_target_flip(turn: &CandidateTurn, target_flip_spell_ids: &BTreeSet<String>) -> bool {
+    turn.actions
+        .iter()
+        .any(|action| target_flip_spell_ids.contains(&action.spell_id))
+}
+
+fn add_passive_neighbors(
+    request: &OptimizerRequest,
+    catalog: &[SearchCatalogEntry],
+    queue: &mut Vec<OptimizerCandidateInput>,
+    input: &OptimizerCandidateInput,
+    seen: &mut BTreeSet<String>,
+    metrics: &mut BTreeMap<String, u32>,
+    generated: &mut u32,
+) {
+    let mut available_passive_ids = get_available_passive_ids(request, catalog);
+    available_passive_ids.sort_by(|left, right| {
+        get_passive_search_weight(right, request, catalog)
+            .partial_cmp(&get_passive_search_weight(left, request, catalog))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let active_passive_ids = input
+        .passive_ids
+        .iter()
+        .filter(|passive_id| available_passive_ids.contains(passive_id))
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let missing_passive_ids = available_passive_ids
+        .iter()
+        .filter(|passive_id| !active_passive_ids.contains(passive_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let passive_limit = std::cmp::min(
+        request.max_passive_count as usize,
+        available_passive_ids.len(),
+    );
+
+    for passive_id in &active_passive_ids {
+        let mut candidate = input.clone();
+        candidate.passive_ids = active_passive_ids
+            .iter()
+            .filter(|active_passive_id| *active_passive_id != passive_id)
+            .cloned()
+            .collect();
+        add_elite_neighbor(
+            queue,
+            candidate,
+            seen,
+            metrics,
+            generated,
+            Some("hybridPassiveNeighborCandidates"),
+        );
+    }
+
+    if active_passive_ids.len() < passive_limit {
+        for passive_id in missing_passive_ids.iter().take(12) {
+            let mut candidate = input.clone();
+            candidate.passive_ids = active_passive_ids
+                .iter()
+                .cloned()
+                .chain(std::iter::once(passive_id.clone()))
+                .collect();
+            candidate.passive_ids.sort();
+            add_elite_neighbor(
+                queue,
+                candidate,
+                seen,
+                metrics,
+                generated,
+                Some("hybridPassiveNeighborCandidates"),
+            );
+        }
+    }
+
+    for passive_id in &active_passive_ids {
+        for replacement_passive_id in missing_passive_ids.iter().take(8) {
+            let mut candidate = input.clone();
+            candidate.passive_ids = active_passive_ids
+                .iter()
+                .filter(|active_passive_id| *active_passive_id != passive_id)
+                .cloned()
+                .chain(std::iter::once(replacement_passive_id.clone()))
+                .collect();
+            candidate.passive_ids.sort();
+            add_elite_neighbor(
+                queue,
+                candidate,
+                seen,
+                metrics,
+                generated,
+                Some("hybridPassiveNeighborCandidates"),
+            );
+        }
+    }
+}
+
+fn add_elite_neighbor(
+    queue: &mut Vec<OptimizerCandidateInput>,
+    candidate: OptimizerCandidateInput,
+    seen: &mut BTreeSet<String>,
+    metrics: &mut BTreeMap<String, u32>,
+    generated: &mut u32,
+    metric: Option<&str>,
+) -> bool {
+    const MAX_QUEUE_SIZE: usize = 1_024;
+    const MAX_GENERATED: u32 = 640;
+    if queue.len() >= MAX_QUEUE_SIZE || *generated >= MAX_GENERATED {
+        return false;
+    }
+
+    let normalized = normalize_candidate(candidate);
+    let key = encode_candidate(&normalized);
+    if seen.contains(&key) {
+        return false;
+    }
+
+    seen.insert(key);
+    queue.push(normalized);
+    *generated += 1;
+    if let Some(metric) = metric {
+        *metrics.entry(metric.to_string()).or_insert(0) += 1;
+    }
+    true
+}
+
+fn get_top_weighted_actions(
+    request: &OptimizerRequest,
+    catalog: &[SearchCatalogEntry],
+    limit: usize,
+) -> Vec<CandidateAction> {
+    let entries_by_id = catalog
+        .iter()
+        .map(|entry| (entry.id.as_str(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let mut weighted_actions = get_search_actions(request, catalog)
+        .into_iter()
+        .map(|action| {
+            let weight = entries_by_id
+                .get(action.spell_id.as_str())
+                .map(|entry| get_action_search_weight(entry))
+                .unwrap_or(1.0);
+            (action, weight)
+        })
+        .collect::<Vec<_>>();
+    weighted_actions.sort_by(|left, right| {
+        right
+            .1
+            .partial_cmp(&left.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    weighted_actions
+        .into_iter()
+        .take(std::cmp::max(1, limit))
+        .map(|(action, _)| action)
+        .collect()
 }
 
 fn create_random_candidate(
@@ -2935,6 +3572,88 @@ pub fn inject_hybrid_immigrants_json(
     })
 }
 
+#[wasm_bindgen]
+pub fn crossover_candidates_json(
+    request_json: &str,
+    parent_a_json: &str,
+    parent_b_json: &str,
+    seed: &str,
+) -> Result<String, JsValue> {
+    let request = parse_optimizer_request(request_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid optimizer request JSON: {error}")))?;
+    let parent_a: OptimizerCandidateInput = serde_json::from_str(parent_a_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid parent A JSON: {error}")))?;
+    let parent_b: OptimizerCandidateInput = serde_json::from_str(parent_b_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid parent B JSON: {error}")))?;
+    let mut rng = SeededRandom::new(seed);
+    let candidate = crossover_candidates(&request, &parent_a, &parent_b, &mut rng)
+        .map_err(|error| JsValue::from_str(&error))?;
+    serde_json::to_string(&candidate).map_err(|error| {
+        JsValue::from_str(&format!(
+            "Failed to serialize Rust crossover candidate: {error}"
+        ))
+    })
+}
+
+#[wasm_bindgen]
+pub fn mutate_candidate_json(
+    request_json: &str,
+    candidate_json: &str,
+    seed: &str,
+) -> Result<String, JsValue> {
+    let request = parse_optimizer_request(request_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid optimizer request JSON: {error}")))?;
+    let candidate: OptimizerCandidateInput = serde_json::from_str(candidate_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid candidate JSON: {error}")))?;
+    let mut rng = SeededRandom::new(seed);
+    let candidate = mutate_candidate(&request, &candidate, &mut rng)
+        .map_err(|error| JsValue::from_str(&error))?;
+    serde_json::to_string(&candidate).map_err(|error| {
+        JsValue::from_str(&format!(
+            "Failed to serialize Rust mutated candidate: {error}"
+        ))
+    })
+}
+
+#[wasm_bindgen]
+pub fn create_hybrid_repair_candidate_json(
+    candidate_json: &str,
+    violation_json: &str,
+) -> Result<String, JsValue> {
+    let candidate: OptimizerCandidateInput = serde_json::from_str(candidate_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid candidate JSON: {error}")))?;
+    let violation: HybridViolationInput = serde_json::from_str(violation_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid violation JSON: {error}")))?;
+    serde_json::to_string(&create_hybrid_repair_candidate(&candidate, &violation)).map_err(
+        |error| {
+            JsValue::from_str(&format!(
+                "Failed to serialize Rust repair candidate: {error}"
+            ))
+        },
+    )
+}
+
+#[wasm_bindgen]
+pub fn enqueue_hybrid_elite_neighbors_json(
+    request_json: &str,
+    queue_json: &str,
+    candidate_json: &str,
+) -> Result<String, JsValue> {
+    let request = parse_optimizer_request(request_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid optimizer request JSON: {error}")))?;
+    let queue: Vec<OptimizerCandidateInput> = serde_json::from_str(queue_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid queue JSON: {error}")))?;
+    let candidate: OptimizerCandidateInput = serde_json::from_str(candidate_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid candidate JSON: {error}")))?;
+    let result = enqueue_hybrid_elite_neighbors(&request, queue, &candidate)
+        .map_err(|error| JsValue::from_str(&error))?;
+    serde_json::to_string(&result).map_err(|error| {
+        JsValue::from_str(&format!(
+            "Failed to serialize Rust elite neighbors: {error}"
+        ))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3251,6 +3970,205 @@ mod tests {
             },
             score,
             valid: true,
+        }
+    }
+
+    #[test]
+    fn crossovers_mutates_and_refines_candidates() {
+        let request = transformation_request();
+        let parent_a = candidate_from_actions(vec!["hit", "cell"], vec!["passive-a"]);
+        let parent_b = candidate_from_actions(vec!["burst", "hit"], vec!["passive-b"]);
+        let mut rng = SeededRandom::new("transform");
+
+        let crossover = crossover_candidates(&request, &parent_a, &parent_b, &mut rng)
+            .expect("crossover should produce candidate");
+        assert_eq!(crossover.plan.turns.len(), parent_a.plan.turns.len());
+        assert!(crossover.passive_ids.len() <= request.max_passive_count as usize);
+
+        let mutated = mutate_candidate(&request, &parent_a, &mut rng)
+            .expect("mutation should produce candidate");
+        assert_eq!(mutated.plan.turns.len(), parent_a.plan.turns.len());
+        assert!(mutated
+            .plan
+            .turns
+            .iter()
+            .all(|turn| !turn.actions.is_empty()
+                && turn.actions.len() <= request.max_actions_per_turn as usize));
+
+        let refined = create_hybrid_local_refinement(
+            &request,
+            vec![
+                HybridPopulationEntry {
+                    id: "a".to_string(),
+                    candidate: parent_a,
+                    score: 10.0,
+                    valid: true,
+                },
+                HybridPopulationEntry {
+                    id: "b".to_string(),
+                    candidate: parent_b,
+                    score: 20.0,
+                    valid: true,
+                },
+            ],
+            &mut rng,
+        )
+        .expect("local refinement should produce candidate");
+        assert_eq!(refined.plan.turns.len(), request.duration as usize);
+    }
+
+    #[test]
+    fn repairs_and_deduplicates_repair_queue_candidates() {
+        let request = transformation_request();
+        let candidate = OptimizerCandidateInput {
+            passive_ids: vec![],
+            plan: CandidatePlan {
+                turns: vec![
+                    CandidateTurn {
+                        actions: vec![action("hit"), action("burst"), action("cell")],
+                    },
+                    CandidateTurn {
+                        actions: vec![action("hit")],
+                    },
+                ],
+            },
+        };
+        let violation = HybridViolationInput {
+            violation_type: "insufficientResource".to_string(),
+            turn_index: 0,
+            action_index: 1,
+        };
+
+        let repair = create_hybrid_repair_candidate(&candidate, &violation)
+            .expect("repair should remove invalid suffix");
+        assert_eq!(repair.plan.turns[0].actions.len(), 1);
+
+        let first = enqueue_hybrid_repair_candidate(&request, vec![], Some(repair.clone()));
+        assert!(first.enqueued);
+        assert_eq!(first.queue.len(), 1);
+        assert_eq!(first.metrics.get("hybridRepairQueueCandidates"), Some(&1));
+
+        let duplicate = enqueue_hybrid_repair_candidate(&request, first.queue, Some(repair));
+        assert!(!duplicate.enqueued);
+        assert_eq!(duplicate.queue.len(), 1);
+    }
+
+    #[test]
+    fn generates_elite_neighbors_with_metrics() {
+        let request = transformation_request();
+        let candidate = OptimizerCandidateInput {
+            passive_ids: vec!["passive-a".to_string()],
+            plan: CandidatePlan {
+                turns: vec![
+                    CandidateTurn {
+                        actions: vec![action("hit"), action("burst")],
+                    },
+                    CandidateTurn {
+                        actions: vec![action("cell")],
+                    },
+                ],
+            },
+        };
+
+        let result = enqueue_hybrid_elite_neighbors(&request, vec![], &candidate)
+            .expect("neighbors should generate");
+
+        assert!(result.generated > 0);
+        assert_eq!(result.queue.len(), result.generated as usize);
+        assert!(result.metrics.values().any(|value| *value > 0));
+        assert!(result
+            .queue
+            .iter()
+            .all(|neighbor| neighbor.plan.turns.len() == candidate.plan.turns.len()));
+    }
+
+    fn transformation_request() -> OptimizerRequest {
+        parse_optimizer_request(
+            r#"{
+              "schemaVersion":1,
+              "engine":"hybrid",
+              "seed":"transform",
+              "duration":2,
+              "iterations":200,
+              "maxActionsPerTurn":4,
+              "maxPassiveCount":2,
+              "availableSpellIds":["burst","cell","hit"],
+              "availablePassiveIds":["passive-a","passive-b"],
+              "catalog":[
+                {
+                  "kind":"spell",
+                  "id":"burst",
+                  "cost":{"ap":3},
+                  "effects":[{"type":"damage","base":50,"element":"fire"}],
+                  "constraints":[],
+                  "tags":["burst"]
+                },
+                {
+                  "kind":"spell",
+                  "id":"cell",
+                  "cost":{"ap":1},
+                  "effects":[],
+                  "constraints":[{"type":"requiresTarget","target":"emptyCell"}],
+                  "tags":[]
+                },
+                {
+                  "kind":"spell",
+                  "id":"hit",
+                  "cost":{"ap":1},
+                  "effects":[{"type":"damage","base":20,"element":"fire"}],
+                  "constraints":[],
+                  "tags":[]
+                },
+                {
+                  "kind":"passive",
+                  "id":"passive-a",
+                  "effects":[{"type":"statModifier","stat":"damageInflictedPercent","amount":10}],
+                  "constraints":[],
+                  "tags":["damage"]
+                },
+                {
+                  "kind":"passive",
+                  "id":"passive-b",
+                  "effects":[],
+                  "constraints":[],
+                  "tags":["bq"]
+                }
+              ],
+              "character":{"id":"test","resources":{"ap":6,"mp":3,"wp":2,"bq":100}}
+            }"#,
+        )
+        .expect("request should parse")
+    }
+
+    fn candidate_from_actions(
+        spell_ids: Vec<&str>,
+        passive_ids: Vec<&str>,
+    ) -> OptimizerCandidateInput {
+        OptimizerCandidateInput {
+            passive_ids: passive_ids.into_iter().map(str::to_string).collect(),
+            plan: CandidatePlan {
+                turns: vec![
+                    CandidateTurn {
+                        actions: spell_ids.into_iter().map(action).collect(),
+                    },
+                    CandidateTurn {
+                        actions: vec![action("hit")],
+                    },
+                ],
+            },
+        }
+    }
+
+    fn action(spell_id: &str) -> CandidateAction {
+        CandidateAction {
+            spell_id: spell_id.to_string(),
+            target: if spell_id == "cell" {
+                Some(CandidateActionTarget {
+                    kind: ActionTargetKind::EmptyCell,
+                })
+            } else {
+                None
+            },
         }
     }
 
