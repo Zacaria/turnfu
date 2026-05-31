@@ -1663,6 +1663,18 @@ function createDomainWarmupCandidates(
       });
     }
 
+    const projectedTurns = createProjectedDomainSeedTurns(seed.turns, options, actionByKey);
+    if (projectedTurns && serializeTurnKeys(projectedTurns) !== serializeTurnKeys(baseTurns)) {
+      for (const passiveIds of passiveVariants) {
+        candidates.push({
+          passiveIds,
+          plan: {
+            turns: projectedTurns.map(cloneTurn),
+          },
+        });
+      }
+    }
+
     if (seed.turns.length < options.duration) {
       for (const turn of baseTurns.slice(0, seed.turns.length)) {
         if (turn.actions.length === 0) {
@@ -1696,6 +1708,81 @@ function createDomainWarmupCandidates(
   }
 
   return candidates;
+}
+
+function createProjectedDomainSeedTurns(
+  seedTurns: string[][],
+  options: NormalizedExperimentOptions,
+  actionByKey: Map<string, Action>,
+): TurnPlan[] | undefined {
+  const turns: TurnPlan[] = [];
+  for (const seedTurn of seedTurns) {
+    const projectedKeys = projectDomainSeedTurn(seedTurn, options, actionByKey);
+    if (projectedKeys.length === 0) {
+      return undefined;
+    }
+    const actions = projectedKeys.map((actionKey) => actionByKey.get(actionKey));
+    if (actions.some((action) => !action)) {
+      return undefined;
+    }
+    turns.push({ actions: actions.map((action) => cloneAction(action!)) });
+  }
+
+  return [
+    ...turns,
+    ...Array.from({ length: options.duration - seedTurns.length }, () => ({ actions: [] })),
+  ];
+}
+
+function projectDomainSeedTurn(
+  seedTurn: string[],
+  options: NormalizedExperimentOptions,
+  actionByKey: Map<string, Action>,
+): string[] {
+  if (seedTurn.length <= options.maxActionsPerTurn) {
+    return seedTurn;
+  }
+
+  const pivotSpellIds = new Set([
+    "coeur-de-lumiere",
+    "runification",
+    "fleche-de-lumiere",
+    "epee-de-lumiere",
+    "halo-chatoyant",
+  ]);
+  const entriesBySpellId = new Map(options.catalog.map((entry) => [entry.id, entry]));
+  const scored = seedTurn.map((actionKey, index) => {
+    const action = actionByKey.get(actionKey);
+    const spell = action ? entriesBySpellId.get(action.spellId) : undefined;
+    return {
+      actionKey,
+      index,
+      keep: action ? pivotSpellIds.has(action.spellId) : false,
+      score: spell ? getActionSearchWeight(spell) : 0,
+    };
+  });
+  const selectedIndexes = new Set(scored
+    .filter((entry) => entry.keep)
+    .slice(0, options.maxActionsPerTurn)
+    .map((entry) => entry.index));
+
+  for (const entry of scored
+    .filter((candidate) => !selectedIndexes.has(candidate.index))
+    .sort((left, right) => right.score - left.score || left.index - right.index)) {
+    if (selectedIndexes.size >= options.maxActionsPerTurn) {
+      break;
+    }
+    selectedIndexes.add(entry.index);
+  }
+
+  return scored
+    .filter((entry) => selectedIndexes.has(entry.index))
+    .sort((left, right) => left.index - right.index)
+    .map((entry) => entry.actionKey);
+}
+
+function serializeTurnKeys(turns: TurnPlan[]): string {
+  return turns.map((turn) => turn.actions.map(serializeAction).join(",")).join("|");
 }
 
 function createDomainSeedPassiveVariants(

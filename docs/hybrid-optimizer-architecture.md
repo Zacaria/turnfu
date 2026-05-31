@@ -316,6 +316,12 @@ best known branches. The capped T2 warmups currently seed `71364.22` for the
 7-action/3-passive setup and `73204.18` for the 8-action/2-passive setup; the
 3-passive seed is gated by passive capacity so it does not delay the 2-passive
 branch at very small budgets.
+When a seed turn has more actions than the current action cap, the original
+prefix-truncated seed stays first, then the warmup list can add one projected
+variant that keeps Huppermage pivots and fills the remaining slots with the
+highest weighted original actions while preserving their order. This gives capped
+T2 searches a better structural warmup without changing the deterministic
+16-iteration seed-first behavior.
 
 Larger structured moves remain useful, for example:
 
