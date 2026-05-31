@@ -247,19 +247,17 @@ at least 75% full, deletion is sampled more often than on sparse turns, which
 keeps long T3 offspring from repeatedly over-spending saturated suffixes while
 leaving T2 capped searches unchanged.
 
-For three-turn searches, invalid candidates now contribute one repair candidate
+For multi-turn searches, invalid candidates now contribute one repair candidate
 when the simulator reports a precise failing `turnIndex` and `actionIndex`. The
-T3 repair trims the rest of the failing turn from that action onward, then queues
+repair trims the rest of the failing turn from that action onward, then queues
 the shortened plan as a normal future hybrid candidate. This keeps the valid
 prefix while avoiding several repeated invalid repair attempts on an over-spent
-suffix. T2 repairs still remove only the failing action: benchmarks showed large
-T3 validity gains from suffix trimming, while T2 capped searches should keep
-their existing fine-grained exploration. T2 repair is enabled only beyond tiny
-budgets, so 16-iteration warmups still prioritize immediate elite neighbors while
-longer capped searches can cut invalid candidates. Repair processing is also
-burst-capped to two consecutive repairs. After that, the loop must give queued
-elite neighbors or normal offspring a chance to run; this prevents repair
-cascades from starving exploration on long budgets.
+suffix. T2 repair is enabled only beyond tiny budgets, so 16-iteration warmups
+still prioritize immediate elite neighbors while longer capped searches can cut
+invalid candidates. Repair processing is also burst-capped to two consecutive
+repairs. After that, the loop must give queued elite neighbors or normal
+offspring a chance to run; this prevents repair cascades from starving
+exploration on long budgets.
 
 Three-turn elite neighbors also include a small targeted relocate pass around
 Huppermage pivot spells such as `coeur-de-lumiere`, `runification`,

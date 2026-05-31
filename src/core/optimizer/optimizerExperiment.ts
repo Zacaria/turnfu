@@ -693,8 +693,8 @@ function createHybridRepairCandidate(
 
   const candidate = cloneCandidateInput(input);
   const actions = candidate.plan.turns[violation.turnIndex]!.actions;
-  // Long T3 branches often fail because the suffix over-spends after a valid prefix.
-  const deleteCount = input.plan.turns.length >= 3
+  // Long branches often fail because the suffix over-spends after a valid prefix.
+  const deleteCount = input.plan.turns.length >= 2
     ? actions.length - violation.actionIndex
     : 1;
   actions.splice(violation.actionIndex, deleteCount);
