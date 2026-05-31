@@ -81,7 +81,7 @@ import {
   SavedComboComparisonPage,
   SetupPage,
   type OptimizerWorkspaceSession,
-} from "./ResearchWorkspacePages.tsx?v=optimizer-session-ref-v1";
+} from "./ResearchWorkspacePages.tsx?v=save-run-feedback-v1";
 import {
   createBalancedElementSet,
   createBuild,
@@ -834,6 +834,9 @@ export function App() {
     const savedCandidateIds = getBuildSavedCombos(researchWorkspace, activeBuild.id)
       .filter((comboReference) => comboReference.setupSnapshotId === activeSetup.id)
       .map((comboReference) => createOptimizerCandidateId(comboReference.plan));
+    const savedRunKeys = getBuildRuns(researchWorkspace, activeBuild.id)
+      .filter((run) => run.setupSnapshotId === activeSetup.id)
+      .map((run) => `${run.setupSnapshotId}:${run.criteriaSummary}`);
 
     return (
       <>
@@ -845,6 +848,7 @@ export function App() {
           key={activeSetup.id}
           setup={activeSetup}
           savedCandidateIds={savedCandidateIds}
+          savedRunKeys={savedRunKeys}
           onBack={() => setResearchRoute(returnToPrevious(researchRoute))}
           onOpenCandidate={(candidate) => {
             openSetupInBuilder(activeSetup, candidate);
@@ -979,7 +983,9 @@ export function App() {
                           />
                           <button
                             aria-label={t("action.addToEnd")}
+                            aria-disabled={!selectedCatalogEntry || selectedCatalogEntry.kind === "passive"}
                             className="sequence-add"
+                            title={t("action.addToEnd")}
                             type="button"
                             onDragOver={(event) => allowTurnTimelineDrop(event, turnRow.turnIndex, turnActions.length)}
                             onDrop={(event) => dropOnTurnTimeline(event, turnRow.turnIndex, turnActions.length)}

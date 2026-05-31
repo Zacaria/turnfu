@@ -2284,19 +2284,26 @@ body {
 
 .setup-summary {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
   gap: 10px;
-  align-items: center;
+  align-items: start;
 }
 
 .setup-summary-main {
   display: grid;
   gap: 3px;
+  width: 100%;
   border: 0;
+  border-radius: 4px;
   background: transparent;
   color: #e9f0ec;
-  padding: 0;
+  padding: 6px;
   text-align: left;
+}
+
+.setup-summary-main:hover,
+.setup-summary-main:focus-visible {
+  background: #162224;
+  outline: 1px solid #32484e;
 }
 
 .thin-row,
@@ -2374,6 +2381,75 @@ body {
 .optimizer-run-button {
   min-height: 54px;
   align-self: end;
+}
+
+@media (max-width: 900px) {
+  .research-layout,
+  .build-columns {
+    grid-template-columns: 1fr;
+  }
+
+  .research-sidebar,
+  .research-main-list,
+  .workspace-section {
+    width: 100%;
+  }
+
+  .research-toolbar,
+  .research-hero,
+  .build-header,
+  .section-title-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .research-toolbar .search-control,
+  .header-actions,
+  .setup-summary-actions,
+  .candidate-actions {
+    width: 100%;
+  }
+
+  .setup-detail-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .optimizer-controls {
+    align-items: stretch;
+  }
+}
+
+@media (max-width: 560px) {
+  .research-shell {
+    padding: 10px;
+  }
+
+  .research-hero,
+  .build-header {
+    padding: 12px;
+  }
+
+  .build-row {
+    grid-template-columns: 30px minmax(0, 1fr);
+  }
+
+  .build-row-metrics {
+    grid-column: 2;
+  }
+
+  .setup-detail-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .optimizer-controls fieldset,
+  .optimizer-duration-choice {
+    width: 100%;
+  }
+
+  .optimizer-duration-choice .duration-segment {
+    flex: 1 1 0;
+    min-width: 0;
+  }
 }
 
 .optimizer-stop-button {
@@ -3095,6 +3171,16 @@ body {
   height: 66px;
   border-style: dashed;
   color: #89a29b;
+}
+
+.sequence-add[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.sequence-rack.dragging .sequence-add[aria-disabled="true"] {
+  cursor: copy;
+  opacity: 1;
 }
 
 .detail-panel {

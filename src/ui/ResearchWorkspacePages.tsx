@@ -461,6 +461,7 @@ export function OptimizerWorkspacePage({
   onSaveRun,
   onSessionChange,
   savedCandidateIds,
+  savedRunKeys,
   setup,
 }: {
   build: ResearchBuild;
@@ -472,6 +473,7 @@ export function OptimizerWorkspacePage({
   onSaveRun: (controls: OptimizerWorkspaceControls) => void;
   onSessionChange?: (session: OptimizerWorkspaceSession) => void;
   savedCandidateIds: string[];
+  savedRunKeys: string[];
   setup: SetupSnapshot;
 }) {
   const [controls, setControls] = useState<OptimizerWorkspaceControls>(() => initialSession?.controls ?? createDefaultOptimizerControls());
@@ -497,6 +499,8 @@ export function OptimizerWorkspacePage({
   const pinnedCandidates = getPinnedCandidates(lastRunGroups, pinnedIds);
   const isRunning = runStatus === "running";
   const controlsDirty = lastRun !== null && createOptimizerControlsKey(lastRun.controls) !== createOptimizerControlsKey(normalizedControls);
+  const currentRunSaveKey = lastRun ? createOptimizerRunSaveKey(setup.id, lastRun.controls) : null;
+  const currentRunSaved = currentRunSaveKey ? savedRunKeys.includes(currentRunSaveKey) : false;
 
   useEffect(() => () => {
     if (runTimerRef.current !== null) {
@@ -649,10 +653,10 @@ export function OptimizerWorkspacePage({
             className="secondary-button"
             type="button"
             onClick={() => lastRun ? onSaveRun(lastRun.controls) : undefined}
-            disabled={!lastRun || isRunning}
+            disabled={!lastRun || isRunning || currentRunSaved}
           >
             <Save size={16} />
-            Sauvegarder run
+            {currentRunSaved ? "Run sauvegardé" : "Sauvegarder run"}
           </button>
           <span className="status-pill status-ok">{lastRun ? `${lastRun.controls.duration}T` : "Prêt"}</span>
         </div>
@@ -967,10 +971,17 @@ function CandidateRow({
         </div>
       </div>
       <div className="candidate-actions">
-        <button className={pinned ? "icon-button active" : "icon-button"} type="button" onClick={onTogglePin} title="Épingler">
+        <button
+          aria-label={pinned ? "Retirer de la comparaison" : "Épingler pour comparer"}
+          className={pinned ? "icon-button active" : "icon-button"}
+          type="button"
+          onClick={onTogglePin}
+          title={pinned ? "Retirer de la comparaison" : "Épingler pour comparer"}
+        >
           {pinned ? <Check size={15} /> : <Pin size={15} />}
         </button>
         <button
+          aria-label={saved ? "Combo sauvegardé" : "Sauvegarder combo"}
           className={saved ? "icon-button active" : "icon-button"}
           type="button"
           onClick={onSave}
@@ -1126,6 +1137,10 @@ function createOptimizerControlsKey(controls: OptimizerWorkspaceControls): strin
     searchMethod: normalized.searchMethod,
     targetElement: normalized.targetElement,
   });
+}
+
+export function createOptimizerRunSaveKey(setupId: string, controls: OptimizerWorkspaceControls): string {
+  return `${setupId}:${summarizeOptimizerControls(controls)}`;
 }
 
 function EmptyState({ body, title }: { body: string; title: string }) {
