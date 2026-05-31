@@ -102,15 +102,7 @@ export function runRustWasmDifferentialSuite(wasm: RustWasmDifferentialWasmExpor
 
     if (mismatch) {
       mismatchCount += 1;
-      firstMismatch ??= {
-        fixture: fixture.name,
-        category: fixture.kind,
-        actionIndex: "actionIndex" in fixture ? fixture.actionIndex : undefined,
-        spellId: "spellId" in fixture ? fixture.spellId : undefined,
-        fieldPath: mismatch.fieldPath,
-        typeScriptValue: mismatch.typeScriptValue,
-        rustWasmValue: mismatch.rustWasmValue,
-      };
+      firstMismatch ??= createMismatchReport(fixture, mismatch, rustValue);
     }
   }
 
@@ -120,6 +112,77 @@ export function runRustWasmDifferentialSuite(wasm: RustWasmDifferentialWasmExpor
     mismatchCount,
     firstMismatch,
     elapsedMs: Math.round((performance.now() - startedAt) * 100) / 100,
+  };
+}
+
+function createMismatchReport(
+  fixture: RustWasmDifferentialFixture,
+  mismatch: { fieldPath: string; typeScriptValue: unknown; rustWasmValue: unknown },
+  rustValue: unknown,
+): RustWasmDifferentialMismatch {
+  const candidateContext = fixture.kind === "candidateBatch"
+    ? getCandidateBatchMismatchContext(fixture, mismatch.fieldPath, rustValue)
+    : {};
+
+  return {
+    fixture: fixture.name,
+    category: fixture.kind,
+    seed: "seed" in fixture ? fixture.seed : undefined,
+    turnIndex: "turnIndex" in fixture ? fixture.turnIndex : candidateContext.turnIndex,
+    actionIndex: "actionIndex" in fixture ? fixture.actionIndex : candidateContext.actionIndex,
+    spellId: "spellId" in fixture ? fixture.spellId : candidateContext.spellId,
+    fieldPath: mismatch.fieldPath,
+    typeScriptValue: mismatch.typeScriptValue,
+    rustWasmValue: mismatch.rustWasmValue,
+  };
+}
+
+function getCandidateBatchMismatchContext(
+  fixture: Extract<RustWasmDifferentialFixture, { kind: "candidateBatch" }>,
+  fieldPath: string,
+  rustValue: unknown,
+): Pick<RustWasmDifferentialMismatch, "turnIndex" | "actionIndex" | "spellId"> {
+  const candidateIndex = getCandidateIndexFromFieldPath(fieldPath);
+  if (candidateIndex === undefined) {
+    return {};
+  }
+
+  const typeScriptResult = Array.isArray(fixture.expected)
+    ? fixture.expected[candidateIndex]
+    : undefined;
+  const rustResult = Array.isArray(rustValue)
+    ? rustValue[candidateIndex]
+    : undefined;
+  const violation = getFirstViolationContext(typeScriptResult) ?? getFirstViolationContext(rustResult);
+  if (violation) {
+    return violation;
+  }
+
+  const candidate = fixture.candidates[candidateIndex];
+  const firstAction = candidate?.plan.turns[0]?.actions[0];
+  return {
+    turnIndex: firstAction ? 0 : undefined,
+    actionIndex: firstAction ? 0 : undefined,
+    spellId: firstAction?.spellId,
+  };
+}
+
+function getCandidateIndexFromFieldPath(fieldPath: string): number | undefined {
+  const match = /^\$\[(\d+)\]/.exec(fieldPath);
+  return match ? Number(match[1]) : undefined;
+}
+
+function getFirstViolationContext(
+  result: unknown,
+): Pick<RustWasmDifferentialMismatch, "turnIndex" | "actionIndex" | "spellId"> | undefined {
+  if (!isRecord(result) || !isRecord(result.firstViolation)) {
+    return undefined;
+  }
+
+  return {
+    turnIndex: typeof result.firstViolation.turnIndex === "number" ? result.firstViolation.turnIndex : undefined,
+    actionIndex: typeof result.firstViolation.actionIndex === "number" ? result.firstViolation.actionIndex : undefined,
+    spellId: typeof result.firstViolation.spellId === "string" ? result.firstViolation.spellId : undefined,
   };
 }
 
