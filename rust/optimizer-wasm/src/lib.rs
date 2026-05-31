@@ -611,6 +611,550 @@ fn action_target_kind_key(kind: &ActionTargetKind) -> &'static str {
     }
 }
 
+pub fn sample_candidate(
+    request: &OptimizerRequest,
+    mode: &str,
+) -> Result<OptimizerCandidateInput, String> {
+    let catalog = read_search_catalog(request)?;
+    let actions = get_search_actions(request, &catalog);
+    if actions.is_empty() {
+        return Err("Cannot sample Rust candidate without available spells.".to_string());
+    }
+
+    let mut rng = SeededRandom::new(&request.seed);
+    match mode {
+        "random" => Ok(create_random_candidate(
+            request, &catalog, &actions, &mut rng,
+        )),
+        "resourceAware" => Ok(create_resource_aware_candidate(
+            request, &catalog, &actions, &mut rng,
+        )),
+        _ => Err(format!(
+            "Unknown Rust candidate sampler mode '{mode}'. Expected 'random' or 'resourceAware'."
+        )),
+    }
+}
+
+fn create_random_candidate(
+    request: &OptimizerRequest,
+    catalog: &[SearchCatalogEntry],
+    actions: &[CandidateAction],
+    rng: &mut SeededRandom,
+) -> OptimizerCandidateInput {
+    OptimizerCandidateInput {
+        passive_ids: pick_random_passives(request, catalog, rng),
+        plan: CandidatePlan {
+            turns: (0..request.duration)
+                .map(|_| CandidateTurn {
+                    actions: (0..rng.integer(1, request.max_actions_per_turn))
+                        .map(|_| rng.pick(actions).clone())
+                        .collect(),
+                })
+                .collect(),
+        },
+    }
+}
+
+fn create_resource_aware_candidate(
+    request: &OptimizerRequest,
+    catalog: &[SearchCatalogEntry],
+    actions: &[CandidateAction],
+    rng: &mut SeededRandom,
+) -> OptimizerCandidateInput {
+    let entries_by_id = catalog
+        .iter()
+        .map(|entry| (entry.id.as_str(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let base_resources = read_request_resources(&request.character);
+    let mut resources = base_resources;
+    let mut turns = Vec::new();
+
+    for _turn_index in 0..request.duration {
+        resources.ap = base_resources.ap;
+        resources.mp = base_resources.mp;
+
+        let mut turn_actions = Vec::new();
+        let mut casts_by_spell_id: BTreeMap<String, u32> = BTreeMap::new();
+        let mut target_casts_by_spell_id: BTreeMap<String, u32> = BTreeMap::new();
+        let min_actions = std::cmp::max(
+            1,
+            ((request.max_actions_per_turn as f64) * 0.55).floor() as u32,
+        );
+        let target_action_count = rng.integer(min_actions, request.max_actions_per_turn);
+
+        for _action_index in 0..target_action_count {
+            let affordable_actions = actions
+                .iter()
+                .filter(|action| {
+                    entries_by_id
+                        .get(action.spell_id.as_str())
+                        .is_some_and(|spell| {
+                            can_use_action_softly(
+                                action,
+                                spell,
+                                resources,
+                                &casts_by_spell_id,
+                                &target_casts_by_spell_id,
+                            )
+                        })
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+
+            if affordable_actions.is_empty() {
+                break;
+            }
+
+            let action = pick_weighted_action(&affordable_actions, &entries_by_id, rng).clone();
+            turn_actions.push(action.clone());
+            if let Some(spell) = entries_by_id.get(action.spell_id.as_str()) {
+                resources = apply_soft_action_resources(resources, spell);
+                *casts_by_spell_id.entry(spell.id.clone()).or_insert(0) += 1;
+                if counts_as_soft_target_cast(&action) {
+                    *target_casts_by_spell_id
+                        .entry(spell.id.clone())
+                        .or_insert(0) += 1;
+                }
+            }
+        }
+
+        if turn_actions.is_empty() {
+            turn_actions.push(rng.pick(actions).clone());
+        }
+
+        turns.push(CandidateTurn {
+            actions: turn_actions,
+        });
+    }
+
+    OptimizerCandidateInput {
+        passive_ids: pick_random_passives(request, catalog, rng),
+        plan: CandidatePlan { turns },
+    }
+}
+
+impl SeededRandom {
+    pub fn pick<'a, T>(&mut self, values: &'a [T]) -> &'a T {
+        let index = self.integer(0, (values.len() - 1) as u32) as usize;
+        &values[index]
+    }
+
+    pub fn chance(&mut self, probability: f64) -> bool {
+        self.next() < probability
+    }
+}
+
+#[derive(Clone, Debug)]
+struct SearchCatalogEntry {
+    id: String,
+    kind: String,
+    cost: SpellCost,
+    constraints: Vec<Value>,
+    effects: Vec<Value>,
+    tags: Vec<String>,
+}
+
+fn read_search_catalog(request: &OptimizerRequest) -> Result<Vec<SearchCatalogEntry>, String> {
+    let entries = request
+        .catalog
+        .as_array()
+        .ok_or_else(|| "Expected optimizer request catalog to be an array.".to_string())?;
+
+    Ok(entries
+        .iter()
+        .map(|entry| SearchCatalogEntry {
+            id: read_string_field(entry, "id").unwrap_or_default(),
+            kind: read_string_field(entry, "kind").unwrap_or_default(),
+            cost: read_spell_cost(entry.get("cost")),
+            constraints: entry
+                .get("constraints")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+            effects: entry
+                .get("effects")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+            tags: entry
+                .get("tags")
+                .and_then(Value::as_array)
+                .map(|tags| {
+                    tags.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default(),
+        })
+        .collect())
+}
+
+fn read_request_resources(character: &Value) -> ResourcePool {
+    read_resource_pool(character.get("resources"))
+}
+
+fn read_resource_pool(value: Option<&Value>) -> ResourcePool {
+    ResourcePool {
+        ap: read_i32_field(value, "ap"),
+        mp: read_i32_field(value, "mp"),
+        wp: read_i32_field(value, "wp"),
+        bq: read_i32_field(value, "bq"),
+    }
+}
+
+fn read_spell_cost(value: Option<&Value>) -> SpellCost {
+    SpellCost {
+        ap: read_i32_field(value, "ap"),
+        mp: read_i32_field(value, "mp"),
+        wp: read_i32_field(value, "wp"),
+        bq: read_i32_field(value, "bq"),
+    }
+}
+
+fn get_search_actions(
+    request: &OptimizerRequest,
+    catalog: &[SearchCatalogEntry],
+) -> Vec<CandidateAction> {
+    let entries_by_id = catalog
+        .iter()
+        .map(|entry| (entry.id.as_str(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let mut spell_ids = if request.available_spell_ids.is_empty() {
+        catalog
+            .iter()
+            .filter(|entry| entry.kind == "spell")
+            .map(|entry| entry.id.clone())
+            .collect::<Vec<_>>()
+    } else {
+        request.available_spell_ids.clone()
+    };
+    spell_ids.sort();
+    spell_ids.dedup();
+
+    let mut actions = Vec::new();
+    for spell_id in spell_ids {
+        let Some(entry) = entries_by_id.get(spell_id.as_str()) else {
+            continue;
+        };
+        if entry.kind != "spell" {
+            continue;
+        }
+
+        actions.push(CandidateAction {
+            spell_id: spell_id.clone(),
+            target: None,
+        });
+
+        if entry.constraints.iter().any(|constraint| {
+            read_string_field(constraint, "type").is_some_and(|constraint_type| {
+                constraint_type == "maxCastsPerTarget"
+                    || (constraint_type == "requiresTarget"
+                        && read_string_field(constraint, "target")
+                            .is_some_and(|target| target == "emptyCell"))
+            })
+        }) {
+            actions.push(CandidateAction {
+                spell_id,
+                target: Some(CandidateActionTarget {
+                    kind: ActionTargetKind::EmptyCell,
+                }),
+            });
+        }
+    }
+
+    actions
+}
+
+fn pick_random_passives(
+    request: &OptimizerRequest,
+    catalog: &[SearchCatalogEntry],
+    rng: &mut SeededRandom,
+) -> Vec<String> {
+    let passive_ids = get_available_passive_ids(request, catalog);
+    if passive_ids.is_empty() || request.max_passive_count == 0 {
+        return Vec::new();
+    }
+
+    let passive_limit = std::cmp::min(request.max_passive_count as usize, passive_ids.len());
+    let target_count = if rng.chance(0.8) {
+        rng.integer(std::cmp::min(1, passive_limit) as u32, passive_limit as u32) as usize
+    } else {
+        rng.integer(0, passive_limit as u32) as usize
+    };
+    let mut selected = Vec::new();
+    let mut remaining = passive_ids;
+
+    while selected.len() < target_count && !remaining.is_empty() {
+        let passive_id = pick_weighted_passive_id(&remaining, request, catalog, rng);
+        selected.push(passive_id.clone());
+        remaining.retain(|entry| entry != &passive_id);
+    }
+
+    selected.sort();
+    selected
+}
+
+fn get_available_passive_ids(
+    request: &OptimizerRequest,
+    catalog: &[SearchCatalogEntry],
+) -> Vec<String> {
+    let catalog_passive_ids = catalog
+        .iter()
+        .filter(|entry| entry.kind == "passive")
+        .map(|entry| entry.id.as_str())
+        .collect::<Vec<_>>();
+    let mut passive_ids = request
+        .available_passive_ids
+        .iter()
+        .filter(|passive_id| {
+            catalog_passive_ids
+                .iter()
+                .any(|catalog_id| catalog_id == passive_id)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    passive_ids.sort();
+    passive_ids.dedup();
+    passive_ids
+}
+
+fn pick_weighted_passive_id(
+    passive_ids: &[String],
+    request: &OptimizerRequest,
+    catalog: &[SearchCatalogEntry],
+    rng: &mut SeededRandom,
+) -> String {
+    let total_weight = passive_ids
+        .iter()
+        .map(|passive_id| get_passive_search_weight(passive_id, request, catalog))
+        .sum::<f64>();
+    let mut cursor = rng.next() * total_weight;
+
+    for passive_id in passive_ids {
+        cursor -= get_passive_search_weight(passive_id, request, catalog);
+        if cursor <= 0.0 {
+            return passive_id.clone();
+        }
+    }
+
+    passive_ids.last().cloned().unwrap_or_default()
+}
+
+fn get_passive_search_weight(
+    passive_id: &str,
+    _request: &OptimizerRequest,
+    catalog: &[SearchCatalogEntry],
+) -> f64 {
+    let Some(passive) = catalog
+        .iter()
+        .find(|entry| entry.id == passive_id && entry.kind == "passive")
+    else {
+        return 1.0;
+    };
+
+    let mut weight = 1.0;
+    for effect in &passive.effects {
+        if read_string_field(effect, "type").as_deref() == Some("statModifier")
+            && read_string_field(effect, "stat").as_deref() == Some("damageInflictedPercent")
+        {
+            let amount = read_f64_field(Some(effect), "amount");
+            if amount > 0.0 {
+                weight += amount / 5.0;
+            }
+        }
+    }
+
+    for tag in &passive.tags {
+        if ["damage", "abondance", "bq", "heart"].contains(&tag.as_str()) {
+            weight += 2.0;
+        }
+    }
+
+    weight
+}
+
+fn can_use_action_softly(
+    action: &CandidateAction,
+    spell: &SearchCatalogEntry,
+    resources: ResourcePool,
+    casts_by_spell_id: &BTreeMap<String, u32>,
+    target_casts_by_spell_id: &BTreeMap<String, u32>,
+) -> bool {
+    if !can_afford_cost(resources, spell.cost) {
+        return false;
+    }
+
+    for constraint in &spell.constraints {
+        match read_string_field(constraint, "type").as_deref() {
+            Some("requiresTarget") => {
+                if action.target.as_ref().map(|target| &target.kind)
+                    != read_action_target_kind(constraint.get("target")).as_ref()
+                {
+                    return false;
+                }
+            }
+            Some("maxCastsPerTurn") => {
+                if casts_by_spell_id.get(&spell.id).copied().unwrap_or(0)
+                    >= read_u32_field(Some(constraint), "value")
+                {
+                    return false;
+                }
+            }
+            Some("maxCastsPerTarget") => {
+                if counts_as_soft_target_cast(action)
+                    && target_casts_by_spell_id
+                        .get(&spell.id)
+                        .copied()
+                        .unwrap_or(0)
+                        >= read_u32_field(Some(constraint), "value")
+                {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    true
+}
+
+fn can_afford_cost(resources: ResourcePool, cost: SpellCost) -> bool {
+    cost.ap.max(0) <= resources.ap
+        && cost.mp.max(0) <= resources.mp
+        && cost.wp.max(0) <= resources.wp
+        && cost.bq.max(0) <= resources.bq
+}
+
+fn apply_soft_action_resources(
+    mut resources: ResourcePool,
+    spell: &SearchCatalogEntry,
+) -> ResourcePool {
+    resources.ap -= spell.cost.ap.max(0);
+    resources.mp -= spell.cost.mp.max(0);
+    resources.wp -= spell.cost.wp.max(0);
+    resources.bq -= spell.cost.bq.max(0);
+
+    for effect in &spell.effects {
+        if read_string_field(effect, "type").as_deref() == Some("resourceDelta")
+            && read_string_field(effect, "target")
+                .map(|target| target == "caster")
+                .unwrap_or(true)
+        {
+            let amount = read_i32_field(Some(effect), "amount");
+            match read_string_field(effect, "resource").as_deref() {
+                Some("ap") => resources.ap = (resources.ap + amount).max(0),
+                Some("mp") => resources.mp = (resources.mp + amount).max(0),
+                Some("wp") => resources.wp = (resources.wp + amount).max(0),
+                Some("bq") => resources.bq = (resources.bq + amount).max(0),
+                _ => {}
+            }
+        }
+    }
+
+    resources
+}
+
+fn pick_weighted_action<'a>(
+    actions: &'a [CandidateAction],
+    entries_by_id: &BTreeMap<&str, &SearchCatalogEntry>,
+    rng: &mut SeededRandom,
+) -> &'a CandidateAction {
+    let total_weight = actions
+        .iter()
+        .map(|action| {
+            entries_by_id
+                .get(action.spell_id.as_str())
+                .map(|spell| get_action_search_weight(spell))
+                .unwrap_or(1.0)
+        })
+        .sum::<f64>();
+    let mut cursor = rng.next() * total_weight;
+
+    for action in actions {
+        cursor -= entries_by_id
+            .get(action.spell_id.as_str())
+            .map(|spell| get_action_search_weight(spell))
+            .unwrap_or(1.0);
+        if cursor <= 0.0 {
+            return action;
+        }
+    }
+
+    actions.last().unwrap_or(&actions[0])
+}
+
+fn get_action_search_weight(spell: &SearchCatalogEntry) -> f64 {
+    let mut weight = 1.0;
+    for effect in &spell.effects {
+        if read_string_field(effect, "type").as_deref() == Some("damage") {
+            weight += (read_f64_field(Some(effect), "base")
+                * read_f64_field(Some(effect), "times").max(1.0))
+                / 25.0;
+        }
+        if read_string_field(effect, "type").as_deref() == Some("resourceDelta")
+            && read_string_field(effect, "target")
+                .map(|target| target == "caster")
+                .unwrap_or(true)
+            && read_i32_field(Some(effect), "amount") > 0
+        {
+            weight += 1.0;
+        }
+    }
+
+    for tag in &spell.tags {
+        if ["light", "burst", "rune-consumer", "mark", "scales-with-bq"].contains(&tag.as_str()) {
+            weight += 2.0;
+        }
+    }
+
+    weight.max(1.0)
+}
+
+fn counts_as_soft_target_cast(action: &CandidateAction) -> bool {
+    action
+        .target
+        .as_ref()
+        .map(|target| target.kind != ActionTargetKind::EmptyCell)
+        .unwrap_or(true)
+}
+
+fn read_action_target_kind(value: Option<&Value>) -> Option<ActionTargetKind> {
+    match value.and_then(Value::as_str) {
+        Some("emptyCell") => Some(ActionTargetKind::EmptyCell),
+        Some("feuFollet") => Some(ActionTargetKind::FeuFollet),
+        Some("fighter") => Some(ActionTargetKind::Fighter),
+        Some("ally") => Some(ActionTargetKind::Ally),
+        Some("enemy") => Some(ActionTargetKind::Enemy),
+        _ => None,
+    }
+}
+
+fn read_string_field(value: &Value, field: &str) -> Option<String> {
+    value.get(field).and_then(Value::as_str).map(str::to_string)
+}
+
+fn read_i32_field(value: Option<&Value>, field: &str) -> i32 {
+    value
+        .and_then(|entry| entry.get(field))
+        .and_then(Value::as_i64)
+        .unwrap_or(0) as i32
+}
+
+fn read_u32_field(value: Option<&Value>, field: &str) -> u32 {
+    value
+        .and_then(|entry| entry.get(field))
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as u32
+}
+
+fn read_f64_field(value: Option<&Value>, field: &str) -> f64 {
+    value
+        .and_then(|entry| entry.get(field))
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0)
+}
+
 pub fn resolve_action_context(context: Option<PartialActionContext>) -> ActionContext {
     let context = context.unwrap_or(PartialActionContext {
         position: None,
@@ -2023,6 +2567,18 @@ pub fn sample_seeded_random_json(seed: &str, count: u32) -> Result<String, JsVal
     })
 }
 
+#[wasm_bindgen]
+pub fn sample_candidate_json(request_json: &str, mode: &str) -> Result<String, JsValue> {
+    let request = parse_optimizer_request(request_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid optimizer request JSON: {error}")))?;
+    let candidate = sample_candidate(&request, mode).map_err(|error| JsValue::from_str(&error))?;
+    serde_json::to_string(&candidate).map_err(|error| {
+        JsValue::from_str(&format!(
+            "Failed to serialize sampled Rust candidate: {error}"
+        ))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2124,6 +2680,119 @@ mod tests {
             normalize_candidate(candidate).passive_ids,
             vec!["passive-a".to_string(), "passive-z".to_string()]
         );
+    }
+
+    #[test]
+    fn samples_random_candidates_from_request_actions() {
+        let request = parse_optimizer_request(
+            r#"{
+              "schemaVersion":1,
+              "engine":"hybrid",
+              "seed":"sampler-random",
+              "duration":2,
+              "iterations":100,
+              "maxActionsPerTurn":3,
+              "maxPassiveCount":2,
+              "availableSpellIds":["hit","cell"],
+              "availablePassiveIds":["passive-a","passive-z"],
+              "catalog":[
+                {
+                  "kind":"spell",
+                  "id":"cell",
+                  "cost":{"ap":1},
+                  "effects":[],
+                  "constraints":[{"type":"requiresTarget","target":"emptyCell"}],
+                  "tags":[]
+                },
+                {
+                  "kind":"spell",
+                  "id":"hit",
+                  "cost":{"ap":2},
+                  "effects":[{"type":"damage","base":25,"element":"fire"}],
+                  "constraints":[],
+                  "tags":["burst"]
+                },
+                {
+                  "kind":"passive",
+                  "id":"passive-a",
+                  "effects":[{"type":"statModifier","stat":"damageInflictedPercent","amount":10}],
+                  "constraints":[],
+                  "tags":["damage"]
+                },
+                {
+                  "kind":"passive",
+                  "id":"passive-z",
+                  "effects":[],
+                  "constraints":[],
+                  "tags":[]
+                }
+              ],
+              "character":{"id":"test","resources":{"ap":6,"mp":3,"wp":2,"bq":100}}
+            }"#,
+        )
+        .expect("request should parse");
+
+        let first = sample_candidate(&request, "random").expect("random candidate should sample");
+        let second =
+            sample_candidate(&request, "random").expect("random candidate should be deterministic");
+
+        assert_eq!(first, second);
+        assert_eq!(first.plan.turns.len(), 2);
+        assert!(first
+            .plan
+            .turns
+            .iter()
+            .all(|turn| { !turn.actions.is_empty() && turn.actions.len() <= 3 }));
+        assert_eq!(first.passive_ids, {
+            let mut ids = first.passive_ids.clone();
+            ids.sort();
+            ids
+        });
+    }
+
+    #[test]
+    fn samples_resource_aware_candidates_from_affordable_actions() {
+        let request = parse_optimizer_request(
+            r#"{
+              "schemaVersion":1,
+              "engine":"hybrid",
+              "seed":"sampler-resource-aware",
+              "duration":1,
+              "iterations":100,
+              "maxActionsPerTurn":4,
+              "maxPassiveCount":0,
+              "availableSpellIds":["cheap","expensive"],
+              "availablePassiveIds":[],
+              "catalog":[
+                {
+                  "kind":"spell",
+                  "id":"cheap",
+                  "cost":{"ap":2},
+                  "effects":[{"type":"damage","base":10,"element":"fire"}],
+                  "constraints":[],
+                  "tags":[]
+                },
+                {
+                  "kind":"spell",
+                  "id":"expensive",
+                  "cost":{"ap":10},
+                  "effects":[{"type":"damage","base":100,"element":"fire"}],
+                  "constraints":[],
+                  "tags":["burst"]
+                }
+              ],
+              "character":{"id":"test","resources":{"ap":4,"mp":3,"wp":2,"bq":100}}
+            }"#,
+        )
+        .expect("request should parse");
+
+        let candidate = sample_candidate(&request, "resourceAware")
+            .expect("resource-aware candidate should sample");
+        let actions = &candidate.plan.turns[0].actions;
+
+        assert!(!actions.is_empty());
+        assert!(actions.len() <= 2);
+        assert!(actions.iter().all(|action| action.spell_id == "cheap"));
     }
 
     #[test]
