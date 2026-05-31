@@ -1533,9 +1533,9 @@ function getHuppermageDomainSeedCandidates(): Array<{ passiveIds: string[]; turn
         [
           "coeur-de-lumiere",
           "runification",
-          "eboulement",
           "debacle",
           "fleche-de-lumiere",
+          "eboulement",
           "ombres-dansantes",
           "halo-chatoyant",
           "epee-de-lumiere",
