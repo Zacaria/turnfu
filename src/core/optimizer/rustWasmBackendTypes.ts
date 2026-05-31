@@ -1,5 +1,5 @@
 import type { CatalogEntry } from "../catalog/types.ts";
-import type { ComboSimulationOptions, SimulatedCharacter } from "../simulation/types.ts";
+import type { ComboPlan, ComboSimulationOptions, SimulatedCharacter } from "../simulation/types.ts";
 import type { ComboOptimizationCriterion, ComboSustainability } from "./comboOptimizer.ts";
 import type { OptimizerExperimentBackendKind, OptimizerExperimentEngineKind, OptimizerExperimentOptions } from "./optimizerExperiment.ts";
 
@@ -35,6 +35,24 @@ export type RustWasmOptimizerResponse = {
   metrics: Record<string, number>;
 };
 
+export type RustWasmOptimizerCandidateBatchResponse = {
+  schemaVersion: typeof RUST_WASM_OPTIMIZER_SCHEMA_VERSION;
+  backend: OptimizerExperimentBackendKind;
+  supported: boolean;
+  engine: OptimizerExperimentEngineKind;
+  seed: string;
+  attempts: number;
+  candidates: Array<{
+    passiveIds?: string[];
+    plan: ComboPlan;
+  }>;
+  metrics: Record<string, number>;
+};
+
+export type RustWasmOptimizerWasmExports = {
+  generate_hybrid_candidates_json: (requestJson: string) => string;
+};
+
 export function createRustWasmOptimizerRequest(options: OptimizerExperimentOptions): RustWasmOptimizerRequest {
   const engine = options.engines.length === 1 ? options.engines[0] : undefined;
   if (!engine) {
@@ -49,7 +67,7 @@ export function createRustWasmOptimizerRequest(options: OptimizerExperimentOptio
     iterations: clampInteger(options.budget.iterations, 1, 1_000_000_000),
     maxActionsPerTurn: clampInteger(options.maxActionsPerTurn ?? 3, 1, 12),
     maxPassiveCount: clampInteger(options.maxPassiveCount ?? 0, 0, 6),
-    availableSpellIds: [...(options.availableSpellIds ?? [])].sort(),
+    availableSpellIds: [...(options.availableSpellIds ?? getDefaultAvailableSpellIds(options.catalog))].sort(),
     availablePassiveIds: [...(options.availablePassiveIds ?? [])].sort(),
     catalog: normalizeCatalogForRustWasm(options.catalog),
     character: cloneJson(options.character),
@@ -68,6 +86,10 @@ function normalizeCatalogForRustWasm(catalog: CatalogEntry[]): CatalogEntry[] {
   return [...catalog]
     .sort((left, right) => left.id.localeCompare(right.id))
     .map((entry) => cloneJson(entry));
+}
+
+function getDefaultAvailableSpellIds(catalog: CatalogEntry[]): string[] {
+  return catalog.filter((entry) => entry.kind === "spell").map((entry) => entry.id);
 }
 
 function cloneJson<T>(value: T): T {

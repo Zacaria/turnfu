@@ -480,6 +480,19 @@ pub struct OptimizerResponse {
     pub metrics: BackendMetrics,
 }
 
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HybridCandidateBatchResponse {
+    pub schema_version: u32,
+    pub backend: String,
+    pub supported: bool,
+    pub engine: String,
+    pub seed: String,
+    pub attempts: u32,
+    pub candidates: Vec<OptimizerCandidateInput>,
+    pub metrics: BTreeMap<String, u32>,
+}
+
 #[derive(Debug, Default, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct BackendMetrics {
@@ -3838,12 +3851,76 @@ pub fn inspect_optimizer_request(request: OptimizerRequest) -> OptimizerResponse
     }
 }
 
+pub fn generate_hybrid_candidates(
+    request: &OptimizerRequest,
+) -> Result<HybridCandidateBatchResponse, String> {
+    let mut metrics = BTreeMap::new();
+    let supported = request.engine == "hybrid";
+    if !supported {
+        return Ok(HybridCandidateBatchResponse {
+            schema_version: request.schema_version,
+            backend: "rustWasm".to_string(),
+            supported,
+            engine: request.engine.clone(),
+            seed: request.seed.clone(),
+            attempts: 0,
+            candidates: vec![],
+            metrics,
+        });
+    }
+
+    let mut rng = SeededRandom::new(&format!("{}:hybrid:batch", request.seed));
+    let mut candidates = Vec::with_capacity(request.iterations as usize);
+
+    for _ in 0..request.iterations {
+        let use_resource_aware = rng.chance(0.12);
+        let mode = if use_resource_aware {
+            *metrics
+                .entry("hybridResourceAwareCandidates".to_string())
+                .or_insert(0) += 1;
+            "resourceAware"
+        } else {
+            "random"
+        };
+        let candidate = sample_candidate_with_rng(request, mode, &mut rng)?;
+        candidates.push(normalize_candidate(candidate));
+    }
+
+    metrics.insert(
+        "rustWasmGeneratedCandidates".to_string(),
+        candidates.len() as u32,
+    );
+
+    Ok(HybridCandidateBatchResponse {
+        schema_version: request.schema_version,
+        backend: "rustWasm".to_string(),
+        supported,
+        engine: request.engine.clone(),
+        seed: request.seed.clone(),
+        attempts: candidates.len() as u32,
+        candidates,
+        metrics,
+    })
+}
+
 #[wasm_bindgen]
 pub fn inspect_optimizer_request_json(request_json: &str) -> Result<String, JsValue> {
     let request = parse_optimizer_request(request_json)
         .map_err(|error| JsValue::from_str(&format!("Invalid optimizer request JSON: {error}")))?;
     serde_json::to_string(&inspect_optimizer_request(request)).map_err(|error| {
         JsValue::from_str(&format!("Failed to serialize optimizer response: {error}"))
+    })
+}
+
+#[wasm_bindgen]
+pub fn generate_hybrid_candidates_json(request_json: &str) -> Result<String, JsValue> {
+    let request = parse_optimizer_request(request_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid optimizer request JSON: {error}")))?;
+    let result = generate_hybrid_candidates(&request).map_err(|error| JsValue::from_str(&error))?;
+    serde_json::to_string(&result).map_err(|error| {
+        JsValue::from_str(&format!(
+            "Failed to serialize Rust hybrid candidates: {error}"
+        ))
     })
 }
 
@@ -4099,6 +4176,26 @@ mod tests {
 
         assert!(!response.supported);
         assert_eq!(response.engine, "genetic");
+    }
+
+    #[test]
+    fn generates_hybrid_candidates_in_deterministic_batches() {
+        let mut request = transformation_request();
+        request.iterations = 12;
+        let first =
+            generate_hybrid_candidates(&request).expect("hybrid candidate batch should generate");
+        let second = generate_hybrid_candidates(&request)
+            .expect("hybrid candidate batch should be deterministic");
+
+        assert!(first.supported);
+        assert_eq!(first.backend, "rustWasm");
+        assert_eq!(first.attempts, request.iterations);
+        assert_eq!(first.candidates.len(), request.iterations as usize);
+        assert_eq!(first, second);
+        assert_eq!(
+            first.metrics.get("rustWasmGeneratedCandidates"),
+            Some(&request.iterations)
+        );
     }
 
     #[test]

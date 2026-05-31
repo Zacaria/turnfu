@@ -11,6 +11,11 @@ import {
   type ComboScoreBreakdown,
   type ComboSustainability,
 } from "./comboOptimizer.ts";
+import {
+  createRustWasmOptimizerRequest,
+  type RustWasmOptimizerCandidateBatchResponse,
+  type RustWasmOptimizerWasmExports,
+} from "./rustWasmBackendTypes.ts";
 
 export type OptimizerExperimentEngineKind = "random" | "mcts" | "novelty" | "annealing" | "genetic" | "hybrid";
 export type OptimizerExperimentBackendKind = "typescript" | "rustWasm";
@@ -179,6 +184,13 @@ type NoveltyArchiveEntry = {
 };
 
 const DEFAULT_EVALUATION_CACHE_LIMIT = 20_000;
+const RUST_WASM_CANDIDATE_BATCH_SIZE = 5_000;
+
+let rustWasmOptimizerWasmExports: RustWasmOptimizerWasmExports | undefined;
+
+export function configureRustWasmOptimizerBackend(wasm: RustWasmOptimizerWasmExports | undefined): void {
+  rustWasmOptimizerWasmExports = wasm;
+}
 
 export function runOptimizerExperiment(options: OptimizerExperimentOptions): OptimizerExperimentResult {
   const normalized = normalizeExperimentOptions(options);
@@ -199,10 +211,10 @@ const typescriptOptimizerBackend: OptimizerExperimentBackend = {
 const rustWasmOptimizerBackend: OptimizerExperimentBackend = {
   kind: "rustWasm",
   run(options) {
-    throw createUnsupportedOptimizerBackendError("rustWasm", options);
+    return runRustWasmOptimizerExperiment(options);
   },
   async runProgressive(options) {
-    throw createUnsupportedOptimizerBackendError("rustWasm", options);
+    return runRustWasmOptimizerExperiment(options);
   },
 };
 
@@ -280,6 +292,103 @@ async function runTypeScriptOptimizerExperimentProgressive(normalized: Normalize
   };
 }
 
+function runRustWasmOptimizerExperiment(normalized: NormalizedExperimentOptions): OptimizerExperimentResult {
+  if (normalized.engines.length !== 1 || normalized.engines[0] !== "hybrid") {
+    throw createUnsupportedOptimizerBackendError("rustWasm", normalized);
+  }
+
+  const engineResult = withBackendMetadata(runRustWasmHybridOptimizerEngine(normalized), "rustWasm");
+  return {
+    seed: normalized.seed,
+    duration: normalized.duration,
+    engineResults: [engineResult],
+    bestCandidate: engineResult.bestCandidate,
+  };
+}
+
+function runRustWasmHybridOptimizerEngine(normalized: NormalizedExperimentOptions): OptimizerExperimentEngineResult {
+  const wasm = getConfiguredRustWasmOptimizerBackend();
+  const evaluator = createOptimizerExperimentEvaluator(normalized);
+  const context: EngineContext = {
+    options: normalized,
+    evaluator,
+    rng: createSeededRandom(`${normalized.seed}:rustWasm:unused`),
+    sampler: createUnavailableCandidateSampler(),
+  };
+  const accumulator = createEngineAccumulator("hybrid", normalized.budget);
+  let batchIndex = 0;
+
+  while (accumulator.attempts < normalized.budget.iterations) {
+    if (normalized.signal?.aborted) {
+      break;
+    }
+
+    const remainingIterations = normalized.budget.iterations - accumulator.attempts;
+    const batchIterations = Math.min(RUST_WASM_CANDIDATE_BATCH_SIZE, remainingIterations);
+    const request = createRustWasmOptimizerRequest({
+      ...normalized,
+      engines: ["hybrid"],
+      seed: `${normalized.seed}:rustWasm:batch:${batchIndex}`,
+      budget: { iterations: batchIterations },
+    });
+    const response = parseRustWasmCandidateBatchResponse(wasm.generate_hybrid_candidates_json(JSON.stringify(request)));
+    if (!response.supported) {
+      throw createUnsupportedOptimizerBackendError("rustWasm", normalized);
+    }
+
+    accumulator.metrics.rustWasmBatchCalls = (accumulator.metrics.rustWasmBatchCalls ?? 0) + 1;
+    mergeNumericMetrics(accumulator.metrics, response.metrics);
+
+    for (const candidate of response.candidates) {
+      if (accumulator.attempts >= normalized.budget.iterations || normalized.signal?.aborted) {
+        break;
+      }
+      evaluateAndRecord(context, accumulator, candidate);
+    }
+
+    if (response.candidates.length === 0) {
+      break;
+    }
+    batchIndex += 1;
+  }
+
+  return finalizeEngineResult(context, accumulator);
+}
+
+function getConfiguredRustWasmOptimizerBackend(): RustWasmOptimizerWasmExports {
+  if (!rustWasmOptimizerWasmExports) {
+    throw new Error("Rust/WASM optimizer backend is not configured. Build/load the optimizer WASM package and call configureRustWasmOptimizerBackend(wasm) before selecting backend: 'rustWasm'.");
+  }
+  return rustWasmOptimizerWasmExports;
+}
+
+function parseRustWasmCandidateBatchResponse(responseJson: string): RustWasmOptimizerCandidateBatchResponse {
+  const parsed = JSON.parse(responseJson) as RustWasmOptimizerCandidateBatchResponse;
+  if (!Array.isArray(parsed.candidates)) {
+    throw new Error("Rust/WASM optimizer backend returned an invalid candidate batch response.");
+  }
+  return parsed;
+}
+
+function mergeNumericMetrics(target: Record<string, number>, source: Record<string, number>) {
+  for (const [key, value] of Object.entries(source)) {
+    if (Number.isFinite(value)) {
+      target[key] = (target[key] ?? 0) + value;
+    }
+  }
+}
+
+function createUnavailableCandidateSampler(): CandidateSampler {
+  const fail = () => {
+    throw new Error("Rust/WASM optimizer backend does not use the TypeScript candidate sampler.");
+  };
+  return {
+    next: fail,
+    random: fail,
+    resourceAware: fail,
+  };
+}
+
 function withBackendMetadata(
   result: OptimizerExperimentEngineResult,
   backend: OptimizerExperimentBackendKind,
@@ -292,7 +401,7 @@ function createUnsupportedOptimizerBackendError(
   options: NormalizedExperimentOptions,
 ): Error {
   const engines = options.engines.join(", ");
-  return new Error(`Optimizer backend '${backend}' is not implemented for engines: ${engines}. Use backend: 'typescript' or wait for the Rust/WASM backend port.`);
+  return new Error(`Optimizer backend '${backend}' does not support engines: ${engines}. Use backend: 'typescript' or request the hybrid engine for Rust/WASM.`);
 }
 
 export function createOptimizerExperimentEvaluator(

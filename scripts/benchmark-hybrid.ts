@@ -1,6 +1,14 @@
 import { performance } from "node:perf_hooks";
+import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
+import { resolve } from "node:path";
+import { spawnSync } from "node:child_process";
 import { huppermageCatalog } from "../src/core/catalog/index.ts";
-import { runOptimizerExperiment } from "../src/core/optimizer/index.ts";
+import {
+  configureRustWasmOptimizerBackend,
+  runOptimizerExperiment,
+  type OptimizerExperimentBackendKind,
+} from "../src/core/optimizer/index.ts";
 import { createResources } from "../src/core/simulation/index.ts";
 import type { ComboSimulationOptions, SimulatedCharacter } from "../src/core/simulation/types.ts";
 
@@ -72,6 +80,7 @@ const scenarios: HybridBenchmarkScenario[] = [
 const requestedScenarioIds = new Set(readOptionValues("--scenario"));
 const requestedBudgets = readOptionValues("--budget").map((value) => Number.parseInt(value, 10));
 const requestedSeeds = readOptionValues("--seed");
+const requestedBackends = readBackendOptions();
 const budgets = requestedBudgets.length > 0 ? requestedBudgets : [16, 100, 1_000];
 const seeds = requestedSeeds.length > 0 ? requestedSeeds : ["a", "b", "c"];
 const selectedScenarios = requestedScenarioIds.size > 0
@@ -79,53 +88,62 @@ const selectedScenarios = requestedScenarioIds.size > 0
   : scenarios;
 const availablePassiveIds = huppermageCatalog.filter((entry) => entry.kind === "passive").map((entry) => entry.id);
 
+if (requestedBackends.includes("rustWasm")) {
+  configureRustWasmOptimizerBackend(loadRustWasmBackend());
+}
+
 for (const scenario of selectedScenarios) {
   for (const budget of budgets) {
-    const groupStart = performance.now();
-    const rows = seeds.map((seed) => {
-      const runStart = performance.now();
-      const result = runOptimizerExperiment({
-        catalog: huppermageCatalog,
-        character,
-        duration: scenario.duration,
-        engines: ["hybrid"],
-        seed: `bench-${scenario.id}-${seed}`,
-        budget: { iterations: budget },
-        maxActionsPerTurn: scenario.maxActionsPerTurn,
-        maxPassiveCount: scenario.maxPassiveCount,
-        availablePassiveIds,
-        defaultActionContext,
-        maxCandidates: 5,
-        progressInterval: 1_000_000,
+    for (const backend of requestedBackends) {
+      const groupStart = performance.now();
+      const rows = seeds.map((seed) => {
+        const runStart = performance.now();
+        const result = runOptimizerExperiment({
+          catalog: huppermageCatalog,
+          character,
+          duration: scenario.duration,
+          engines: ["hybrid"],
+          backend,
+          seed: `bench-${scenario.id}-${seed}`,
+          budget: { iterations: budget },
+          maxActionsPerTurn: scenario.maxActionsPerTurn,
+          maxPassiveCount: scenario.maxPassiveCount,
+          availablePassiveIds,
+          defaultActionContext,
+          maxCandidates: 5,
+          progressInterval: 1_000_000,
+        });
+        const elapsedMs = performance.now() - runStart;
+        const engine = result.engineResults[0]!;
+        return {
+          seed,
+          backend: engine.backend,
+          elapsedMs: round(elapsedMs),
+          attemptsPerSecond: round(engine.attempts / Math.max(0.001, elapsedMs / 1_000)),
+          score: round(result.bestCandidate?.score.score ?? 0),
+          validRate: round(engine.validCandidates / Math.max(1, engine.attempts), 4),
+          attempts: engine.attempts,
+          valid: engine.validCandidates,
+          invalid: engine.invalidCandidates,
+          metrics: engine.metrics,
+        };
       });
-      const elapsedMs = performance.now() - runStart;
-      const engine = result.engineResults[0]!;
-      return {
-        seed,
+      const scores = rows.map((row) => row.score).sort((left, right) => left - right);
+      const validRates = rows.map((row) => row.validRate).sort((left, right) => left - right);
+      const elapsedMs = performance.now() - groupStart;
+      console.log(JSON.stringify({
+        scenario: scenario.id,
+        backend,
+        budget,
         elapsedMs: round(elapsedMs),
-        attemptsPerSecond: round(engine.attempts / Math.max(0.001, elapsedMs / 1_000)),
-        score: round(result.bestCandidate?.score.score ?? 0),
-        validRate: round(engine.validCandidates / Math.max(1, engine.attempts), 4),
-        attempts: engine.attempts,
-        valid: engine.validCandidates,
-        invalid: engine.invalidCandidates,
-        metrics: engine.metrics,
-      };
-    });
-    const scores = rows.map((row) => row.score).sort((left, right) => left - right);
-    const validRates = rows.map((row) => row.validRate).sort((left, right) => left - right);
-    const elapsedMs = performance.now() - groupStart;
-    console.log(JSON.stringify({
-      scenario: scenario.id,
-      budget,
-      elapsedMs: round(elapsedMs),
-      attemptsPerSecond: round(rows.reduce((total, row) => total + row.attempts, 0) / Math.max(0.001, elapsedMs / 1_000)),
-      scores,
-      medianScore: scores[Math.floor(scores.length / 2)] ?? 0,
-      validRates,
-      medianValidRate: validRates[Math.floor(validRates.length / 2)] ?? 0,
-      rows,
-    }));
+        attemptsPerSecond: round(rows.reduce((total, row) => total + row.attempts, 0) / Math.max(0.001, elapsedMs / 1_000)),
+        scores,
+        medianScore: scores[Math.floor(scores.length / 2)] ?? 0,
+        validRates,
+        medianValidRate: validRates[Math.floor(validRates.length / 2)] ?? 0,
+        rows,
+      }));
+    }
   }
 }
 
@@ -139,6 +157,47 @@ function readOptionValues(name: string): string[] {
     }
   }
   return values;
+}
+
+function readBackendOptions(): OptimizerExperimentBackendKind[] {
+  const values = readOptionValues("--backend");
+  if (process.argv.includes("--compare-backends") || values.includes("all")) {
+    return ["typescript", "rustWasm"];
+  }
+  if (values.length === 0) {
+    return ["typescript"];
+  }
+
+  return values.map((value) => {
+    if (value === "typescript" || value === "rustWasm") {
+      return value;
+    }
+    throw new Error(`Unknown benchmark backend '${value}'. Expected 'typescript', 'rustWasm', or 'all'.`);
+  });
+}
+
+function loadRustWasmBackend() {
+  const wasmPackagePath = resolve("src/wasm/optimizer_wasm_pkg/optimizer_wasm.js");
+  if (!process.argv.includes("--no-build") || !existsSync(wasmPackagePath)) {
+    const build = spawnSync("wasm-pack", [
+      "build",
+      "rust/optimizer-wasm",
+      "--target",
+      "nodejs",
+      "--out-dir",
+      "../../src/wasm/optimizer_wasm_pkg",
+    ], {
+      cwd: process.cwd(),
+      stdio: "inherit",
+    });
+
+    if (build.status !== 0) {
+      process.exit(build.status ?? 1);
+    }
+  }
+
+  const require = createRequire(import.meta.url);
+  return require(wasmPackagePath);
 }
 
 function round(value: number, digits = 2): number {

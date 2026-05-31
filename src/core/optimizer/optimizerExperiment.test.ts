@@ -4,6 +4,7 @@ import test from "node:test";
 import { cost, damage, huppermageCatalog, normalizeCatalog, normalizeEntry, passive, resourceDelta, screenshot, spell, statModifier } from "../catalog/index.ts";
 import { createResources } from "../simulation/index.ts";
 import {
+  configureRustWasmOptimizerBackend,
   createOptimizerExperimentEvaluator,
   runOptimizerExperiment,
   runOptimizerExperimentProgressive,
@@ -96,7 +97,7 @@ test("runs requested engines with common progress and deterministic seeded resul
   );
 });
 
-test("keeps TypeScript backend as default and rejects Rust backend until implemented", () => {
+test("keeps TypeScript backend as default and requires configured Rust backend", () => {
   const defaultResult = runOptimizerExperiment({
     catalog,
     character,
@@ -121,8 +122,71 @@ test("keeps TypeScript backend as default and rejects Rust backend until impleme
       budget: { iterations: 40 },
       maxActionsPerTurn: 1,
     }),
-    /Optimizer backend 'rustWasm' is not implemented/,
+    /Rust\/WASM optimizer backend is not configured/,
   );
+});
+
+test("runs configured Rust/WASM hybrid backend through the TypeScript gameplay oracle", () => {
+  configureRustWasmOptimizerBackend({
+    generate_hybrid_candidates_json(requestJson) {
+      const request = JSON.parse(requestJson);
+      return JSON.stringify({
+        schemaVersion: 1,
+        backend: "rustWasm",
+        supported: request.engine === "hybrid",
+        engine: request.engine,
+        seed: request.seed,
+        attempts: 2,
+        candidates: [
+          {
+            passiveIds: [],
+            plan: {
+              turns: [
+                { actions: [{ spellId: "hit" }] },
+                { actions: [{ spellId: "hit" }] },
+              ],
+            },
+          },
+          {
+            passiveIds: [],
+            plan: {
+              turns: [
+                { actions: [{ spellId: "setup" }] },
+                { actions: [{ spellId: "burst" }] },
+              ],
+            },
+          },
+        ],
+        metrics: {
+          rustWasmGeneratedCandidates: 2,
+        },
+      });
+    },
+  });
+
+  try {
+    const result = runOptimizerExperiment({
+      catalog,
+      character,
+      duration: 2,
+      availableSpellIds: ["setup", "hit", "burst"],
+      engines: ["hybrid"],
+      backend: "rustWasm",
+      seed: "rust-backend",
+      budget: { iterations: 2 },
+      maxActionsPerTurn: 1,
+    });
+
+    const engine = result.engineResults[0];
+    assert.equal(engine?.backend, "rustWasm");
+    assert.equal(engine?.attempts, 2);
+    assert.equal(engine?.metrics.rustWasmBatchCalls, 1);
+    assert.equal(engine?.metrics.rustWasmGeneratedCandidates, 2);
+    assert.equal(result.bestCandidate?.score.score, 144);
+    assert.equal(result.bestCandidate?.plan.turns[0]?.actions[0]?.spellId, "setup");
+  } finally {
+    configureRustWasmOptimizerBackend(undefined);
+  }
 });
 
 test("evaluates complete plans so a weak setup turn can produce the best final score", () => {
