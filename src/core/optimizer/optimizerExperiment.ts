@@ -707,7 +707,7 @@ function enqueueHybridRepairCandidate(
   context: EngineContext,
   accumulator: EngineAccumulator,
 ) {
-  if (!candidate || context.options.duration < 3 || queue.length >= 512) {
+  if (!candidate || queue.length >= 512 || (context.options.duration < 3 && context.options.budget.iterations < 80)) {
     return;
   }
 
