@@ -24,7 +24,7 @@
 
 ## 4. Differential Validation
 
-- [ ] 4.1 Add fixed differential fixtures for every Huppermage spell and supported passive touched by optimizer scenarios.
+- [x] 4.1 Add fixed differential fixtures for every Huppermage spell and supported passive touched by optimizer scenarios.
 - [ ] 4.2 Add invalid-plan fixtures covering unknown spells, insufficient resources, cast limits, cooldowns, deck limits, invalid class-state actions, and invalid targets.
 - [ ] 4.3 Add multi-turn fixtures covering rune carryover, WP/BQ carryover, cooldown aging, stored BQ, active passives, Feu-Follet recovery, and sustainable-cycle replay.
 - [ ] 4.4 Add seeded candidate-batch generation that evaluates the same normalized candidates through TypeScript and Rust.

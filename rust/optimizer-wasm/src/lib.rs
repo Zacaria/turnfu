@@ -200,6 +200,10 @@ pub enum PassiveEffect {
         stat: String,
         amount: f64,
         #[serde(default)]
+        target: Option<String>,
+        #[serde(default)]
+        element: Option<Element>,
+        #[serde(default)]
         note: Option<String>,
     },
 }
@@ -370,6 +374,24 @@ pub struct BaseStats {
     pub critical_mastery: f64,
     #[serde(default)]
     pub damage_inflicted_percent: f64,
+    #[serde(default)]
+    pub heals_performed_percent: f64,
+    #[serde(default)]
+    pub heals_received_percent: f64,
+    #[serde(default)]
+    pub armor_received_percent: f64,
+    #[serde(default)]
+    pub elemental_resistance: f64,
+    #[serde(default)]
+    pub range: f64,
+    #[serde(default)]
+    pub willpower: f64,
+    #[serde(default)]
+    pub critical_hit_percent: f64,
+    #[serde(default)]
+    pub parry: f64,
+    #[serde(default)]
+    pub damage_received_percent: f64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -539,11 +561,20 @@ pub fn compute_raw_damage(
     let resolved_element = resolve_damage_element(&effect.element, stats);
     let elemental_mastery = get_elemental_mastery(&stats.elemental_mastery, &resolved_element);
     let extra_mastery = get_extra_mastery(stats, &resolved_context);
-    let mastery_multiplier = 1.0 + (stats.general_mastery + elemental_mastery + extra_mastery) / 100.0;
-    let critical_multiplier = if resolved_context.is_critical { 1.25 } else { 1.0 };
+    let mastery_multiplier =
+        1.0 + (stats.general_mastery + elemental_mastery + extra_mastery) / 100.0;
+    let critical_multiplier = if resolved_context.is_critical {
+        1.25
+    } else {
+        1.0
+    };
     let position_multiplier = get_position_multiplier(&resolved_context.position);
     let final_multiplier = 1.0 + stats.damage_inflicted_percent / 100.0;
-    let block_multiplier = if resolved_context.is_blocked { 0.8 } else { 1.0 };
+    let block_multiplier = if resolved_context.is_blocked {
+        0.8
+    } else {
+        1.0
+    };
     let times = effect.times.unwrap_or(1.0);
     let result = round_damage(
         (effect.base
@@ -582,7 +613,10 @@ pub fn round_damage(value: f64) -> f64 {
     ((value + f64::EPSILON) * 100.0).round() / 100.0
 }
 
-pub fn create_huppermage_state(resources: ResourcePool, active_passives: Vec<String>) -> HuppermageState {
+pub fn create_huppermage_state(
+    resources: ResourcePool,
+    active_passives: Vec<String>,
+) -> HuppermageState {
     HuppermageState {
         runes: HuppermageRuneState::default(),
         rune_ap_gains_this_turn: RuneTracker::default(),
@@ -682,7 +716,10 @@ pub fn apply_coeur_de_lumiere(mut state: HuppermageState) -> Result<HuppermageSt
     Ok(state)
 }
 
-pub fn apply_cycle_elementaire(state: HuppermageState, resources: ResourcePool) -> RuneGenerationResult {
+pub fn apply_cycle_elementaire(
+    state: HuppermageState,
+    resources: ResourcePool,
+) -> RuneGenerationResult {
     let Some(last_generated_rune) = state.runes.last_generated_rune.clone() else {
         return RuneGenerationResult {
             state,
@@ -701,7 +738,11 @@ pub fn apply_cycle_elementaire(state: HuppermageState, resources: ResourcePool) 
     };
     let mut prepared_state = state;
     if was_active {
-        set_rune_active(&mut prepared_state.runes.active, &last_generated_rune, false);
+        set_rune_active(
+            &mut prepared_state.runes.active,
+            &last_generated_rune,
+            false,
+        );
     }
     let mut result = apply_generated_rune(prepared_state, resources, restored_rune);
 
@@ -716,7 +757,11 @@ pub fn apply_feu_follet_place(mut state: HuppermageState) -> FeuFolletResult {
     let before = state.feu_follets_active;
     let removed_rune = get_feu_follet_stored_rune(&state);
     let stored_runes = get_sauvegarde_runique_stored_runes(&state);
-    let stored_last_rune = if stored_runes.is_empty() { removed_rune.clone() } else { None };
+    let stored_last_rune = if stored_runes.is_empty() {
+        removed_rune.clone()
+    } else {
+        None
+    };
 
     state.feu_follets_active += 1;
     state.feu_follet_stored_runes.push(stored_runes);
@@ -784,7 +829,10 @@ pub fn apply_feu_follet_recover(mut state: HuppermageState) -> FeuFolletResult {
     }
 }
 
-pub fn apply_turn_end_bq(mut state: HuppermageState, mut resources: ResourcePool) -> TurnEndBqResult {
+pub fn apply_turn_end_bq(
+    mut state: HuppermageState,
+    mut resources: ResourcePool,
+) -> TurnEndBqResult {
     let before = resources.bq;
     let stored_before = state.stored_bq;
     let amount = if state.active_heart.is_some() {
@@ -817,14 +865,30 @@ pub fn apply_initial_passive_effects(
     for passive in passives {
         for effect in &passive.effects {
             match effect {
-                PassiveEffect::ResourceDelta { resource, amount, target } => {
+                PassiveEffect::ResourceDelta {
+                    resource,
+                    amount,
+                    target,
+                } => {
                     if target.as_deref().is_none() || target.as_deref() == Some("caster") {
                         add_resource_by_name(&mut resources, resource, *amount);
                     }
                 }
-                PassiveEffect::StatModifier { stat, amount, note } => {
-                    if should_apply_initial_passive_stat_modifier(&passive.id, stat, note.as_deref()) {
-                        add_stat_by_name(&mut stats, stat, *amount);
+                PassiveEffect::StatModifier {
+                    stat,
+                    amount,
+                    target,
+                    element,
+                    note,
+                } => {
+                    if target.as_deref().is_none() || target.as_deref() == Some("caster") {
+                        if should_apply_initial_passive_stat_modifier(
+                            &passive.id,
+                            stat,
+                            note.as_deref(),
+                        ) {
+                            add_stat_by_name(&mut stats, stat, *amount, element.as_ref());
+                        }
                     }
                 }
             }
@@ -865,13 +929,19 @@ pub fn validate_spell_rules(
                 required: None,
                 available: None,
                 scope: None,
-                message: format!("Spell '{}' requires target {:?}.", spell.id, required_target),
+                message: format!(
+                    "Spell '{}' requires target {:?}.",
+                    spell.id, required_target
+                ),
             });
         }
     }
 
     if let Some(max_casts) = spell.max_casts_per_target {
-        let current = target_casts_by_spell_id.get(&spell.id).copied().unwrap_or(0);
+        let current = target_casts_by_spell_id
+            .get(&spell.id)
+            .copied()
+            .unwrap_or(0);
         if current >= max_casts {
             return Some(SimulationViolation {
                 violation_type: "castLimitExceeded".to_string(),
@@ -906,9 +976,14 @@ pub fn validate_spell_rules(
             action_index,
             spell_id: Some(spell.id.clone()),
             required: Some(huppermage_state.deck_spell_limit as i32),
-            available: Some(deck_tracked_used_spell_ids(&huppermage_state.used_spell_ids).len() as i32),
+            available: Some(
+                deck_tracked_used_spell_ids(&huppermage_state.used_spell_ids).len() as i32,
+            ),
             scope: None,
-            message: format!("Spell '{}' is not in the current deck and the deck limit is reached.", spell.id),
+            message: format!(
+                "Spell '{}' is not in the current deck and the deck limit is reached.",
+                spell.id
+            ),
         });
     }
 
@@ -940,7 +1015,12 @@ pub fn age_cooldowns(
 }
 
 pub fn add_used_spell_id(mut state: HuppermageState, spell: &SpellRules) -> HuppermageState {
-    if !spell.is_deck_tracked || state.used_spell_ids.iter().any(|spell_id| spell_id == &spell.id) {
+    if !spell.is_deck_tracked
+        || state
+            .used_spell_ids
+            .iter()
+            .any(|spell_id| spell_id == &spell.id)
+    {
         return state;
     }
 
@@ -962,7 +1042,10 @@ pub fn create_next_turn_state(
 ) -> CarriedTurnState {
     previous_huppermage.rune_ap_gains_this_turn = RuneTracker::default();
     previous_huppermage.active_heart = None;
-    previous_huppermage.cooldowns_by_spell_id = age_cooldowns(&previous_huppermage.cooldowns_by_spell_id, casts_by_spell_id);
+    previous_huppermage.cooldowns_by_spell_id = age_cooldowns(
+        &previous_huppermage.cooldowns_by_spell_id,
+        casts_by_spell_id,
+    );
 
     CarriedTurnState {
         resources: ResourcePool {
@@ -993,15 +1076,31 @@ pub fn record_combo_turn(
     progress
 }
 
-pub fn add_resolved_element_damage(mut damage_by_element: DamageByElement, element: &Element, amount: f64) -> DamageByElement {
+pub fn add_resolved_element_damage(
+    mut damage_by_element: DamageByElement,
+    element: &Element,
+    amount: f64,
+) -> DamageByElement {
     let rounded_amount = round_damage(amount);
     match element {
-        Element::Fire => damage_by_element.fire = round_damage(damage_by_element.fire + rounded_amount),
-        Element::Water => damage_by_element.water = round_damage(damage_by_element.water + rounded_amount),
-        Element::Earth => damage_by_element.earth = round_damage(damage_by_element.earth + rounded_amount),
-        Element::Air => damage_by_element.air = round_damage(damage_by_element.air + rounded_amount),
-        Element::Light => damage_by_element.light = round_damage(damage_by_element.light + rounded_amount),
-        Element::Neutral => damage_by_element.neutral = round_damage(damage_by_element.neutral + rounded_amount),
+        Element::Fire => {
+            damage_by_element.fire = round_damage(damage_by_element.fire + rounded_amount)
+        }
+        Element::Water => {
+            damage_by_element.water = round_damage(damage_by_element.water + rounded_amount)
+        }
+        Element::Earth => {
+            damage_by_element.earth = round_damage(damage_by_element.earth + rounded_amount)
+        }
+        Element::Air => {
+            damage_by_element.air = round_damage(damage_by_element.air + rounded_amount)
+        }
+        Element::Light => {
+            damage_by_element.light = round_damage(damage_by_element.light + rounded_amount)
+        }
+        Element::Neutral => {
+            damage_by_element.neutral = round_damage(damage_by_element.neutral + rounded_amount)
+        }
     }
     damage_by_element
 }
@@ -1015,7 +1114,8 @@ pub fn score_simulation(summary: &SimulationSummary, criterion: &ScoreCriterion)
             target_element_damage: None,
         },
         ScoreCriterion::TargetElementDamage { element } => {
-            let element_damage = get_damage_by_element(&summary.damage_by_resolved_element, element);
+            let element_damage =
+                get_damage_by_element(&summary.damage_by_resolved_element, element);
             ScoreBreakdown {
                 score: element_damage,
                 total_damage: summary.total_damage,
@@ -1026,7 +1126,11 @@ pub fn score_simulation(summary: &SimulationSummary, criterion: &ScoreCriterion)
     }
 }
 
-pub fn evaluate_sustainability(required: bool, first: &SimulationSummary, replay: &SimulationSummary) -> SustainabilityResult {
+pub fn evaluate_sustainability(
+    required: bool,
+    first: &SimulationSummary,
+    replay: &SimulationSummary,
+) -> SustainabilityResult {
     let sustainable = replay.valid
         && replay.final_resources.wp >= first.final_resources.wp
         && replay.final_resources.bq >= first.final_resources.bq;
@@ -1064,7 +1168,10 @@ fn get_damage_by_element(damage_by_element: &DamageByElement, element: &Element)
 }
 
 fn has_passive(state: &HuppermageState, passive_id: &str) -> bool {
-    state.active_passives.iter().any(|passive| passive == passive_id)
+    state
+        .active_passives
+        .iter()
+        .any(|passive| passive == passive_id)
 }
 
 fn is_rune_active(tracker: &RuneTracker, rune: &Rune) -> bool {
@@ -1133,7 +1240,10 @@ fn get_feu_follet_stored_rune(state: &HuppermageState) -> Option<Rune> {
     }
 }
 
-fn apply_recovered_runes(mut runes: HuppermageRuneState, recovered_runes: &[Rune]) -> HuppermageRuneState {
+fn apply_recovered_runes(
+    mut runes: HuppermageRuneState,
+    recovered_runes: &[Rune],
+) -> HuppermageRuneState {
     let sorted_runes = sort_runes_for_application(recovered_runes);
     if sorted_runes.is_empty() {
         return runes;
@@ -1154,7 +1264,12 @@ fn sort_runes_for_application(runes: &[Rune]) -> Vec<Rune> {
 }
 
 fn rune_application_order() -> Vec<Rune> {
-    vec![Rune::Incandescent, Rune::Aquatic, Rune::Telluric, Rune::Aerial]
+    vec![
+        Rune::Incandescent,
+        Rune::Aquatic,
+        Rune::Telluric,
+        Rune::Aerial,
+    ]
 }
 
 fn rune_to_element(rune: &Rune) -> Element {
@@ -1194,7 +1309,7 @@ fn add_resource_by_name(resources: &mut ResourcePool, resource: &str, amount: i3
     }
 }
 
-fn add_stat_by_name(stats: &mut BaseStats, stat: &str, amount: f64) {
+fn add_stat_by_name(stats: &mut BaseStats, stat: &str, amount: f64, element: Option<&Element>) {
     match stat {
         "generalMastery" => stats.general_mastery += amount,
         "meleeMastery" => stats.melee_mastery += amount,
@@ -1203,17 +1318,36 @@ fn add_stat_by_name(stats: &mut BaseStats, stat: &str, amount: f64) {
         "rearMastery" => stats.rear_mastery += amount,
         "criticalMastery" => stats.critical_mastery += amount,
         "damageInflictedPercent" => stats.damage_inflicted_percent += amount,
+        "healsPerformedPercent" => stats.heals_performed_percent += amount,
+        "healsReceivedPercent" => stats.heals_received_percent += amount,
+        "armorReceivedPercent" => stats.armor_received_percent += amount,
+        "elementalResistance" => stats.elemental_resistance += amount,
+        "range" => stats.range += amount,
+        "willpower" => stats.willpower += amount,
+        "criticalHitPercent" => stats.critical_hit_percent += amount,
+        "parry" => stats.parry += amount,
+        "damageReceivedPercent" => stats.damage_received_percent += amount,
         "elementalMastery" => {
-            stats.elemental_mastery.fire += amount;
-            stats.elemental_mastery.water += amount;
-            stats.elemental_mastery.earth += amount;
-            stats.elemental_mastery.air += amount;
+            if let Some(element) = element {
+                match element {
+                    Element::Fire => stats.elemental_mastery.fire += amount,
+                    Element::Water => stats.elemental_mastery.water += amount,
+                    Element::Earth => stats.elemental_mastery.earth += amount,
+                    Element::Air => stats.elemental_mastery.air += amount,
+                    Element::Light => stats.elemental_mastery.light += amount,
+                    Element::Neutral => stats.elemental_mastery.neutral += amount,
+                }
+            }
         }
         _ => {}
     }
 }
 
-fn should_apply_initial_passive_stat_modifier(passive_id: &str, stat: &str, note: Option<&str>) -> bool {
+fn should_apply_initial_passive_stat_modifier(
+    passive_id: &str,
+    stat: &str,
+    note: Option<&str>,
+) -> bool {
     if passive_id == "carnage"
         && stat == "damageInflictedPercent"
         && note == Some("Aux cibles ayant de l'Armure.")
@@ -1236,9 +1370,13 @@ fn is_spell_available_from_deck(spell: &SpellRules, state: &HuppermageState) -> 
         return true;
     }
 
-    state.used_spell_ids.iter().any(|spell_id| spell_id == &spell.id)
+    state
+        .used_spell_ids
+        .iter()
+        .any(|spell_id| spell_id == &spell.id)
         || deck_tracked_used_spell_ids(&state.used_spell_ids).len() < state.deck_spell_limit
-        || (state.temporary_unlocked_spell_element.is_some() && spell.element == state.temporary_unlocked_spell_element)
+        || (state.temporary_unlocked_spell_element.is_some()
+            && spell.element == state.temporary_unlocked_spell_element)
 }
 
 fn deck_tracked_used_spell_ids(used_spell_ids: &[String]) -> Vec<String> {
@@ -1264,7 +1402,11 @@ fn get_highest_elemental_mastery_element(mastery: &ElementalMastery) -> Element 
     ordered
         .into_iter()
         .fold((Element::Fire, mastery.fire), |best, current| {
-            if current.1 > best.1 { current } else { best }
+            if current.1 > best.1 {
+                current
+            } else {
+                best
+            }
         })
         .0
 }
@@ -1277,9 +1419,21 @@ fn get_extra_mastery(stats: &BaseStats, context: &ActionContext) -> f64 {
     };
 
     range_mastery
-        + if context.is_berserk { stats.berserk_mastery } else { 0.0 }
-        + if context.position == AttackPosition::Rear { stats.rear_mastery } else { 0.0 }
-        + if context.is_critical { stats.critical_mastery } else { 0.0 }
+        + if context.is_berserk {
+            stats.berserk_mastery
+        } else {
+            0.0
+        }
+        + if context.position == AttackPosition::Rear {
+            stats.rear_mastery
+        } else {
+            0.0
+        }
+        + if context.is_critical {
+            stats.critical_mastery
+        } else {
+            0.0
+        }
 }
 
 fn get_position_multiplier(position: &AttackPosition) -> f64 {
@@ -1290,7 +1444,10 @@ fn get_position_multiplier(position: &AttackPosition) -> f64 {
     }
 }
 
-fn first_insufficient_resource(resources: ResourcePool, cost: SpellCost) -> Option<(&'static str, i32, i32)> {
+fn first_insufficient_resource(
+    resources: ResourcePool,
+    cost: SpellCost,
+) -> Option<(&'static str, i32, i32)> {
     [
         ("ap", cost.ap, resources.ap),
         ("mp", cost.mp, resources.mp),
@@ -1314,13 +1471,65 @@ pub fn validate_resource_cost_json(
     let cost: SpellCost = serde_json::from_str(cost_json)
         .map_err(|error| JsValue::from_str(&format!("Invalid cost JSON: {error}")))?;
     let context: Option<PartialActionContext> = match context_json {
-        Some(json) => Some(serde_json::from_str(&json)
-            .map_err(|error| JsValue::from_str(&format!("Invalid action context JSON: {error}")))?),
+        Some(json) => Some(serde_json::from_str(&json).map_err(|error| {
+            JsValue::from_str(&format!("Invalid action context JSON: {error}"))
+        })?),
         None => None,
     };
 
-    serde_json::to_string(&validate_resource_cost(resources, cost, spell_id, action_index, context))
-        .map_err(|error| JsValue::from_str(&format!("Failed to serialize resource validation: {error}")))
+    serde_json::to_string(&validate_resource_cost(
+        resources,
+        cost,
+        spell_id,
+        action_index,
+        context,
+    ))
+    .map_err(|error| {
+        JsValue::from_str(&format!("Failed to serialize resource validation: {error}"))
+    })
+}
+
+#[wasm_bindgen]
+pub fn compute_raw_damage_json(
+    stats_json: &str,
+    effect_json: &str,
+    context_json: Option<String>,
+) -> Result<String, JsValue> {
+    let stats: BaseStats = serde_json::from_str(stats_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid stats JSON: {error}")))?;
+    let effect: DamageEffect = serde_json::from_str(effect_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid damage effect JSON: {error}")))?;
+    let context: Option<PartialActionContext> = match context_json {
+        Some(json) => Some(serde_json::from_str(&json).map_err(|error| {
+            JsValue::from_str(&format!("Invalid action context JSON: {error}"))
+        })?),
+        None => None,
+    };
+
+    serde_json::to_string(&compute_raw_damage(&stats, &effect, context))
+        .map_err(|error| JsValue::from_str(&format!("Failed to serialize damage formula: {error}")))
+}
+
+#[wasm_bindgen]
+pub fn apply_initial_passive_effects_json(
+    stats_json: &str,
+    resources_json: &str,
+    passives_json: &str,
+) -> Result<String, JsValue> {
+    let stats: BaseStats = serde_json::from_str(stats_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid stats JSON: {error}")))?;
+    let resources: ResourcePool = serde_json::from_str(resources_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid resources JSON: {error}")))?;
+    let passives: Vec<PassiveEntry> = serde_json::from_str(passives_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid passives JSON: {error}")))?;
+
+    serde_json::to_string(&apply_initial_passive_effects(stats, resources, &passives)).map_err(
+        |error| {
+            JsValue::from_str(&format!(
+                "Failed to serialize initial passive result: {error}"
+            ))
+        },
+    )
 }
 
 pub fn inspect_optimizer_request(request: OptimizerRequest) -> OptimizerResponse {
@@ -1334,7 +1543,11 @@ pub fn inspect_optimizer_request(request: OptimizerRequest) -> OptimizerResponse
         valid_candidates: 0,
         invalid_candidates: 0,
         metrics: BackendMetrics {
-            request_catalog_entries: request.catalog.as_array().map(|entries| entries.len() as u32).unwrap_or(0),
+            request_catalog_entries: request
+                .catalog
+                .as_array()
+                .map(|entries| entries.len() as u32)
+                .unwrap_or(0),
             request_available_spells: request.available_spell_ids.len() as u32,
             request_available_passives: request.available_passive_ids.len() as u32,
         },
@@ -1345,8 +1558,9 @@ pub fn inspect_optimizer_request(request: OptimizerRequest) -> OptimizerResponse
 pub fn inspect_optimizer_request_json(request_json: &str) -> Result<String, JsValue> {
     let request = parse_optimizer_request(request_json)
         .map_err(|error| JsValue::from_str(&format!("Invalid optimizer request JSON: {error}")))?;
-    serde_json::to_string(&inspect_optimizer_request(request))
-        .map_err(|error| JsValue::from_str(&format!("Failed to serialize optimizer response: {error}")))
+    serde_json::to_string(&inspect_optimizer_request(request)).map_err(|error| {
+        JsValue::from_str(&format!("Failed to serialize optimizer response: {error}"))
+    })
 }
 
 #[cfg(test)]
@@ -1408,8 +1622,18 @@ mod tests {
     #[test]
     fn validates_and_pays_resource_costs() {
         let result = validate_resource_cost(
-            ResourcePool { ap: 12, mp: 6, wp: 6, bq: 500 },
-            SpellCost { ap: 3, mp: 1, wp: 0, bq: 75 },
+            ResourcePool {
+                ap: 12,
+                mp: 6,
+                wp: 6,
+                bq: 500,
+            },
+            SpellCost {
+                ap: 3,
+                mp: 1,
+                wp: 0,
+                bq: 75,
+            },
             "burst",
             2,
             Some(PartialActionContext {
@@ -1422,7 +1646,15 @@ mod tests {
         );
 
         assert!(result.valid);
-        assert_eq!(result.resources_after_cost, ResourcePool { ap: 9, mp: 5, wp: 6, bq: 425 });
+        assert_eq!(
+            result.resources_after_cost,
+            ResourcePool {
+                ap: 9,
+                mp: 5,
+                wp: 6,
+                bq: 425
+            }
+        );
         assert_eq!(result.context.position, AttackPosition::Rear);
         assert_eq!(result.context.range_mode, Some(RangeMode::Distance));
         assert!(result.context.is_critical);
@@ -1433,24 +1665,45 @@ mod tests {
     #[test]
     fn rejects_insufficient_resource_without_paying_cost() {
         let result = validate_resource_cost(
-            ResourcePool { ap: 2, mp: 6, wp: 6, bq: 500 },
-            SpellCost { ap: 3, mp: 0, wp: 0, bq: 0 },
+            ResourcePool {
+                ap: 2,
+                mp: 6,
+                wp: 6,
+                bq: 500,
+            },
+            SpellCost {
+                ap: 3,
+                mp: 0,
+                wp: 0,
+                bq: 0,
+            },
             "too-expensive",
             4,
             None,
         );
 
         assert!(!result.valid);
-        assert_eq!(result.resources_after_cost, ResourcePool { ap: 2, mp: 6, wp: 6, bq: 500 });
+        assert_eq!(
+            result.resources_after_cost,
+            ResourcePool {
+                ap: 2,
+                mp: 6,
+                wp: 6,
+                bq: 500
+            }
+        );
         assert_eq!(result.context.position, AttackPosition::Face);
-        assert_eq!(result.violation, Some(ResourceViolation {
-            violation_type: "insufficientResource".to_string(),
-            action_index: 4,
-            spell_id: "too-expensive".to_string(),
-            resource: "ap".to_string(),
-            required: 3,
-            available: 2,
-        }));
+        assert_eq!(
+            result.violation,
+            Some(ResourceViolation {
+                violation_type: "insufficientResource".to_string(),
+                action_index: 4,
+                spell_id: "too-expensive".to_string(),
+                resource: "ap".to_string(),
+                required: 3,
+                available: 2,
+            })
+        );
     }
 
     #[test]
@@ -1458,14 +1711,21 @@ mod tests {
         let formula = compute_raw_damage(
             &BaseStats {
                 general_mastery: 100.0,
-                elemental_mastery: ElementalMastery { fire: 200.0, ..Default::default() },
+                elemental_mastery: ElementalMastery {
+                    fire: 200.0,
+                    ..Default::default()
+                },
                 distance_mastery: 50.0,
                 rear_mastery: 25.0,
                 critical_mastery: 75.0,
                 damage_inflicted_percent: 10.0,
                 ..Default::default()
             },
-            &DamageEffect { element: Element::Fire, base: 20.0, times: Some(2.0) },
+            &DamageEffect {
+                element: Element::Fire,
+                base: 20.0,
+                times: Some(2.0),
+            },
             Some(PartialActionContext {
                 position: Some(AttackPosition::Rear),
                 range_mode: Some(RangeMode::Distance),
@@ -1494,7 +1754,10 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(resolve_damage_element(&Element::Light, &stats), Element::Fire);
+        assert_eq!(
+            resolve_damage_element(&Element::Light, &stats),
+            Element::Fire
+        );
     }
 
     #[test]
@@ -1505,14 +1768,34 @@ mod tests {
 
     #[test]
     fn generates_runes_once_per_turn_and_grants_ap() {
-        let state = create_huppermage_state(ResourcePool { ap: 12, mp: 6, wp: 6, bq: 500 }, vec![]);
-        let first = apply_generated_rune(state, ResourcePool { ap: 8, mp: 6, wp: 6, bq: 500 }, Rune::Incandescent);
+        let state = create_huppermage_state(
+            ResourcePool {
+                ap: 12,
+                mp: 6,
+                wp: 6,
+                bq: 500,
+            },
+            vec![],
+        );
+        let first = apply_generated_rune(
+            state,
+            ResourcePool {
+                ap: 8,
+                mp: 6,
+                wp: 6,
+                bq: 500,
+            },
+            Rune::Incandescent,
+        );
 
         assert!(first.generated);
         assert!(first.granted_ap);
         assert_eq!(first.resources.ap, 9);
         assert!(first.state.runes.active.incandescent);
-        assert_eq!(first.state.runes.last_generated_rune, Some(Rune::Incandescent));
+        assert_eq!(
+            first.state.runes.last_generated_rune,
+            Some(Rune::Incandescent)
+        );
 
         let second = apply_generated_rune(first.state, first.resources, Rune::Incandescent);
         assert!(!second.generated);
@@ -1522,7 +1805,12 @@ mod tests {
     #[test]
     fn applies_antithese_and_bq_gain_multipliers_on_rune_generation() {
         let mut state = create_huppermage_state(
-            ResourcePool { ap: 12, mp: 6, wp: 6, bq: 500 },
+            ResourcePool {
+                ap: 12,
+                mp: 6,
+                wp: 6,
+                bq: 500,
+            },
             vec!["antithese".to_string(), "transcendance-runique".to_string()],
         );
         state.runes.active = RuneTracker {
@@ -1532,7 +1820,16 @@ mod tests {
             aerial: false,
         };
 
-        let result = apply_generated_rune(state, ResourcePool { ap: 8, mp: 6, wp: 6, bq: 500 }, Rune::Aerial);
+        let result = apply_generated_rune(
+            state,
+            ResourcePool {
+                ap: 8,
+                mp: 6,
+                wp: 6,
+                bq: 500,
+            },
+            Rune::Aerial,
+        );
 
         assert_eq!(result.antithese_bq_gain, 40);
         assert_eq!(result.resources.bq, 540);
@@ -1541,7 +1838,12 @@ mod tests {
     #[test]
     fn caps_abundance_with_combinaison_elementaire() {
         let mut state = create_huppermage_state(
-            ResourcePool { ap: 12, mp: 6, wp: 6, bq: 500 },
+            ResourcePool {
+                ap: 12,
+                mp: 6,
+                wp: 6,
+                bq: 500,
+            },
             vec!["combinaison-elementaire".to_string()],
         );
         state.abundance_level = 50;
@@ -1555,7 +1857,15 @@ mod tests {
 
     #[test]
     fn activates_coeur_de_lumiere_from_last_generated_rune() {
-        let mut state = create_huppermage_state(ResourcePool { ap: 12, mp: 6, wp: 6, bq: 500 }, vec![]);
+        let mut state = create_huppermage_state(
+            ResourcePool {
+                ap: 12,
+                mp: 6,
+                wp: 6,
+                bq: 500,
+            },
+            vec![],
+        );
         state.runes.last_generated_rune = Some(Rune::Aquatic);
 
         let state = apply_coeur_de_lumiere(state).expect("heart should activate");
@@ -1566,13 +1876,26 @@ mod tests {
     #[test]
     fn cycle_elementaire_restores_opposite_active_last_rune() {
         let mut state = create_huppermage_state(
-            ResourcePool { ap: 12, mp: 6, wp: 6, bq: 500 },
+            ResourcePool {
+                ap: 12,
+                mp: 6,
+                wp: 6,
+                bq: 500,
+            },
             vec!["combinaison-elementaire".to_string()],
         );
         state.runes.last_generated_rune = Some(Rune::Incandescent);
         state.runes.active.incandescent = true;
 
-        let result = apply_cycle_elementaire(state, ResourcePool { ap: 8, mp: 6, wp: 6, bq: 500 });
+        let result = apply_cycle_elementaire(
+            state,
+            ResourcePool {
+                ap: 8,
+                mp: 6,
+                wp: 6,
+                bq: 500,
+            },
+        );
 
         assert!(result.state.runes.active.aquatic);
         assert!(!result.state.runes.active.incandescent);
@@ -1583,7 +1906,12 @@ mod tests {
     #[test]
     fn places_and_recovers_feu_follet_with_sauvegarde_runique_storage() {
         let mut state = create_huppermage_state(
-            ResourcePool { ap: 12, mp: 6, wp: 6, bq: 500 },
+            ResourcePool {
+                ap: 12,
+                mp: 6,
+                wp: 6,
+                bq: 500,
+            },
             vec!["sauvegarde-runique".to_string()],
         );
         state.runes.active.aerial = true;
@@ -1593,22 +1921,50 @@ mod tests {
         assert_eq!(placed.before, 0);
         assert_eq!(placed.after, 1);
         assert!(!placed.state.runes.active.aerial);
-        assert_eq!(placed.state.feu_follet_stored_runes[0], vec![Rune::Incandescent, Rune::Aquatic, Rune::Telluric]);
+        assert_eq!(
+            placed.state.feu_follet_stored_runes[0],
+            vec![Rune::Incandescent, Rune::Aquatic, Rune::Telluric]
+        );
 
         let recovered = apply_feu_follet_recover(placed.state);
         assert_eq!(recovered.before, 1);
         assert_eq!(recovered.after, 0);
-        assert_eq!(recovered.recovered_runes, vec![Rune::Incandescent, Rune::Aquatic, Rune::Telluric]);
-        assert_eq!(recovered.state.runes.last_generated_rune, Some(Rune::Telluric));
-        assert_eq!(recovered.temporary_unlocked_spell_element, Some(Element::Earth));
+        assert_eq!(
+            recovered.recovered_runes,
+            vec![Rune::Incandescent, Rune::Aquatic, Rune::Telluric]
+        );
+        assert_eq!(
+            recovered.state.runes.last_generated_rune,
+            Some(Rune::Telluric)
+        );
+        assert_eq!(
+            recovered.temporary_unlocked_spell_element,
+            Some(Element::Earth)
+        );
     }
 
     #[test]
     fn turn_end_stores_bq_under_heart_and_regenerates_without_heart() {
-        let mut state = create_huppermage_state(ResourcePool { ap: 12, mp: 6, wp: 6, bq: 500 }, vec![]);
+        let mut state = create_huppermage_state(
+            ResourcePool {
+                ap: 12,
+                mp: 6,
+                wp: 6,
+                bq: 500,
+            },
+            vec![],
+        );
         state.active_heart = Some(HuppermageHeart::Fire);
 
-        let stored = apply_turn_end_bq(state, ResourcePool { ap: 0, mp: 0, wp: 6, bq: 300 });
+        let stored = apply_turn_end_bq(
+            state,
+            ResourcePool {
+                ap: 0,
+                mp: 0,
+                wp: 6,
+                bq: 300,
+            },
+        );
         assert_eq!(stored.amount, 0);
         assert_eq!(stored.stored_after, 75);
         assert_eq!(stored.resources.bq, 300);
@@ -1623,7 +1979,12 @@ mod tests {
 
     #[test]
     fn converts_wp_to_initial_bq() {
-        let converted = convert_wp_to_bq(ResourcePool { ap: 12, mp: 6, wp: 6, bq: 100 });
+        let converted = convert_wp_to_bq(ResourcePool {
+            ap: 12,
+            mp: 6,
+            wp: 6,
+            bq: 100,
+        });
 
         assert_eq!(converted.bq, 550);
         assert_eq!(converted.wp, 6);
@@ -1633,7 +1994,12 @@ mod tests {
     fn applies_initial_passive_resource_and_stat_modifiers() {
         let result = apply_initial_passive_effects(
             BaseStats::default(),
-            ResourcePool { ap: 12, mp: 6, wp: 6, bq: 500 },
+            ResourcePool {
+                ap: 12,
+                mp: 6,
+                wp: 6,
+                bq: 500,
+            },
             &[
                 PassiveEntry {
                     id: "resource-passive".to_string(),
@@ -1649,11 +2015,15 @@ mod tests {
                         PassiveEffect::StatModifier {
                             stat: "damageInflictedPercent".to_string(),
                             amount: 10.0,
+                            target: None,
+                            element: None,
                             note: None,
                         },
                         PassiveEffect::StatModifier {
                             stat: "elementalMastery".to_string(),
                             amount: 50.0,
+                            target: None,
+                            element: Some(Element::Fire),
                             note: None,
                         },
                     ],
@@ -1664,9 +2034,9 @@ mod tests {
         assert_eq!(result.resources.ap, 13);
         assert_eq!(result.stats.damage_inflicted_percent, 10.0);
         assert_eq!(result.stats.elemental_mastery.fire, 50.0);
-        assert_eq!(result.stats.elemental_mastery.water, 50.0);
-        assert_eq!(result.stats.elemental_mastery.earth, 50.0);
-        assert_eq!(result.stats.elemental_mastery.air, 50.0);
+        assert_eq!(result.stats.elemental_mastery.water, 0.0);
+        assert_eq!(result.stats.elemental_mastery.earth, 0.0);
+        assert_eq!(result.stats.elemental_mastery.air, 0.0);
     }
 
     #[test]
@@ -1680,6 +2050,8 @@ mod tests {
                     effects: vec![PassiveEffect::StatModifier {
                         stat: "damageInflictedPercent".to_string(),
                         amount: 15.0,
+                        target: None,
+                        element: None,
                         note: Some("Aux cibles ayant de l'Armure.".to_string()),
                     }],
                 },
@@ -1688,6 +2060,8 @@ mod tests {
                     effects: vec![PassiveEffect::StatModifier {
                         stat: "damageInflictedPercent".to_string(),
                         amount: 10.0,
+                        target: None,
+                        element: None,
                         note: Some("Aux combattants ayant plus d'Initiative.".to_string()),
                     }],
                 },
@@ -1700,8 +2074,16 @@ mod tests {
     #[test]
     fn applies_huppermage_bq_gain_passive_multipliers() {
         let mut state = create_huppermage_state(
-            ResourcePool { ap: 12, mp: 6, wp: 6, bq: 500 },
-            vec!["transcendance-runique".to_string(), "profusion-runique".to_string()],
+            ResourcePool {
+                ap: 12,
+                mp: 6,
+                wp: 6,
+                bq: 500,
+            },
+            vec![
+                "transcendance-runique".to_string(),
+                "profusion-runique".to_string(),
+            ],
         );
         state.runes.active = RuneTracker {
             incandescent: true,
@@ -1710,7 +2092,15 @@ mod tests {
             aerial: true,
         };
 
-        let turn_end = apply_turn_end_bq(state, ResourcePool { ap: 0, mp: 0, wp: 6, bq: 100 });
+        let turn_end = apply_turn_end_bq(
+            state,
+            ResourcePool {
+                ap: 0,
+                mp: 0,
+                wp: 6,
+                bq: 100,
+            },
+        );
 
         assert_eq!(turn_end.amount, 160);
         assert_eq!(turn_end.resources.bq, 260);
@@ -1718,7 +2108,15 @@ mod tests {
 
     #[test]
     fn validates_cooldowns_and_ages_them_between_turns() {
-        let mut state = create_huppermage_state(ResourcePool { ap: 12, mp: 6, wp: 6, bq: 500 }, vec![]);
+        let mut state = create_huppermage_state(
+            ResourcePool {
+                ap: 12,
+                mp: 6,
+                wp: 6,
+                bq: 500,
+            },
+            vec![],
+        );
         let spell = SpellRules {
             id: "cooldown-spell".to_string(),
             element: Some(Element::Fire),
@@ -1730,14 +2128,9 @@ mod tests {
         };
         apply_spell_cooldown(&mut state.cooldowns_by_spell_id, &spell);
 
-        let violation = validate_spell_rules(
-            &spell,
-            0,
-            None,
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &state,
-        ).expect("cooldown should block");
+        let violation =
+            validate_spell_rules(&spell, 0, None, &BTreeMap::new(), &BTreeMap::new(), &state)
+                .expect("cooldown should block");
 
         assert_eq!(violation.violation_type, "cooldownActive");
         assert_eq!(violation.available, Some(2));
@@ -1748,7 +2141,15 @@ mod tests {
 
     #[test]
     fn validates_turn_and_target_cast_limits() {
-        let state = create_huppermage_state(ResourcePool { ap: 12, mp: 6, wp: 6, bq: 500 }, vec![]);
+        let state = create_huppermage_state(
+            ResourcePool {
+                ap: 12,
+                mp: 6,
+                wp: 6,
+                bq: 500,
+            },
+            vec![],
+        );
         let spell = SpellRules {
             id: "limited".to_string(),
             element: Some(Element::Fire),
@@ -1763,18 +2164,28 @@ mod tests {
         let mut target_casts = BTreeMap::new();
         target_casts.insert("limited".to_string(), 1);
 
-        let target_violation = validate_spell_rules(&spell, 1, None, &BTreeMap::new(), &target_casts, &state)
-            .expect("target limit should win");
+        let target_violation =
+            validate_spell_rules(&spell, 1, None, &BTreeMap::new(), &target_casts, &state)
+                .expect("target limit should win");
         assert_eq!(target_violation.scope, Some("target".to_string()));
 
-        let turn_violation = validate_spell_rules(&spell, 1, None, &casts, &BTreeMap::new(), &state)
-            .expect("turn limit should block");
+        let turn_violation =
+            validate_spell_rules(&spell, 1, None, &casts, &BTreeMap::new(), &state)
+                .expect("turn limit should block");
         assert_eq!(turn_violation.scope, Some("turn".to_string()));
     }
 
     #[test]
     fn validates_required_targets() {
-        let state = create_huppermage_state(ResourcePool { ap: 12, mp: 6, wp: 6, bq: 500 }, vec![]);
+        let state = create_huppermage_state(
+            ResourcePool {
+                ap: 12,
+                mp: 6,
+                wp: 6,
+                bq: 500,
+            },
+            vec![],
+        );
         let spell = SpellRules {
             id: "cell-only".to_string(),
             element: Some(Element::Fire),
@@ -1785,8 +2196,15 @@ mod tests {
             required_target: Some(ActionTargetKind::EmptyCell),
         };
 
-        let violation = validate_spell_rules(&spell, 3, Some(ActionTargetKind::Enemy), &BTreeMap::new(), &BTreeMap::new(), &state)
-            .expect("target should be invalid");
+        let violation = validate_spell_rules(
+            &spell,
+            3,
+            Some(ActionTargetKind::Enemy),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &state,
+        )
+        .expect("target should be invalid");
 
         assert_eq!(violation.violation_type, "invalidTarget");
         assert_eq!(violation.spell_id, Some("cell-only".to_string()));
@@ -1794,7 +2212,15 @@ mod tests {
 
     #[test]
     fn validates_deck_limits_and_temporary_unlocks() {
-        let mut state = create_huppermage_state(ResourcePool { ap: 12, mp: 6, wp: 6, bq: 500 }, vec![]);
+        let mut state = create_huppermage_state(
+            ResourcePool {
+                ap: 12,
+                mp: 6,
+                wp: 6,
+                bq: 500,
+            },
+            vec![],
+        );
         state.deck_spell_limit = 1;
         state.used_spell_ids = vec!["first".to_string()];
         let spell = SpellRules {
@@ -1807,12 +2233,16 @@ mod tests {
             required_target: None,
         };
 
-        let violation = validate_spell_rules(&spell, 0, None, &BTreeMap::new(), &BTreeMap::new(), &state)
-            .expect("deck should be full");
+        let violation =
+            validate_spell_rules(&spell, 0, None, &BTreeMap::new(), &BTreeMap::new(), &state)
+                .expect("deck should be full");
         assert_eq!(violation.violation_type, "deckLimitExceeded");
 
         state.temporary_unlocked_spell_element = Some(Element::Earth);
-        assert_eq!(validate_spell_rules(&spell, 0, None, &BTreeMap::new(), &BTreeMap::new(), &state), None);
+        assert_eq!(
+            validate_spell_rules(&spell, 0, None, &BTreeMap::new(), &BTreeMap::new(), &state),
+            None
+        );
 
         let state_after = add_used_spell_id(state, &spell);
         assert_eq!(state_after.used_spell_ids, vec!["first".to_string()]);
@@ -1820,16 +2250,36 @@ mod tests {
 
     #[test]
     fn carries_resources_and_huppermage_state_to_next_turn() {
-        let mut state = create_huppermage_state(ResourcePool { ap: 12, mp: 6, wp: 6, bq: 500 }, vec![]);
+        let mut state = create_huppermage_state(
+            ResourcePool {
+                ap: 12,
+                mp: 6,
+                wp: 6,
+                bq: 500,
+            },
+            vec![],
+        );
         state.runes.active.incandescent = true;
         state.rune_ap_gains_this_turn.incandescent = true;
         state.active_heart = Some(HuppermageHeart::Fire);
-        state.cooldowns_by_spell_id.insert("cooldown-spell".to_string(), 2);
+        state
+            .cooldowns_by_spell_id
+            .insert("cooldown-spell".to_string(), 2);
         let casts = BTreeMap::new();
 
         let next = create_next_turn_state(
-            ResourcePool { ap: 12, mp: 6, wp: 6, bq: 500 },
-            ResourcePool { ap: 0, mp: 1, wp: 4, bq: 725 },
+            ResourcePool {
+                ap: 12,
+                mp: 6,
+                wp: 6,
+                bq: 500,
+            },
+            ResourcePool {
+                ap: 0,
+                mp: 1,
+                wp: 4,
+                bq: 725,
+            },
             state,
             &casts,
         );
@@ -1841,24 +2291,50 @@ mod tests {
         assert!(next.huppermage.runes.active.incandescent);
         assert!(!next.huppermage.rune_ap_gains_this_turn.incandescent);
         assert_eq!(next.huppermage.active_heart, None);
-        assert_eq!(next.huppermage.cooldowns_by_spell_id.get("cooldown-spell"), Some(&1));
+        assert_eq!(
+            next.huppermage.cooldowns_by_spell_id.get("cooldown-spell"),
+            Some(&1)
+        );
     }
 
     #[test]
     fn keeps_cast_cooldown_from_aging_on_the_cast_turn() {
-        let mut state = create_huppermage_state(ResourcePool { ap: 12, mp: 6, wp: 6, bq: 500 }, vec![]);
-        state.cooldowns_by_spell_id.insert("cooldown-spell".to_string(), 2);
+        let mut state = create_huppermage_state(
+            ResourcePool {
+                ap: 12,
+                mp: 6,
+                wp: 6,
+                bq: 500,
+            },
+            vec![],
+        );
+        state
+            .cooldowns_by_spell_id
+            .insert("cooldown-spell".to_string(), 2);
         let mut casts = BTreeMap::new();
         casts.insert("cooldown-spell".to_string(), 1);
 
         let next = create_next_turn_state(
-            ResourcePool { ap: 12, mp: 6, wp: 6, bq: 500 },
-            ResourcePool { ap: 0, mp: 0, wp: 6, bq: 500 },
+            ResourcePool {
+                ap: 12,
+                mp: 6,
+                wp: 6,
+                bq: 500,
+            },
+            ResourcePool {
+                ap: 0,
+                mp: 0,
+                wp: 6,
+                bq: 500,
+            },
             state,
             &casts,
         );
 
-        assert_eq!(next.huppermage.cooldowns_by_spell_id.get("cooldown-spell"), Some(&2));
+        assert_eq!(
+            next.huppermage.cooldowns_by_spell_id.get("cooldown-spell"),
+            Some(&2)
+        );
     }
 
     #[test]
@@ -1872,7 +2348,14 @@ mod tests {
             scope: None,
             message: "not enough AP".to_string(),
         };
-        let progress = record_combo_turn(ComboProgress { valid: true, ..Default::default() }, 100.125, None);
+        let progress = record_combo_turn(
+            ComboProgress {
+                valid: true,
+                ..Default::default()
+            },
+            100.125,
+            None,
+        );
         let invalid = record_combo_turn(progress, 50.0, Some(violation.clone()));
         let unchanged = record_combo_turn(invalid.clone(), 999.0, None);
 
@@ -1894,14 +2377,29 @@ mod tests {
             valid: true,
             total_damage: 175.13,
             damage_by_resolved_element: damage_by_element,
-            initial_resources: ResourcePool { ap: 12, mp: 6, wp: 6, bq: 500 },
-            final_resources: ResourcePool { ap: 0, mp: 6, wp: 6, bq: 500 },
+            initial_resources: ResourcePool {
+                ap: 12,
+                mp: 6,
+                wp: 6,
+                bq: 500,
+            },
+            final_resources: ResourcePool {
+                ap: 0,
+                mp: 6,
+                wp: 6,
+                bq: 500,
+            },
         };
 
         let total = score_simulation(&summary, &ScoreCriterion::TotalDamage);
         assert_eq!(total.score, 175.13);
 
-        let fire = score_simulation(&summary, &ScoreCriterion::TargetElementDamage { element: Element::Fire });
+        let fire = score_simulation(
+            &summary,
+            &ScoreCriterion::TargetElementDamage {
+                element: Element::Fire,
+            },
+        );
         assert_eq!(fire.score, 125.13);
         assert_eq!(fire.target_element, Some(Element::Fire));
         assert_eq!(fire.target_element_damage, Some(125.13));
@@ -1913,22 +2411,42 @@ mod tests {
             valid: true,
             total_damage: 100.0,
             damage_by_resolved_element: DamageByElement::default(),
-            initial_resources: ResourcePool { ap: 12, mp: 6, wp: 6, bq: 500 },
-            final_resources: ResourcePool { ap: 0, mp: 6, wp: 4, bq: 600 },
+            initial_resources: ResourcePool {
+                ap: 12,
+                mp: 6,
+                wp: 6,
+                bq: 500,
+            },
+            final_resources: ResourcePool {
+                ap: 0,
+                mp: 6,
+                wp: 4,
+                bq: 600,
+            },
         };
         let replay = SimulationSummary {
             valid: true,
             total_damage: 100.0,
             damage_by_resolved_element: DamageByElement::default(),
             initial_resources: first.final_resources,
-            final_resources: ResourcePool { ap: 0, mp: 6, wp: 4, bq: 600 },
+            final_resources: ResourcePool {
+                ap: 0,
+                mp: 6,
+                wp: 4,
+                bq: 600,
+            },
         };
 
         let sustainable = evaluate_sustainability(true, &first, &replay);
         assert!(sustainable.sustainable);
 
         let failing_replay = SimulationSummary {
-            final_resources: ResourcePool { ap: 0, mp: 6, wp: 3, bq: 600 },
+            final_resources: ResourcePool {
+                ap: 0,
+                mp: 6,
+                wp: 3,
+                bq: 600,
+            },
             ..replay
         };
         let unsustainable = evaluate_sustainability(true, &first, &failing_replay);

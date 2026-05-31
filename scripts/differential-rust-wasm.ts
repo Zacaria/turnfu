@@ -1,37 +1,42 @@
-import { huppermageCatalog } from "../src/core/catalog/index.ts";
-import { createResources } from "../src/core/simulation/index.ts";
-import { serializeRustWasmOptimizerRequest } from "../src/core/optimizer/rustWasmBackendTypes.ts";
+import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
+import { resolve } from "node:path";
+import { spawnSync } from "node:child_process";
+import { runRustWasmDifferentialSuite } from "../src/core/optimizer/rustWasmDifferential.ts";
 
-const requestJson = serializeRustWasmOptimizerRequest({
-  catalog: huppermageCatalog,
-  character: {
-    id: "rust-wasm-differential-smoke",
-    className: "huppermage",
-    resources: createResources({ ap: 12, mp: 6, wp: 6, bq: 500 }),
-    stats: {
-      level: 200,
-      generalMastery: 1200,
-      elementalMastery: {
-        fire: 1200,
-        water: 1200,
-        earth: 1200,
-        air: 1200,
-        light: 0,
-        neutral: 0,
-      },
-      damageInflictedPercent: 0,
-    },
-  },
-  duration: 3,
-  engines: ["hybrid"],
-  budget: { iterations: 1 },
-  seed: "rust-wasm-differential-smoke",
-  maxActionsPerTurn: 8,
-  maxPassiveCount: 3,
-});
+const wasmPackagePath = resolve("src/wasm/optimizer_wasm_pkg/optimizer_wasm.js");
+const shouldBuild = process.argv.includes("--build") || !existsSync(wasmPackagePath);
+
+if (shouldBuild) {
+  const build = spawnSync("wasm-pack", [
+    "build",
+    "rust/optimizer-wasm",
+    "--target",
+    "nodejs",
+    "--out-dir",
+    "../../src/wasm/optimizer_wasm_pkg",
+  ], {
+    cwd: process.cwd(),
+    stdio: "inherit",
+  });
+
+  if (build.status !== 0) {
+    process.exit(build.status ?? 1);
+  }
+}
+
+const require = createRequire(import.meta.url);
+const wasm = require(wasmPackagePath);
+const result = runRustWasmDifferentialSuite(wasm);
 
 console.log(JSON.stringify({
-  status: "scaffolded",
-  requestBytes: requestJson.length,
-  message: "Rust/WASM differential harness scaffold is ready; gameplay comparisons are implemented in later tasks.",
-}));
+  status: result.passed ? "passed" : "failed",
+  fixtureCount: result.fixtureCount,
+  mismatchCount: result.mismatchCount,
+  firstMismatch: result.firstMismatch,
+  elapsedMs: result.elapsedMs,
+}, null, 2));
+
+if (!result.passed) {
+  process.exit(1);
+}
