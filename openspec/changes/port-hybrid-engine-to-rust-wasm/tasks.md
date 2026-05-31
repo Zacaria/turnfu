@@ -37,7 +37,7 @@
 - [x] 5.2 Implement Rust candidate sampler support for random and resource-aware fresh branches.
 - [x] 5.3 Implement Rust island scheduling, population management, restart behavior, and immigrant injection.
 - [x] 5.4 Implement Rust crossover, mutation, local refinement, repair queue, and elite-neighbor generation.
-- [ ] 5.5 Implement Rust evaluator cache with bounded memory and cache hit, miss, and eviction metrics.
+- [x] 5.5 Implement Rust evaluator cache with bounded memory and cache hit, miss, and eviction metrics.
 - [ ] 5.6 Implement incremental top-candidate tracking and deterministic tie-breaking.
 - [ ] 5.7 Emit progress snapshots at configured intervals without per-candidate boundary calls.
 

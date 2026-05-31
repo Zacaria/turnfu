@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use wasm_bindgen::prelude::*;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -577,6 +577,37 @@ pub struct HybridNeighborResult {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct EvaluatorCacheMetrics {
+    pub cache_hits: u32,
+    pub cache_misses: u32,
+    pub cache_evictions: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EvaluatorCacheEntry {
+    pub key: String,
+    pub value: Value,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EvaluatorCacheSnapshot {
+    pub limit: usize,
+    pub entries: Vec<EvaluatorCacheEntry>,
+    pub metrics: EvaluatorCacheMetrics,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EvaluatorCacheAccess {
+    pub hit: bool,
+    pub value: Value,
+    pub cache: EvaluatorCacheSnapshot,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct OptimizerCandidateInput {
     #[serde(default)]
     pub passive_ids: Vec<String>,
@@ -667,6 +698,10 @@ pub fn encode_candidate(candidate: &OptimizerCandidateInput) -> String {
             .collect::<Vec<_>>()
             .join("|")
     )
+}
+
+pub fn create_evaluation_cache_key(prefix: &str, candidate: &OptimizerCandidateInput) -> String {
+    format!("{prefix}{}", encode_candidate(candidate))
 }
 
 fn encode_candidate_turn(turn: &CandidateTurn) -> String {
@@ -1197,6 +1232,108 @@ pub fn enqueue_hybrid_elite_neighbors(
         generated,
         metrics,
     })
+}
+
+pub struct EvaluatorCache {
+    limit: usize,
+    entries: BTreeMap<String, Value>,
+    order: VecDeque<String>,
+    metrics: EvaluatorCacheMetrics,
+}
+
+impl EvaluatorCache {
+    pub fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            entries: BTreeMap::new(),
+            order: VecDeque::new(),
+            metrics: EvaluatorCacheMetrics::default(),
+        }
+    }
+
+    pub fn from_snapshot(snapshot: EvaluatorCacheSnapshot) -> Self {
+        let mut cache = Self {
+            limit: snapshot.limit,
+            entries: BTreeMap::new(),
+            order: VecDeque::new(),
+            metrics: snapshot.metrics,
+        };
+        for entry in snapshot.entries {
+            cache.insert_without_metrics(entry.key, entry.value);
+        }
+        cache
+    }
+
+    pub fn get_or_insert(&mut self, key: String, value: Value) -> EvaluatorCacheAccess {
+        if let Some(cached) = self.entries.get(&key).cloned() {
+            self.metrics.cache_hits += 1;
+            self.refresh_key(&key);
+            return EvaluatorCacheAccess {
+                hit: true,
+                value: cached,
+                cache: self.snapshot(),
+            };
+        }
+
+        self.metrics.cache_misses += 1;
+        self.insert_with_eviction(key, value.clone());
+        EvaluatorCacheAccess {
+            hit: false,
+            value,
+            cache: self.snapshot(),
+        }
+    }
+
+    pub fn snapshot(&self) -> EvaluatorCacheSnapshot {
+        EvaluatorCacheSnapshot {
+            limit: self.limit,
+            entries: self
+                .order
+                .iter()
+                .filter_map(|key| {
+                    self.entries.get(key).map(|value| EvaluatorCacheEntry {
+                        key: key.clone(),
+                        value: value.clone(),
+                    })
+                })
+                .collect(),
+            metrics: self.metrics.clone(),
+        }
+    }
+
+    fn insert_with_eviction(&mut self, key: String, value: Value) {
+        if self.limit == 0 {
+            return;
+        }
+
+        if self.entries.len() >= self.limit {
+            if let Some(oldest_key) = self.order.pop_front() {
+                if self.entries.remove(&oldest_key).is_some() {
+                    self.metrics.cache_evictions += 1;
+                }
+            }
+        }
+
+        self.insert_without_metrics(key, value);
+    }
+
+    fn insert_without_metrics(&mut self, key: String, value: Value) {
+        self.order.retain(|entry_key| entry_key != &key);
+        self.entries.insert(key.clone(), value);
+        self.order.push_back(key);
+        while self.entries.len() > self.limit {
+            if let Some(oldest_key) = self.order.pop_front() {
+                self.entries.remove(&oldest_key);
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn refresh_key(&mut self, key: &str) {
+        self.order.retain(|entry_key| entry_key != key);
+        self.order.push_back(key.to_string());
+    }
 }
 
 fn compare_population_entries(
@@ -3654,6 +3791,35 @@ pub fn enqueue_hybrid_elite_neighbors_json(
     })
 }
 
+#[wasm_bindgen]
+pub fn access_evaluator_cache_json(
+    cache_json: &str,
+    key: &str,
+    value_json: &str,
+) -> Result<String, JsValue> {
+    let snapshot: EvaluatorCacheSnapshot = serde_json::from_str(cache_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid cache JSON: {error}")))?;
+    let value: Value = serde_json::from_str(value_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid evaluation JSON: {error}")))?;
+    let mut cache = EvaluatorCache::from_snapshot(snapshot);
+    let access = cache.get_or_insert(key.to_string(), value);
+    serde_json::to_string(&access).map_err(|error| {
+        JsValue::from_str(&format!(
+            "Failed to serialize Rust evaluator cache access: {error}"
+        ))
+    })
+}
+
+#[wasm_bindgen]
+pub fn create_evaluation_cache_key_json(
+    prefix: &str,
+    candidate_json: &str,
+) -> Result<String, JsValue> {
+    let candidate: OptimizerCandidateInput = serde_json::from_str(candidate_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid candidate JSON: {error}")))?;
+    Ok(create_evaluation_cache_key(prefix, &candidate))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4080,6 +4246,61 @@ mod tests {
             .queue
             .iter()
             .all(|neighbor| neighbor.plan.turns.len() == candidate.plan.turns.len()));
+    }
+
+    #[test]
+    fn caches_evaluations_with_lru_metrics() {
+        let candidate = candidate_from_actions(vec!["hit"], vec!["passive-a"]);
+        assert_eq!(
+            create_evaluation_cache_key("prefix::", &candidate),
+            "prefix::passive-a::hit|hit"
+        );
+
+        let mut cache = EvaluatorCache::new(2);
+        let first = cache.get_or_insert("a".to_string(), serde_json::json!({"score":1}));
+        assert!(!first.hit);
+        assert_eq!(first.cache.metrics.cache_misses, 1);
+
+        let second = EvaluatorCache::from_snapshot(first.cache)
+            .get_or_insert("b".to_string(), serde_json::json!({"score":2}));
+        assert!(!second.hit);
+        assert_eq!(
+            second
+                .cache
+                .entries
+                .iter()
+                .map(|entry| entry.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+
+        let hit = EvaluatorCache::from_snapshot(second.cache)
+            .get_or_insert("a".to_string(), serde_json::json!({"score":99}));
+        assert!(hit.hit);
+        assert_eq!(hit.value, serde_json::json!({"score":1}));
+        assert_eq!(
+            hit.cache
+                .entries
+                .iter()
+                .map(|entry| entry.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b", "a"]
+        );
+
+        let evicted = EvaluatorCache::from_snapshot(hit.cache)
+            .get_or_insert("c".to_string(), serde_json::json!({"score":3}));
+        assert_eq!(
+            evicted
+                .cache
+                .entries
+                .iter()
+                .map(|entry| entry.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "c"]
+        );
+        assert_eq!(evicted.cache.metrics.cache_hits, 1);
+        assert_eq!(evicted.cache.metrics.cache_misses, 3);
+        assert_eq!(evicted.cache.metrics.cache_evictions, 1);
     }
 
     fn transformation_request() -> OptimizerRequest {
