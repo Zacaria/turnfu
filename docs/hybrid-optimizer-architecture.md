@@ -44,10 +44,11 @@ has a distinct job:
 
 | Source | Role | Typical effect |
 | --- | --- | --- |
-| Domain warmup | Starts from known high-value Huppermage T2 branches | Avoids spending budget rediscovering the 70k+ region |
+| Domain warmup | Starts from known high-value Huppermage branches and adapts them to action/passive caps | Avoids spending budget rediscovering strong branch skeletons |
 | Genetic offspring | Crosses strong candidates and mutates them | Keeps broad recombination pressure |
 | Local refinement | Mutates elite candidates by a few small steps | Exploits nearby improvements |
 | Elite neighbor queue | Tests targeted single and double changes around new bests | Escapes shallow local plateaus |
+| Repair queue | Reuses simulator violations to shorten invalid T3 branches | Recovers useful prefixes from overfull long plans |
 | Immigrants | Replaces stale population tail after stagnation | Restarts search while preserving elites |
 | Resource-aware fresh branches | Generates budget-plausible plans using AP/WP/BQ heuristics | Reduces obviously invalid fresh candidates without removing raw random exploration |
 
@@ -115,11 +116,13 @@ flowchart TD
     A --> C["Turn-level additions"]
     A --> D["Action deletions"]
     A --> E["Double elemental replacements"]
+    A --> H["Duration-2 relocations"]
 
     B --> F["Queue, dedupe, cap"]
     C --> F
     D --> F
     E --> F
+    H --> F
     F --> G["Evaluate before normal offspring"]
 ```
 
@@ -131,7 +134,11 @@ T2: papillons-diurnes -> eboulement
 T2: eboulement        -> ombres-dansantes
 ```
 
-That raised the best score from `76186.46` to `77414.10`.
+That raised the best score from `76186.46` to `77414.10`. Duration-two searches
+also get a bounded relocate neighborhood: one action can move to another slot in
+the same turn. This is intentionally disabled for duration-three searches after
+benchmarks showed it can spend useful T3 queue capacity without improving the
+best long-line score.
 
 ## Resource-aware fresh branches
 
@@ -218,15 +225,18 @@ Two-step neighborhood around 77414.10:
 ```
 
 The next useful architecture step is not more random volume. The hybrid engine
-now seeds two small structured neighborhoods from improved elites: adjacent
-action-order swaps around burst windows and passive-set variants around known
-spell skeletons. Known domain branches can also be reused as longer-duration
-prefixes; for example, a strong two-turn Huppermage seed can initialize a
-three-turn search and leave later turns open for extension. The seed adapter
-now respects action-count caps by truncating known turns instead of discarding
-the whole branch; this keeps capped searches anchored to useful Huppermage
-openers. When extending a shorter seed, the warmup also tries known prior turns
-as full next-turn templates before falling back to single weighted actions.
+now seeds small structured neighborhoods from improved elites: adjacent
+action-order swaps around burst windows, duration-two action relocations, and
+passive-set variants around known spell skeletons. Known domain branches can
+also be reused as longer-duration prefixes; for example, a strong two-turn
+Huppermage seed can initialize a three-turn search and leave later turns open
+for extension. The seed adapter respects action-count caps by truncating known
+turns instead of discarding the whole branch, and it now adapts passive caps by
+trying weighted subsets of the seed passives. This keeps capped searches
+anchored to useful Huppermage openers even when the requested passive count is
+lower than the original seed. When extending a shorter seed, the warmup also
+tries known prior turns as full next-turn templates before falling back to
+single weighted actions.
 
 The elite-neighbor queue is intentionally bounded by bucket: expensive
 two-action replacement neighbors cannot consume the whole generated queue before
@@ -237,7 +247,10 @@ when the simulator reports a precise failing `turnIndex` and `actionIndex`. The
 repair removes that failing action and queues the shortened plan as a normal
 future hybrid candidate. This is intentionally limited to duration-three runs:
 benchmarks showed large T3 gains, while T2 capped searches lost useful
-exploration when repairs were prioritized.
+exploration when repairs were prioritized. Repair processing is also burst-capped
+to two consecutive repairs. After that, the loop must give queued elite
+neighbors or normal offspring a chance to run; this prevents repair cascades
+from starving exploration on long T3 budgets.
 
 The best repair-discovered three-turn branch is now also a domain warmup seed.
 It reaches `102011.73` damage immediately on the reference Huppermage setup,
@@ -247,4 +260,7 @@ spending early iterations rediscovering it.
 Larger structured moves remain useful, for example:
 
 - whole-turn template recombination;
-- richer validity-repair guided by simulator violation types.
+- richer validity-repair guided by simulator violation types. A constructive
+  repair experiment that inserted cheap rune generators before class-state
+  violations was tested and rejected because it slightly reduced T3 valid rates
+  without improving best scores.
