@@ -1100,6 +1100,14 @@ function enqueueHybridEliteNeighbors(
       }
     }
 
+    if (turn.actions.length > 1) {
+      for (let actionIndex = 0; actionIndex < turn.actions.length; actionIndex += 1) {
+        const candidate = cloneCandidateInput(input);
+        candidate.plan.turns[turnIndex]?.actions.splice(actionIndex, 1);
+        addCandidate(candidate);
+      }
+    }
+
     for (let firstIndex = 0; firstIndex < turn.actions.length - 1; firstIndex += 1) {
       for (let secondIndex = firstIndex + 1; secondIndex < turn.actions.length; secondIndex += 1) {
         for (const firstAction of pairReplacementActions) {
@@ -1129,14 +1137,6 @@ function enqueueHybridEliteNeighbors(
   }
 
   for (const [turnIndex, turn] of input.plan.turns.entries()) {
-    if (turn.actions.length > 1) {
-      for (let actionIndex = 0; actionIndex < turn.actions.length; actionIndex += 1) {
-        const candidate = cloneCandidateInput(input);
-        candidate.plan.turns[turnIndex]?.actions.splice(actionIndex, 1);
-        addCandidate(candidate);
-      }
-    }
-
     if (turn.actions.length < context.options.maxActionsPerTurn) {
       for (const action of actions.slice(0, 4)) {
         const candidate = cloneCandidateInput(input);
