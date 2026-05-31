@@ -107,6 +107,8 @@ type OptimizerExperimentEvaluation = {
   simulation: ReturnType<typeof simulateCombo>;
 };
 
+type OptimizerExperimentEvaluationCache = Map<string, OptimizerExperimentEvaluation>;
+
 type EngineContext = {
   options: NormalizedExperimentOptions;
   evaluator: OptimizerExperimentEvaluator;
@@ -219,8 +221,8 @@ export async function runOptimizerExperimentProgressive(options: OptimizerExperi
 
 export function createOptimizerExperimentEvaluator(
   options: OptimizerExperimentEvaluatorOptions,
+  cache: OptimizerExperimentEvaluationCache = new Map(),
 ): OptimizerExperimentEvaluator {
-  const cache = new Map<string, OptimizerExperimentEvaluation>();
   const stats = {
     cacheHits: 0,
     cacheMisses: 0,
@@ -469,6 +471,7 @@ function runHybridEngine(context: EngineContext): OptimizerExperimentEngineResul
   const baseIterations = Math.floor(context.options.budget.iterations / islandCount);
   const remainder = context.options.budget.iterations % islandCount;
   const islandResults: OptimizerExperimentEngineResult[] = [];
+  const sharedEvaluationCache: OptimizerExperimentEvaluationCache = new Map();
 
   for (let islandIndex = 0; islandIndex < islandCount; islandIndex += 1) {
     const iterations = baseIterations + (islandIndex < remainder ? 1 : 0);
@@ -479,7 +482,7 @@ function runHybridEngine(context: EngineContext): OptimizerExperimentEngineResul
     };
     const islandContext: EngineContext = {
       options: islandOptions,
-      evaluator: createOptimizerExperimentEvaluator(islandOptions),
+      evaluator: createOptimizerExperimentEvaluator(islandOptions, sharedEvaluationCache),
       rng: createSeededRandom(`${context.options.seed}:hybrid:island:${islandIndex}`),
       sampler: createCandidateSampler(islandOptions, createSeededRandom(`${context.options.seed}:hybrid:sampler:${islandIndex}`)),
     };
@@ -1311,6 +1314,7 @@ async function runHybridEngineProgressive(context: EngineContext): Promise<Optim
   const baseIterations = Math.floor(context.options.budget.iterations / islandCount);
   const remainder = context.options.budget.iterations % islandCount;
   const islandResults: OptimizerExperimentEngineResult[] = [];
+  const sharedEvaluationCache: OptimizerExperimentEvaluationCache = new Map();
   let attemptOffset = 0;
 
   for (let islandIndex = 0; islandIndex < islandCount; islandIndex += 1) {
@@ -1333,7 +1337,7 @@ async function runHybridEngineProgressive(context: EngineContext): Promise<Optim
     };
     const islandContext: EngineContext = {
       options: islandOptions,
-      evaluator: createOptimizerExperimentEvaluator(islandOptions),
+      evaluator: createOptimizerExperimentEvaluator(islandOptions, sharedEvaluationCache),
       rng: createSeededRandom(`${context.options.seed}:hybrid:progressive-island:${islandIndex}`),
       sampler: createCandidateSampler(islandOptions, createSeededRandom(`${context.options.seed}:hybrid:progressive-sampler:${islandIndex}`)),
     };

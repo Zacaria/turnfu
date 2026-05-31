@@ -207,6 +207,7 @@ test("hybrid search lets long per-island runs refine locally before queued elite
   assert.equal(hybrid.engine, "hybrid");
   assert.ok((hybrid.metrics.hybridLocalRefinements ?? 0) > 0);
   assert.ok((hybrid.metrics.hybridEliteNeighborCandidates ?? 0) > 0);
+  assert.ok((hybrid.metrics.cacheHits ?? 0) > 0);
   assert.equal(hybrid.bestCandidate?.score.score, 144);
 });
 

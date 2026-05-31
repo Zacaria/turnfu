@@ -55,7 +55,10 @@ has a distinct job:
 ## Island model
 
 Large budgets are divided into independent islands. Each island gets its own RNG,
-sampler, evaluator cache, population, restarts, and elite-neighbor queue.
+sampler, population, restarts, and elite-neighbor queue. Islands share the same
+evaluation cache for a run, but keep per-island cache counters. This avoids
+re-simulating duplicated warmups and structured neighbors while preserving
+independent search paths.
 
 ```mermaid
 flowchart LR
