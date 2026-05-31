@@ -93,6 +93,7 @@ export type OptimizerExperimentEvaluatorOptions = {
 export type OptimizerExperimentEvaluatorStats = {
   cacheHits: number;
   cacheMisses: number;
+  cacheEvictions: number;
 };
 
 type OptimizerExperimentEvaluator = {
@@ -161,6 +162,8 @@ type NoveltyArchiveEntry = {
   localCompetition: number;
 };
 
+const DEFAULT_EVALUATION_CACHE_LIMIT = 20_000;
+
 export function runOptimizerExperiment(options: OptimizerExperimentOptions): OptimizerExperimentResult {
   const normalized = normalizeExperimentOptions(options);
   const engineResults = normalized.engines.map((engine, engineIndex) => {
@@ -227,13 +230,17 @@ export function createOptimizerExperimentEvaluator(
   const stats = {
     cacheHits: 0,
     cacheMisses: 0,
+    cacheEvictions: 0,
   };
 
   const evaluateDetailed = (candidate: OptimizerExperimentCandidateInput): OptimizerExperimentEvaluation => {
     const key = createCandidateCacheKey(cacheKeyPrefix, candidate);
-    if (cache.has(key)) {
+    const cached = cache.get(key);
+    if (cached) {
       stats.cacheHits += 1;
-      return cache.get(key)!;
+      cache.delete(key);
+      cache.set(key, cached);
+      return cached;
     }
 
     stats.cacheMisses += 1;
@@ -248,7 +255,7 @@ export function createOptimizerExperimentEvaluator(
 
     if (!simulation.valid) {
       const evaluation = { result: null, normalizedCandidate, simulation };
-      cache.set(key, evaluation);
+      setEvaluationCacheEntry(cache, key, evaluation, stats);
       return evaluation;
     }
 
@@ -266,7 +273,7 @@ export function createOptimizerExperimentEvaluator(
 
     if (!sustainability.sustainable) {
       const evaluation = { result: null, normalizedCandidate, simulation };
-      cache.set(key, evaluation);
+      setEvaluationCacheEntry(cache, key, evaluation, stats);
       return evaluation;
     }
 
@@ -282,7 +289,7 @@ export function createOptimizerExperimentEvaluator(
     };
 
     const evaluation = { result, normalizedCandidate, simulation };
-    cache.set(key, evaluation);
+    setEvaluationCacheEntry(cache, key, evaluation, stats);
     return evaluation;
   };
 
@@ -295,6 +302,22 @@ export function createOptimizerExperimentEvaluator(
       return { ...stats };
     },
   };
+}
+
+function setEvaluationCacheEntry(
+  cache: OptimizerExperimentEvaluationCache,
+  key: string,
+  evaluation: OptimizerExperimentEvaluation,
+  stats: OptimizerExperimentEvaluatorStats,
+) {
+  if (cache.size >= DEFAULT_EVALUATION_CACHE_LIMIT) {
+    const oldestKey = cache.keys().next().value;
+    if (oldestKey) {
+      cache.delete(oldestKey);
+      stats.cacheEvictions += 1;
+    }
+  }
+  cache.set(key, evaluation);
 }
 
 function runRandomEngine(context: EngineContext): OptimizerExperimentEngineResult {
