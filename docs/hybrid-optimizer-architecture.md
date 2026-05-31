@@ -277,7 +277,7 @@ Long-budget multi-turn mutation also tries this target flip before destructive
 append, delete, or replacement mutations when the selected turn contains a spell
 that can exist with or without an empty-cell target. This preserves the action
 order and resources of strong branches while exploring an axis that materially
-changes validity. It is gated to budgets of at least 1,000 iterations so tiny
+changes validity. It is gated to budgets of at least 80 iterations so tiny
 warmups keep their deterministic seed-first behavior.
 
 The best repair-discovered three-turn branches are now also domain warmup seeds.
