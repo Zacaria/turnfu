@@ -289,10 +289,12 @@ way to test empty-cell variants.
 
 Long-budget multi-turn mutation also tries this target flip before destructive
 append, delete, or replacement mutations when the selected turn contains a spell
-that can exist with or without an empty-cell target. This preserves the action
-order and resources of strong branches while exploring an axis that materially
-changes validity. It is gated to budgets of at least 80 iterations so tiny
-warmups keep their deterministic seed-first behavior.
+that can exist with or without an empty-cell target. On longer per-island
+budgets, if the initially selected turn has no such spell, mutation can select a
+second flippable turn before falling back to destructive edits. This preserves
+the action order and resources of strong branches while exploring an axis that
+materially changes validity. It is gated to budgets of at least 80 iterations so
+tiny warmups keep their deterministic seed-first behavior.
 
 The best repair-discovered three-turn branches are now also domain warmup seeds.
 The robust `102536.53` line is kept first to preserve early search diversity,

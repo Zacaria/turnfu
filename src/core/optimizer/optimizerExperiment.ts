@@ -1,6 +1,6 @@
 import type { CatalogEntry, Resource, SpellCost } from "../catalog/types.ts";
 import { simulateCombo } from "../simulation/comboSimulator.ts";
-import type { Action, ComboPlan, ComboSimulationOptions, SimulatedCharacter } from "../simulation/types.ts";
+import type { Action, ComboPlan, ComboSimulationOptions, SimulatedCharacter, TurnPlan } from "../simulation/types.ts";
 import {
   evaluateSustainableCycle,
   scoreComboSimulation,
@@ -2278,12 +2278,15 @@ function mutateCandidate(candidate: OptimizerExperimentCandidateInput, context: 
     const targetFlipSpellIds = new Set(actions
       .filter((action) => action.target?.kind === "emptyCell")
       .map((action) => action.spellId));
-    const flippableIndexes = turn.actions
+    const flippableTurn = context.options.budget.iterations >= 160 && !turnHasTargetFlip(turn, targetFlipSpellIds)
+      ? (next.plan.turns.find((candidateTurn) => turnHasTargetFlip(candidateTurn, targetFlipSpellIds)) ?? turn)
+      : turn;
+    const flippableIndexes = flippableTurn.actions
       .map((action, index) => ({ action, index }))
       .filter(({ action }) => targetFlipSpellIds.has(action.spellId));
     if (flippableIndexes.length > 0) {
       const { action, index } = context.rng.pick(flippableIndexes);
-      turn.actions[index] = action.target?.kind === "emptyCell"
+      flippableTurn.actions[index] = action.target?.kind === "emptyCell"
         ? { spellId: action.spellId }
         : { spellId: action.spellId, target: { kind: "emptyCell" } };
       return next;
@@ -2305,6 +2308,10 @@ function mutateCandidate(candidate: OptimizerExperimentCandidateInput, context: 
 
   turn.actions[context.rng.integer(0, turn.actions.length - 1)] = cloneAction(context.rng.pick(actions));
   return next;
+}
+
+function turnHasTargetFlip(turn: TurnPlan, targetFlipSpellIds: Set<string>): boolean {
+  return turn.actions.some((action) => targetFlipSpellIds.has(action.spellId));
 }
 
 function crossoverCandidates(
