@@ -1,3 +1,4 @@
+import { performance } from "node:perf_hooks";
 import { huppermageCatalog } from "../src/core/catalog/index.ts";
 import { runOptimizerExperiment } from "../src/core/optimizer/index.ts";
 import { createResources } from "../src/core/simulation/index.ts";
@@ -80,7 +81,9 @@ const availablePassiveIds = huppermageCatalog.filter((entry) => entry.kind === "
 
 for (const scenario of selectedScenarios) {
   for (const budget of budgets) {
+    const groupStart = performance.now();
     const rows = seeds.map((seed) => {
+      const runStart = performance.now();
       const result = runOptimizerExperiment({
         catalog: huppermageCatalog,
         character,
@@ -95,9 +98,12 @@ for (const scenario of selectedScenarios) {
         maxCandidates: 5,
         progressInterval: 1_000_000,
       });
+      const elapsedMs = performance.now() - runStart;
       const engine = result.engineResults[0]!;
       return {
         seed,
+        elapsedMs: round(elapsedMs),
+        attemptsPerSecond: round(engine.attempts / Math.max(0.001, elapsedMs / 1_000)),
         score: round(result.bestCandidate?.score.score ?? 0),
         validRate: round(engine.validCandidates / Math.max(1, engine.attempts), 4),
         attempts: engine.attempts,
@@ -108,9 +114,12 @@ for (const scenario of selectedScenarios) {
     });
     const scores = rows.map((row) => row.score).sort((left, right) => left - right);
     const validRates = rows.map((row) => row.validRate).sort((left, right) => left - right);
+    const elapsedMs = performance.now() - groupStart;
     console.log(JSON.stringify({
       scenario: scenario.id,
       budget,
+      elapsedMs: round(elapsedMs),
+      attemptsPerSecond: round(rows.reduce((total, row) => total + row.attempts, 0) / Math.max(0.001, elapsedMs / 1_000)),
       scores,
       medianScore: scores[Math.floor(scores.length / 2)] ?? 0,
       validRates,
