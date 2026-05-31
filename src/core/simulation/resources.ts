@@ -8,6 +8,10 @@ export const zeroResources: ResourcePool = {
   bq: 0,
 };
 
+export const huppermageBqPerWp = 75;
+export const huppermageBaseBq = 500;
+export const huppermageBaseWp = 6;
+
 export function createResources(input: Partial<ResourcePool>): ResourcePool {
   return {
     ap: input.ap ?? 0,
@@ -39,4 +43,8 @@ export function addResource(resources: ResourcePool, resource: Resource, amount:
     ...resources,
     [resource]: resources[resource] + amount,
   };
+}
+
+export function deriveHuppermageBqFromWp(wp: number): number {
+  return Math.max(0, huppermageBaseBq + (wp - huppermageBaseWp) * huppermageBqPerWp);
 }

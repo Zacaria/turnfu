@@ -8,6 +8,7 @@ import type {
   SimulatedCharacter,
 } from "../core/simulation/types.ts";
 import { createDefaultCharacter, defaultActionContext, defaultActionTarget } from "./defaults.ts";
+import { syncHuppermageBqFromWp } from "./statControls.ts";
 
 export type WakfuClassId =
   | "huppermage"
@@ -489,9 +490,9 @@ export function formatElements(elements: Partial<Record<Element, number>>): stri
 
 function createSeedHuppermageCharacter(): SimulatedCharacter {
   const character = createDefaultCharacter();
-  return {
+  return syncHuppermageBqFromWp({
     ...character,
-    resources: createResources({ ap: 12, mp: 6, wp: 6, bq: 500 }),
+    resources: createResources({ ap: 12, mp: 6, wp: 6, bq: 0 }),
     stats: {
       ...character.stats,
       generalMastery: 1200,
@@ -507,7 +508,7 @@ function createSeedHuppermageCharacter(): SimulatedCharacter {
       criticalMastery: 150,
       damageInflictedPercent: 20,
     },
-  };
+  });
 }
 
 function createStableId(prefix: string, label: string, now: string): string {

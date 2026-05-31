@@ -1762,6 +1762,34 @@ test("converts configured PW into initial BQ when enabled", () => {
   assert.equal(result.finalState.classState.huppermage?.bqMax, 150);
 });
 
+test("defaults Huppermage BQ max to 500 plus PW variations", () => {
+  const baselineResult = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      resources: createResources({ ap: 6, mp: 3, wp: 6, bq: 0 }),
+      classState: {
+        huppermage: {},
+      },
+    },
+    sequence: { actions: [] },
+  });
+  const boostedResult = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      resources: createResources({ ap: 6, mp: 3, wp: 8, bq: 0 }),
+      classState: {
+        huppermage: {},
+      },
+    },
+    sequence: { actions: [] },
+  });
+
+  assert.equal(baselineResult.finalState.classState.huppermage?.bqMax, 500);
+  assert.equal(boostedResult.finalState.classState.huppermage?.bqMax, 650);
+});
+
 test("applies turn-end natural BQ regeneration and stored BQ", () => {
   const result = simulateTurn({
     catalog: testCatalog,

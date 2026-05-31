@@ -318,7 +318,7 @@ export function computeAptitudeStats(distribution: AptitudeDistribution): Applie
       ap: 6 + (totals.ap ?? 0),
       mp: 3 + (totals.mp ?? 0),
       wp: 6 + (totals.wp ?? 0),
-      bq: 500,
+      bq: 0,
     }),
     stats,
     totals,

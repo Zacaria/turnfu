@@ -1,6 +1,13 @@
 import type { CatalogEntry, DamageEffect, Effect, Element, Resource, Rune, SpellCost, StatModifierEffect } from "../catalog/types.ts";
 import { computeRawDamage, resolveActionContext, resolveDamageElement, roundDamage } from "./damage.ts";
-import { addResource, cloneResources, getCostAmount, payCost } from "./resources.ts";
+import {
+  addResource,
+  cloneResources,
+  deriveHuppermageBqFromWp,
+  getCostAmount,
+  huppermageBqPerWp,
+  payCost,
+} from "./resources.ts";
 import { findSpell, validateSpellAction } from "./validation.ts";
 import type {
   ActionContext,
@@ -222,7 +229,7 @@ export function simulateTurn(options: SimulationOptions): SimulationResult {
 
 function createInitialTurnState(character: SimulationOptions["character"], catalog: CatalogEntry[]): TurnState {
   const initialResources = character.classState?.huppermage?.convertWpToBq
-    ? addResource(character.resources, "bq", character.resources.wp * 75)
+    ? addResource(character.resources, "bq", character.resources.wp * huppermageBqPerWp)
     : cloneResources(character.resources);
   const baseClassState = createClassState({ ...character, resources: initialResources });
   const initialPassiveState = applyInitialPassives(
@@ -387,7 +394,11 @@ function createClassState(character: SimulationOptions["character"]): ClassTurnS
       activeHeart: character.classState?.huppermage?.activeHeart ?? null,
       waterHeartLastSpellKind: character.classState?.huppermage?.waterHeartLastSpellKind ?? null,
       bqMax: character.classState?.huppermage?.bqMax
-        ?? Math.max(character.resources.bq, character.resources.wp * 75),
+        ?? (
+          character.classState?.huppermage?.convertWpToBq
+            ? Math.max(character.resources.bq, character.resources.wp * huppermageBqPerWp)
+            : Math.max(character.resources.bq, deriveHuppermageBqFromWp(character.resources.wp))
+        ),
       storedBq: character.classState?.huppermage?.storedBq ?? 0,
       haloChatoyantMarks: character.classState?.huppermage?.haloChatoyantMarks ?? 0,
       cooldownsBySpellId: { ...character.classState?.huppermage?.cooldownsBySpellId },

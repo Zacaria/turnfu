@@ -134,7 +134,13 @@ import {
   type UiLocale,
 } from "./i18n.ts?v=optimizer-session-ref-v1";
 import { getRuneIconSrc } from "./spellAttributeIcons.ts";
-import { getStatStep } from "./statControls.ts";
+import {
+  createHuppermageBuildResources,
+  getBuildResourceOptions,
+  getCombatResourceOptions,
+  getStatStep,
+  syncHuppermageBqFromWp,
+} from "./statControls.ts";
 import {
   createTimelineDropIntent,
   shouldRemoveTimelineActionOnDragEnd,
@@ -168,7 +174,6 @@ type DragPayload =
 
 const dragPayloadType = "application/x-wakfu-turn-action";
 const runeOptions: Rune[] = ["incandescent", "aquatic", "telluric", "aerial"];
-const resourceOptions: Resource[] = ["ap", "mp", "wp", "bq"];
 const elementOptions: Element[] = ["fire", "water", "earth", "air", "light", "neutral"];
 const targetOptions: ActionTarget["kind"][] = ["enemy", "ally", "fighter", "emptyCell", "feuFollet"];
 const positionOptions: AttackPosition[] = ["face", "side", "rear"];
@@ -1199,16 +1204,11 @@ function createCharacterFromBuild(
     stats[key] = aptitudeStats.stats[key] + equipmentCharacter.stats[key];
   }
 
-  return {
+  return syncHuppermageBqFromWp({
     ...characterConfig,
-    resources: createResources({
-      ap: aptitudeStats.resources.ap + equipmentCharacter.resources.ap,
-      mp: aptitudeStats.resources.mp + equipmentCharacter.resources.mp,
-      wp: aptitudeStats.resources.wp + equipmentCharacter.resources.wp,
-      bq: aptitudeStats.resources.bq + equipmentCharacter.resources.bq,
-    }),
+    resources: createHuppermageBuildResources(aptitudeStats.resources, equipmentCharacter.resources),
     stats,
-  };
+  });
 }
 
 function writeDragPayload(event: React.DragEvent, payload: DragPayload) {
@@ -1291,7 +1291,7 @@ function createEquipmentCharacterFromFinalCharacter(
       ap: finalCharacter.resources.ap - aptitudeStats.resources.ap,
       mp: finalCharacter.resources.mp - aptitudeStats.resources.mp,
       wp: finalCharacter.resources.wp - aptitudeStats.resources.wp,
-      bq: finalCharacter.resources.bq - aptitudeStats.resources.bq,
+      bq: 0,
     }),
     stats,
   };
@@ -1477,10 +1477,10 @@ function CenterTabs({ onChange, value }: { onChange: (tab: CenterTabId) => void;
   );
 }
 
-function ResourceStrip({ resources }: { resources: SimulatedCharacter["resources"] }) {
+function ResourceStrip({ className = "huppermage", resources }: { className?: string; resources: SimulatedCharacter["resources"] }) {
   return (
     <div className="resource-strip" aria-label={t("resources.current")}>
-      {resourceOptions.map((resource) => (
+      {getCombatResourceOptions(className).map((resource) => (
         <span
           key={resource}
           className={`resource-chip resource-${resource}`}
@@ -2375,7 +2375,7 @@ function ResourceEditor({ character, onChange }: { character: SimulatedCharacter
     <section className="form-section">
       <h3>{t("form.resources")}</h3>
       <div className="stat-stepper-list">
-        {resourceOptions.map((resource) => (
+        {getBuildResourceOptions(character.className).map((resource) => (
           <StatStepper
             key={resource}
             icon={getResourceIconSrc(resource)}

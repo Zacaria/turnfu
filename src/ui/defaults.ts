@@ -1,5 +1,6 @@
 import { createResources } from "../core/simulation/index.ts";
 import type { ActionContext, ActionTarget, BaseStats, SimulatedCharacter } from "../core/simulation/types.ts";
+import { syncHuppermageBqFromWp } from "./statControls.ts";
 
 export const defaultActionContext: ActionContext = {
   position: "face",
@@ -51,10 +52,10 @@ export const defaultStats: BaseStats = {
 };
 
 export function createDefaultCharacter(): SimulatedCharacter {
-  return {
+  return syncHuppermageBqFromWp({
     id: "huppermage-ui",
     className: "huppermage",
-    resources: createResources({ ap: 12, mp: 6, wp: 6, bq: 500 }),
+    resources: createResources({ ap: 12, mp: 6, wp: 6, bq: 0 }),
     stats: defaultStats,
     classState: {
       huppermage: {
@@ -68,12 +69,12 @@ export function createDefaultCharacter(): SimulatedCharacter {
         activePassives: ["extension-des-sens"],
         activeHeart: null,
         waterHeartLastSpellKind: null,
-        bqMax: 500,
+        bqMax: 0,
         storedBq: 0,
         haloChatoyantMarks: 0,
         deckSpellLimit: 12,
         passiveLimit: 6,
       },
     },
-  };
+  });
 }

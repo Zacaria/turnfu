@@ -43,6 +43,7 @@ test("computes base resources and supported stats from allocation", () => {
   assert.equal(result.resources.ap, 7);
   assert.equal(result.resources.mp, 4);
   assert.equal(result.resources.wp, 6);
+  assert.equal(result.resources.bq, 0);
   assert.equal(result.stats.generalMastery, 310);
   assert.equal(result.stats.damageInflictedPercent, 10);
   assert.equal(result.stats.range, 1);

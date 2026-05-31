@@ -288,12 +288,12 @@ test("setup snapshots are versioned instead of mutated", () => {
     version: setup.version + 1,
     character: {
       ...setup.character,
-      resources: createResources({ ...setup.character.resources, bq: 450 }),
+      resources: createResources({ ...setup.character.resources, bq: 375 }),
     },
   };
 
   assert.equal(setup.version, 1);
   assert.equal(edited.version, 2);
   assert.equal(setup.character.resources.bq, 500);
-  assert.equal(edited.character.resources.bq, 450);
+  assert.equal(edited.character.resources.bq, 375);
 });
