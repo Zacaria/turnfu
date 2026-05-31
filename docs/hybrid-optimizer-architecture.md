@@ -253,9 +253,11 @@ neighbors or normal offspring a chance to run; this prevents repair cascades
 from starving exploration on long T3 budgets.
 
 The best repair-discovered three-turn branch is now also a domain warmup seed.
-It reaches `102011.73` damage immediately on the reference Huppermage setup,
+It reaches `102064.11` damage immediately on the reference Huppermage setup,
 so small-budget T3 searches start from the strongest known line instead of
-spending early iterations rediscovering it.
+spending early iterations rediscovering it. High-budget T2 capped discoveries
+are also promoted back into warmup seeds so constrained two-turn searches do not
+need to rediscover their best known branches.
 
 Larger structured moves remain useful, for example:
 
