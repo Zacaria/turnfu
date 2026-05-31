@@ -78,7 +78,7 @@ flowchart LR
 
 This makes the search less sensitive to one bad random path. It also keeps
 restart behavior local to each branch family. Within each island, restart
-stagnation is capped at the current population size rather than a smaller
+stagnation is capped at twice the current population size rather than a smaller
 fraction, so target-preserving repairs and elite neighbors get enough time to
 run before the island injects fresh immigrants.
 
