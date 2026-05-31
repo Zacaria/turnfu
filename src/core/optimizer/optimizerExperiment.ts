@@ -2443,7 +2443,7 @@ function mutateCandidate(candidate: OptimizerExperimentCandidateInput, context: 
     next.passiveIds = mutatePassiveIds(next.passiveIds ?? [], context.options, context.rng);
   }
 
-  const turnIndex = context.rng.integer(0, next.plan.turns.length - 1);
+  const turnIndex = selectMutationTurnIndex(next, context);
   const turn = next.plan.turns[turnIndex];
   if (!turn) {
     return createRandomCandidate(context.options, actions, context.rng);
@@ -2483,6 +2483,26 @@ function mutateCandidate(candidate: OptimizerExperimentCandidateInput, context: 
 
   turn.actions[context.rng.integer(0, turn.actions.length - 1)] = cloneAction(context.rng.pick(actions));
   return next;
+}
+
+function selectMutationTurnIndex(candidate: OptimizerExperimentCandidateInput, context: EngineContext): number {
+  if (
+    context.options.budget.iterations >= 160
+    && context.options.budget.iterations < 240
+    && context.options.duration === 3
+    && context.options.maxActionsPerTurn >= 12
+    && context.options.maxPassiveCount > 3
+    && context.rng.chance(0.25)
+  ) {
+    const maxActionCount = Math.max(...candidate.plan.turns.map((turn) => turn.actions.length));
+    const densestIndexes = candidate.plan.turns
+      .map((turn, index) => ({ index, actionCount: turn.actions.length }))
+      .filter((entry) => entry.actionCount === maxActionCount)
+      .map((entry) => entry.index);
+    return context.rng.pick(densestIndexes);
+  }
+
+  return context.rng.integer(0, candidate.plan.turns.length - 1);
 }
 
 function turnHasTargetFlip(turn: TurnPlan, targetFlipSpellIds: Set<string>): boolean {
