@@ -1,4 +1,4 @@
-import type { CatalogEntry } from "../catalog/types.ts";
+import type { CatalogEntry, Resource, SpellCost } from "../catalog/types.ts";
 import { simulateCombo } from "../simulation/comboSimulator.ts";
 import type { Action, ComboPlan, ComboSimulationOptions, SimulatedCharacter } from "../simulation/types.ts";
 import {
@@ -127,6 +127,7 @@ type EngineAccumulator = {
 type CandidateSampler = {
   next(): OptimizerExperimentCandidateInput;
   random(): OptimizerExperimentCandidateInput;
+  resourceAware(): OptimizerExperimentCandidateInput;
 };
 
 type SeededRandom = {
@@ -140,6 +141,8 @@ type ActionStat = {
   visits: number;
   totalReward: number;
 };
+
+type SoftResourcePool = Record<Resource, number>;
 
 type NoveltyArchiveEntry = {
   input: OptimizerExperimentCandidateInput;
@@ -436,6 +439,42 @@ function runGeneticEngine(context: EngineContext): OptimizerExperimentEngineResu
 }
 
 function runHybridEngine(context: EngineContext): OptimizerExperimentEngineResult {
+  const islandCount = getHybridIslandCount(context.options.budget.iterations);
+  if (islandCount <= 1) {
+    const result = runHybridSingleEngine(context);
+    return {
+      ...result,
+      metrics: {
+        ...result.metrics,
+        hybridIslands: 1,
+      },
+    };
+  }
+
+  const baseIterations = Math.floor(context.options.budget.iterations / islandCount);
+  const remainder = context.options.budget.iterations % islandCount;
+  const islandResults: OptimizerExperimentEngineResult[] = [];
+
+  for (let islandIndex = 0; islandIndex < islandCount; islandIndex += 1) {
+    const iterations = baseIterations + (islandIndex < remainder ? 1 : 0);
+    const islandOptions: NormalizedExperimentOptions = {
+      ...context.options,
+      budget: { iterations },
+      progressInterval: Math.max(1, Math.floor(iterations / 10)),
+    };
+    const islandContext: EngineContext = {
+      options: islandOptions,
+      evaluator: createOptimizerExperimentEvaluator(islandOptions),
+      rng: createSeededRandom(`${context.options.seed}:hybrid:island:${islandIndex}`),
+      sampler: createCandidateSampler(islandOptions, createSeededRandom(`${context.options.seed}:hybrid:sampler:${islandIndex}`)),
+    };
+    islandResults.push(runHybridSingleEngine(islandContext));
+  }
+
+  return mergeHybridIslandResults(context, islandResults);
+}
+
+function runHybridSingleEngine(context: EngineContext): OptimizerExperimentEngineResult {
   const accumulator = createEngineAccumulator("hybrid", context.options.budget);
   const populationSize = Math.max(8, Math.min(96, Math.floor(Math.sqrt(context.options.budget.iterations)) * 2));
   const eliteCount = Math.max(2, Math.ceil(populationSize * 0.15));
@@ -443,6 +482,7 @@ function runHybridEngine(context: EngineContext): OptimizerExperimentEngineResul
   const stagnationLimit = Math.max(8, Math.min(80, Math.floor(populationSize * 0.75)));
   const localRefinementInterval = Math.max(3, Math.floor(populationSize / 4));
   let population: Array<{ input: OptimizerExperimentCandidateInput; result: OptimizerExperimentCandidate }> = [];
+  const eliteNeighborQueue: OptimizerExperimentCandidateInput[] = [];
   let attemptsSinceImprovement = 0;
 
   while (accumulator.attempts < context.options.budget.iterations && population.length < populationSize) {
@@ -454,6 +494,9 @@ function runHybridEngine(context: EngineContext): OptimizerExperimentEngineResul
     attemptsSinceImprovement = improved ? 0 : attemptsSinceImprovement + 1;
     if (result) {
       population.push({ input, result });
+      if (improved) {
+        enqueueHybridEliteNeighbors(eliteNeighborQueue, input, context);
+      }
     }
   }
 
@@ -465,18 +508,21 @@ function runHybridEngine(context: EngineContext): OptimizerExperimentEngineResul
     }
 
     if (population.length < 2) {
-      const input = context.sampler.random();
+      const input = createHybridFreshCandidate(context, accumulator);
       const { result, improved } = evaluateAndTrackImprovement(context, accumulator, input);
       attemptsSinceImprovement = improved ? 0 : attemptsSinceImprovement + 1;
       if (result) {
         population.push({ input, result });
+        if (improved) {
+          enqueueHybridEliteNeighbors(eliteNeighborQueue, input, context);
+        }
         population = rankPopulation(population).slice(0, populationSize);
       }
       continue;
     }
 
     if (attemptsSinceImprovement >= stagnationLimit) {
-      const immigrants = injectHybridImmigrants(context, accumulator, population, eliteCount, immigrantBatchSize, populationSize);
+      const immigrants = injectHybridImmigrants(context, accumulator, population, eliteNeighborQueue, eliteCount, immigrantBatchSize, populationSize);
       population = immigrants.population;
       attemptsSinceImprovement = immigrants.improved ? 0 : Math.floor(stagnationLimit / 2);
       accumulator.metrics.hybridRestarts = (accumulator.metrics.hybridRestarts ?? 0) + 1;
@@ -484,10 +530,15 @@ function runHybridEngine(context: EngineContext): OptimizerExperimentEngineResul
       continue;
     }
 
-    const shouldRefineLocally = accumulator.attempts % localRefinementInterval === 0;
-    const input = shouldRefineLocally
-      ? createHybridLocalRefinement(population, context)
-      : createHybridOffspring(population, context);
+    const eliteNeighbor = eliteNeighborQueue.shift();
+    const shouldRefineLocally = !eliteNeighbor && accumulator.attempts % localRefinementInterval === 0;
+    const input = eliteNeighbor
+      ?? (shouldRefineLocally
+        ? createHybridLocalRefinement(population, context)
+        : createHybridOffspring(population, context, accumulator));
+    if (eliteNeighbor) {
+      accumulator.metrics.hybridEliteNeighborCandidates = (accumulator.metrics.hybridEliteNeighborCandidates ?? 0) + 1;
+    }
     if (shouldRefineLocally) {
       accumulator.metrics.hybridLocalRefinements = (accumulator.metrics.hybridLocalRefinements ?? 0) + 1;
     }
@@ -496,6 +547,9 @@ function runHybridEngine(context: EngineContext): OptimizerExperimentEngineResul
     attemptsSinceImprovement = improved ? 0 : attemptsSinceImprovement + 1;
     if (result) {
       population.push({ input, result });
+      if (improved) {
+        enqueueHybridEliteNeighbors(eliteNeighborQueue, input, context);
+      }
       population = rankPopulation(population).slice(0, populationSize);
     }
   }
@@ -504,6 +558,64 @@ function runHybridEngine(context: EngineContext): OptimizerExperimentEngineResul
   accumulator.metrics.hybridEliteCount = Math.min(eliteCount, population.length);
   accumulator.metrics.hybridStagnationLimit = stagnationLimit;
   return finalizeEngineResult(context, accumulator);
+}
+
+function getHybridIslandCount(iterations: number): number {
+  if (iterations < 80) {
+    return 1;
+  }
+
+  return Math.min(6, Math.max(2, Math.floor(Math.sqrt(iterations) / 5)));
+}
+
+function mergeHybridIslandResults(
+  context: EngineContext,
+  islandResults: OptimizerExperimentEngineResult[],
+): OptimizerExperimentEngineResult {
+  const topCandidates = new Map<string, OptimizerExperimentCandidate>();
+  for (const candidate of islandResults.flatMap((result) => result.topCandidates)) {
+    topCandidates.set(candidate.id, candidate);
+  }
+  const rankedTopCandidates = [...topCandidates.values()].sort(compareCandidates);
+  const maxCandidates = clampInteger(context.options.maxCandidates ?? 20, 1, 200);
+  const metrics = mergeHybridIslandMetrics(islandResults);
+
+  return {
+    engine: "hybrid",
+    budget: context.options.budget,
+    attempts: islandResults.reduce((total, result) => total + result.attempts, 0),
+    validCandidates: islandResults.reduce((total, result) => total + result.validCandidates, 0),
+    invalidCandidates: islandResults.reduce((total, result) => total + result.invalidCandidates, 0),
+    bestCandidate: pickBestCandidate(rankedTopCandidates),
+    topCandidates: rankedTopCandidates.slice(0, maxCandidates),
+    progress: islandResults.flatMap((result, islandIndex) => result.progress.map((progress) => ({
+      ...progress,
+      metrics: {
+        ...progress.metrics,
+        hybridIsland: islandIndex + 1,
+        hybridIslands: islandResults.length,
+      },
+    }))),
+    metrics,
+  };
+}
+
+function mergeHybridIslandMetrics(islandResults: OptimizerExperimentEngineResult[]): Record<string, number> {
+  const metrics: Record<string, number> = {
+    hybridIslands: islandResults.length,
+  };
+
+  for (const result of islandResults) {
+    for (const [key, value] of Object.entries(result.metrics)) {
+      if (!Number.isFinite(value)) {
+        continue;
+      }
+      metrics[key] = (metrics[key] ?? 0) + value;
+    }
+  }
+
+  metrics.populationSize = islandResults.reduce((total, result) => total + (result.metrics.populationSize ?? 0), 0);
+  return metrics;
 }
 
 function evaluateAndTrackImprovement(
@@ -524,6 +636,7 @@ function injectHybridImmigrants(
   context: EngineContext,
   accumulator: EngineAccumulator,
   population: Array<{ input: OptimizerExperimentCandidateInput; result: OptimizerExperimentCandidate }>,
+  eliteNeighborQueue: OptimizerExperimentCandidateInput[],
   eliteCount: number,
   immigrantBatchSize: number,
   populationSize: number,
@@ -546,12 +659,15 @@ function injectHybridImmigrants(
     }
     const input = context.rng.chance(0.35) && nextPopulation.length > 0
       ? createHybridLocalRefinement(nextPopulation, context)
-      : context.sampler.random();
+      : createHybridFreshCandidate(context, accumulator);
     const tracked = evaluateAndTrackImprovement(context, accumulator, input);
     improved = improved || tracked.improved;
     immigrantCount += 1;
     if (tracked.result) {
       nextPopulation.push({ input, result: tracked.result });
+      if (tracked.improved) {
+        enqueueHybridEliteNeighbors(eliteNeighborQueue, input, context);
+      }
     }
   }
 
@@ -565,15 +681,153 @@ function injectHybridImmigrants(
 function createHybridOffspring(
   population: Array<{ input: OptimizerExperimentCandidateInput; result: OptimizerExperimentCandidate }>,
   context: EngineContext,
+  accumulator: EngineAccumulator,
 ): OptimizerExperimentCandidateInput {
   if (context.rng.chance(0.18)) {
-    return context.sampler.random();
+    return createHybridFreshCandidate(context, accumulator);
   }
 
   const parentA = tournamentSelect(population, context.rng);
   const parentB = tournamentSelect(population, context.rng);
   const child = crossoverCandidates(parentA.input, parentB.input, context.options, context.rng);
   return mutateCandidate(child, context);
+}
+
+function createHybridFreshCandidate(
+  context: EngineContext,
+  accumulator: EngineAccumulator,
+): OptimizerExperimentCandidateInput {
+  if (context.rng.chance(0.12)) {
+    accumulator.metrics.hybridResourceAwareCandidates = (accumulator.metrics.hybridResourceAwareCandidates ?? 0) + 1;
+    return context.sampler.resourceAware();
+  }
+
+  return context.sampler.random();
+}
+
+function enqueueHybridEliteNeighbors(
+  queue: OptimizerExperimentCandidateInput[],
+  input: OptimizerExperimentCandidateInput,
+  context: EngineContext,
+) {
+  const maxQueueSize = 1_024;
+  const maxGenerated = 640;
+  const actions = getTopWeightedActions(context.options, Math.min(20, getSearchActions(context.options).length));
+  const pairReplacementActions = getHybridPairReplacementActions(context.options);
+  const seen = new Set(queue.map((candidate) => serializeExperimentCandidate(normalizeCandidate(candidate))));
+  let generated = 0;
+
+  const addCandidate = (candidate: OptimizerExperimentCandidateInput) => {
+    if (queue.length >= maxQueueSize || generated >= maxGenerated) {
+      return;
+    }
+
+    const normalized = normalizeCandidate(candidate);
+    const key = serializeExperimentCandidate(normalized);
+    if (seen.has(key)) {
+      return;
+    }
+
+    seen.add(key);
+    queue.push(normalized);
+    generated += 1;
+  };
+
+  for (let turnIndex = input.plan.turns.length - 1; turnIndex >= 0; turnIndex -= 1) {
+    const turn = input.plan.turns[turnIndex];
+    if (!turn) {
+      continue;
+    }
+
+    for (let firstIndex = 0; firstIndex < turn.actions.length - 1; firstIndex += 1) {
+      for (let secondIndex = firstIndex + 1; secondIndex < turn.actions.length; secondIndex += 1) {
+        for (const firstAction of pairReplacementActions) {
+          if (serializeAction(turn.actions[firstIndex]!) === serializeAction(firstAction)) {
+            continue;
+          }
+          for (const secondAction of pairReplacementActions) {
+            if (serializeAction(turn.actions[secondIndex]!) === serializeAction(secondAction)) {
+              continue;
+            }
+            const candidate = cloneCandidateInput(input);
+            candidate.plan.turns[turnIndex]!.actions[firstIndex] = cloneAction(firstAction);
+            candidate.plan.turns[turnIndex]!.actions[secondIndex] = cloneAction(secondAction);
+            addCandidate(candidate);
+          }
+        }
+      }
+    }
+  }
+
+  for (const [turnIndex, turn] of input.plan.turns.entries()) {
+    if (turn.actions.length > 1) {
+      for (let actionIndex = 0; actionIndex < turn.actions.length; actionIndex += 1) {
+        const candidate = cloneCandidateInput(input);
+        candidate.plan.turns[turnIndex]?.actions.splice(actionIndex, 1);
+        addCandidate(candidate);
+      }
+    }
+
+    if (turn.actions.length < context.options.maxActionsPerTurn) {
+      for (const action of actions.slice(0, 4)) {
+        const candidate = cloneCandidateInput(input);
+        candidate.plan.turns[turnIndex]?.actions.push(cloneAction(action));
+        addCandidate(candidate);
+      }
+    }
+
+    for (let actionIndex = 0; actionIndex < turn.actions.length; actionIndex += 1) {
+      for (const action of actions) {
+        if (serializeAction(turn.actions[actionIndex]!) === serializeAction(action)) {
+          continue;
+        }
+        const candidate = cloneCandidateInput(input);
+        candidate.plan.turns[turnIndex]!.actions[actionIndex] = cloneAction(action);
+        addCandidate(candidate);
+      }
+    }
+  }
+}
+
+function getHybridPairReplacementActions(options: NormalizedExperimentOptions): Action[] {
+  const entriesBySpellId = new Map(options.catalog.map((entry) => [entry.id, entry]));
+  return getSearchActions(options).filter((action) => {
+    const spell = entriesBySpellId.get(action.spellId);
+    if (!spell || spell.element === "light" || spell.element === "neutral") {
+      return false;
+    }
+
+    return getSoftCostAmount(spell.cost, "ap") <= 2
+      && getSoftCostAmount(spell.cost, "mp") === 0
+      && getSoftCostAmount(spell.cost, "wp") === 0
+      && getSoftCostAmount(spell.cost, "bq") === 0;
+  });
+}
+
+function getTopWeightedActions(options: NormalizedExperimentOptions, limit: number): Action[] {
+  const entriesBySpellId = new Map(options.catalog.map((entry) => [entry.id, entry]));
+  return getSearchActions(options)
+    .map((action) => ({
+      action,
+      weight: getActionSearchWeight(entriesBySpellId.get(action.spellId) ?? {
+        kind: "spell",
+        id: action.spellId,
+        name: action.spellId,
+        className: "huppermage",
+        level: 0,
+        effects: [],
+        constraints: [],
+        tags: [],
+        metadata: {
+          status: "unverified",
+          normalizedLevel: 0,
+          sources: [],
+        },
+      }),
+    }))
+    .sort((left, right) => right.weight - left.weight)
+    .slice(0, Math.max(1, limit))
+    .map((entry) => entry.action);
 }
 
 function createHybridLocalRefinement(
@@ -599,6 +853,56 @@ function rankPopulation(
 }
 
 async function runHybridEngineProgressive(context: EngineContext): Promise<OptimizerExperimentEngineResult> {
+  const islandCount = getHybridIslandCount(context.options.budget.iterations);
+  if (islandCount <= 1) {
+    const result = await runHybridSingleEngineProgressive(context);
+    return {
+      ...result,
+      metrics: {
+        ...result.metrics,
+        hybridIslands: 1,
+      },
+    };
+  }
+
+  const baseIterations = Math.floor(context.options.budget.iterations / islandCount);
+  const remainder = context.options.budget.iterations % islandCount;
+  const islandResults: OptimizerExperimentEngineResult[] = [];
+  let attemptOffset = 0;
+
+  for (let islandIndex = 0; islandIndex < islandCount; islandIndex += 1) {
+    const iterations = baseIterations + (islandIndex < remainder ? 1 : 0);
+    const islandOptions: NormalizedExperimentOptions = {
+      ...context.options,
+      budget: { iterations },
+      progressInterval: Math.max(1, Math.floor(iterations / 10)),
+      onProgress: (progress) => {
+        context.options.onProgress?.({
+          ...progress,
+          attempts: attemptOffset + progress.attempts,
+          metrics: {
+            ...progress.metrics,
+            hybridIsland: islandIndex + 1,
+            hybridIslands: islandCount,
+          },
+        });
+      },
+    };
+    const islandContext: EngineContext = {
+      options: islandOptions,
+      evaluator: createOptimizerExperimentEvaluator(islandOptions),
+      rng: createSeededRandom(`${context.options.seed}:hybrid:progressive-island:${islandIndex}`),
+      sampler: createCandidateSampler(islandOptions, createSeededRandom(`${context.options.seed}:hybrid:progressive-sampler:${islandIndex}`)),
+    };
+    const islandResult = await runHybridSingleEngineProgressive(islandContext);
+    islandResults.push(islandResult);
+    attemptOffset += islandResult.attempts;
+  }
+
+  return mergeHybridIslandResults(context, islandResults);
+}
+
+async function runHybridSingleEngineProgressive(context: EngineContext): Promise<OptimizerExperimentEngineResult> {
   const accumulator = createEngineAccumulator("hybrid", context.options.budget);
   const populationSize = Math.max(8, Math.min(96, Math.floor(Math.sqrt(context.options.budget.iterations)) * 2));
   const eliteCount = Math.max(2, Math.ceil(populationSize * 0.15));
@@ -606,6 +910,7 @@ async function runHybridEngineProgressive(context: EngineContext): Promise<Optim
   const stagnationLimit = Math.max(8, Math.min(80, Math.floor(populationSize * 0.75)));
   const localRefinementInterval = Math.max(3, Math.floor(populationSize / 4));
   let population: Array<{ input: OptimizerExperimentCandidateInput; result: OptimizerExperimentCandidate }> = [];
+  const eliteNeighborQueue: OptimizerExperimentCandidateInput[] = [];
   let attemptsSinceImprovement = 0;
 
   while (accumulator.attempts < context.options.budget.iterations && population.length < populationSize) {
@@ -617,6 +922,9 @@ async function runHybridEngineProgressive(context: EngineContext): Promise<Optim
     attemptsSinceImprovement = improved ? 0 : attemptsSinceImprovement + 1;
     if (result) {
       population.push({ input, result });
+      if (improved) {
+        enqueueHybridEliteNeighbors(eliteNeighborQueue, input, context);
+      }
     }
     await yieldHybridProgress(context, accumulator, population.length, populationSize);
   }
@@ -629,11 +937,14 @@ async function runHybridEngineProgressive(context: EngineContext): Promise<Optim
     }
 
     if (population.length < 2) {
-      const input = context.sampler.random();
+      const input = createHybridFreshCandidate(context, accumulator);
       const { result, improved } = evaluateAndTrackImprovement(context, accumulator, input);
       attemptsSinceImprovement = improved ? 0 : attemptsSinceImprovement + 1;
       if (result) {
         population.push({ input, result });
+        if (improved) {
+          enqueueHybridEliteNeighbors(eliteNeighborQueue, input, context);
+        }
         population = rankPopulation(population).slice(0, populationSize);
       }
       await yieldHybridProgress(context, accumulator, population.length, populationSize);
@@ -641,7 +952,7 @@ async function runHybridEngineProgressive(context: EngineContext): Promise<Optim
     }
 
     if (attemptsSinceImprovement >= stagnationLimit) {
-      const immigrants = injectHybridImmigrants(context, accumulator, population, eliteCount, immigrantBatchSize, populationSize);
+      const immigrants = injectHybridImmigrants(context, accumulator, population, eliteNeighborQueue, eliteCount, immigrantBatchSize, populationSize);
       population = immigrants.population;
       attemptsSinceImprovement = immigrants.improved ? 0 : Math.floor(stagnationLimit / 2);
       accumulator.metrics.hybridRestarts = (accumulator.metrics.hybridRestarts ?? 0) + 1;
@@ -650,10 +961,15 @@ async function runHybridEngineProgressive(context: EngineContext): Promise<Optim
       continue;
     }
 
-    const shouldRefineLocally = accumulator.attempts % localRefinementInterval === 0;
-    const input = shouldRefineLocally
-      ? createHybridLocalRefinement(population, context)
-      : createHybridOffspring(population, context);
+    const eliteNeighbor = eliteNeighborQueue.shift();
+    const shouldRefineLocally = !eliteNeighbor && accumulator.attempts % localRefinementInterval === 0;
+    const input = eliteNeighbor
+      ?? (shouldRefineLocally
+        ? createHybridLocalRefinement(population, context)
+        : createHybridOffspring(population, context, accumulator));
+    if (eliteNeighbor) {
+      accumulator.metrics.hybridEliteNeighborCandidates = (accumulator.metrics.hybridEliteNeighborCandidates ?? 0) + 1;
+    }
     if (shouldRefineLocally) {
       accumulator.metrics.hybridLocalRefinements = (accumulator.metrics.hybridLocalRefinements ?? 0) + 1;
     }
@@ -662,6 +978,9 @@ async function runHybridEngineProgressive(context: EngineContext): Promise<Optim
     attemptsSinceImprovement = improved ? 0 : attemptsSinceImprovement + 1;
     if (result) {
       population.push({ input, result });
+      if (improved) {
+        enqueueHybridEliteNeighbors(eliteNeighborQueue, input, context);
+      }
       population = rankPopulation(population).slice(0, populationSize);
     }
     await yieldHybridProgress(context, accumulator, population.length, populationSize);
@@ -818,7 +1137,11 @@ function finalizeEngineResult(context: EngineContext, accumulator: EngineAccumul
 
 function createCandidateSampler(options: NormalizedExperimentOptions, rng: SeededRandom): CandidateSampler {
   const actions = getSearchActions(options);
-  const warmupCandidates = createWarmupCandidates(options, actions, 5_000);
+  const domainWarmupCandidates = createDomainWarmupCandidates(options, actions);
+  const warmupCandidates = [
+    ...domainWarmupCandidates,
+    ...createWarmupCandidates(options, actions, Math.max(0, 5_000 - domainWarmupCandidates.length)),
+  ];
   let warmupIndex = 0;
 
   return {
@@ -833,7 +1156,146 @@ function createCandidateSampler(options: NormalizedExperimentOptions, rng: Seede
     random() {
       return createRandomCandidate(options, actions, rng);
     },
+    resourceAware() {
+      return createResourceAwareCandidate(options, actions, rng);
+    },
   };
+}
+
+function createDomainWarmupCandidates(
+  options: NormalizedExperimentOptions,
+  actions: Action[],
+): OptimizerExperimentCandidateInput[] {
+  const seeds = getHuppermageDomainSeedCandidates();
+  const actionByKey = new Map(actions.map((action) => [serializeAction(action), action]));
+  const availablePassiveIds = new Set(getAvailablePassiveIds(options));
+  const candidates: OptimizerExperimentCandidateInput[] = [];
+
+  for (const seed of seeds) {
+    if (seed.turns.length !== options.duration || seed.passiveIds.length > options.maxPassiveCount) {
+      continue;
+    }
+
+    if (!seed.passiveIds.every((passiveId) => availablePassiveIds.has(passiveId))) {
+      continue;
+    }
+
+    if (seed.turns.some((turn) => turn.length > options.maxActionsPerTurn)) {
+      continue;
+    }
+
+    const turns = seed.turns.map((turn) => turn.map((actionKey) => actionByKey.get(actionKey)));
+    if (turns.some((turn) => turn.some((action) => !action))) {
+      continue;
+    }
+
+    candidates.push({
+      passiveIds: [...seed.passiveIds],
+      plan: {
+        turns: turns.map((turn) => ({
+          actions: turn.map((action) => cloneAction(action!)),
+        })),
+      },
+    });
+  }
+
+  return candidates;
+}
+
+function getHuppermageDomainSeedCandidates(): Array<{ passiveIds: string[]; turns: string[][] }> {
+  return [
+    {
+      passiveIds: [
+        "carnage",
+        "extension-des-sens",
+        "profusion-runique",
+      ],
+      turns: [
+        [
+          "halo-chatoyant",
+          "eboulement",
+          "coeur-de-lumiere",
+          "papillons-diurnes",
+          "flux-denergie",
+          "debacle",
+          "orbes-luisants",
+          "orbes-luisants",
+        ],
+        [
+          "coeur-de-lumiere",
+          "runification",
+          "eboulement",
+          "debacle",
+          "fleche-de-lumiere",
+          "ombres-dansantes",
+          "halo-chatoyant",
+          "epee-de-lumiere",
+        ],
+      ],
+    },
+    {
+      passiveIds: [
+        "carnage",
+        "extension-des-sens",
+        "profusion-runique",
+      ],
+      turns: [
+        [
+          "halo-chatoyant",
+          "eboulement",
+          "coeur-de-lumiere",
+          "papillons-diurnes",
+          "flux-denergie",
+          "debacle",
+          "orbes-luisants",
+          "orbes-luisants",
+        ],
+        [
+          "coeur-de-lumiere",
+          "runification",
+          "papillons-diurnes",
+          "debacle",
+          "fleche-de-lumiere",
+          "eboulement",
+          "halo-chatoyant",
+          "epee-de-lumiere",
+        ],
+      ],
+    },
+    {
+      passiveIds: [
+        "carnage",
+        "extension-des-sens",
+        "fluctuation",
+        "liaison-lumineuse",
+        "profusion-runique",
+        "sauvegarde-runique",
+      ],
+      turns: [
+        [
+          "flux-denergie",
+          "eboulement",
+          "coeur-de-lumiere",
+          "papillons-diurnes",
+          "epee-de-lumiere",
+          "orbes-luisants",
+          "debacle",
+          "debacle",
+          "cycle-elementaire",
+        ],
+        [
+          "coeur-de-lumiere",
+          "runification",
+          "ombres-dansantes",
+          "debacle",
+          "fleche-de-lumiere",
+          "flux-denergie",
+          "halo-chatoyant@emptyCell",
+          "epee-de-lumiere",
+        ],
+      ],
+    },
+  ];
 }
 
 function createWarmupCandidates(
@@ -894,6 +1356,173 @@ function createRandomCandidate(
       })),
     },
   };
+}
+
+function createResourceAwareCandidate(
+  options: NormalizedExperimentOptions,
+  actions: Action[],
+  rng: SeededRandom,
+): OptimizerExperimentCandidateInput {
+  const entriesBySpellId = new Map(options.catalog.map((entry) => [entry.id, entry]));
+  const baseResources = { ...options.character.resources };
+  const resources: SoftResourcePool = { ...baseResources };
+  const turns = [];
+
+  for (let turnIndex = 0; turnIndex < options.duration; turnIndex += 1) {
+    resources.ap = baseResources.ap;
+    resources.mp = baseResources.mp;
+
+    const turnActions: Action[] = [];
+    const castsBySpellId = new Map<string, number>();
+    const targetCastsBySpellId = new Map<string, number>();
+    const targetActionCount = rng.integer(
+      Math.max(1, Math.floor(options.maxActionsPerTurn * 0.55)),
+      options.maxActionsPerTurn,
+    );
+
+    for (let actionIndex = 0; actionIndex < targetActionCount; actionIndex += 1) {
+      const affordableActions = actions.filter((action) => {
+        const spell = entriesBySpellId.get(action.spellId);
+        return spell
+          && canUseActionSoftly(action, spell, resources, castsBySpellId, targetCastsBySpellId);
+      });
+
+      if (affordableActions.length === 0) {
+        break;
+      }
+
+      const action = cloneAction(pickWeightedAction(affordableActions, entriesBySpellId, rng));
+      turnActions.push(action);
+      const spell = entriesBySpellId.get(action.spellId);
+      if (spell) {
+        applySoftActionResources(resources, spell.cost, spell);
+        castsBySpellId.set(spell.id, (castsBySpellId.get(spell.id) ?? 0) + 1);
+        if (countsAsSoftTargetCast(action)) {
+          targetCastsBySpellId.set(spell.id, (targetCastsBySpellId.get(spell.id) ?? 0) + 1);
+        }
+      }
+    }
+
+    if (turnActions.length === 0) {
+      turnActions.push(cloneAction(rng.pick(actions)));
+    }
+
+    turns.push({ actions: turnActions });
+  }
+
+  return {
+    passiveIds: pickRandomPassives(options, rng),
+    plan: { turns },
+  };
+}
+
+function canUseActionSoftly(
+  action: Action,
+  spell: CatalogEntry,
+  resources: SoftResourcePool,
+  castsBySpellId: Map<string, number>,
+  targetCastsBySpellId: Map<string, number>,
+): boolean {
+  if (!canAffordCost(resources, spell.cost)) {
+    return false;
+  }
+
+  for (const constraint of spell.constraints) {
+    if (constraint.type === "requiresTarget" && action.target?.kind !== constraint.target) {
+      return false;
+    }
+
+    if (constraint.type === "maxCastsPerTurn" && (castsBySpellId.get(spell.id) ?? 0) >= constraint.value) {
+      return false;
+    }
+
+    if (
+      constraint.type === "maxCastsPerTarget"
+      && countsAsSoftTargetCast(action)
+      && (targetCastsBySpellId.get(spell.id) ?? 0) >= constraint.value
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function canAffordCost(resources: SoftResourcePool, cost: SpellCost | undefined): boolean {
+  return getSoftCostAmount(cost, "ap") <= resources.ap
+    && getSoftCostAmount(cost, "mp") <= resources.mp
+    && getSoftCostAmount(cost, "wp") <= resources.wp
+    && getSoftCostAmount(cost, "bq") <= resources.bq;
+}
+
+function applySoftActionResources(
+  resources: SoftResourcePool,
+  cost: SpellCost | undefined,
+  spell: CatalogEntry,
+) {
+  resources.ap -= getSoftCostAmount(cost, "ap");
+  resources.mp -= getSoftCostAmount(cost, "mp");
+  resources.wp -= getSoftCostAmount(cost, "wp");
+  resources.bq -= getSoftCostAmount(cost, "bq");
+
+  for (const effect of spell.effects) {
+    if (effect.type === "resourceDelta" && (!effect.target || effect.target === "caster")) {
+      resources[effect.resource] = Math.max(0, resources[effect.resource] + effect.amount);
+    }
+  }
+}
+
+function pickWeightedAction(
+  actions: Action[],
+  entriesBySpellId: Map<string, CatalogEntry>,
+  rng: SeededRandom,
+): Action {
+  const weightedActions = actions.map((action) => {
+    const spell = entriesBySpellId.get(action.spellId);
+    return {
+      action,
+      weight: spell ? getActionSearchWeight(spell) : 1,
+    };
+  });
+  const totalWeight = weightedActions.reduce((total, entry) => total + entry.weight, 0);
+  let cursor = rng.next() * totalWeight;
+
+  for (const entry of weightedActions) {
+    cursor -= entry.weight;
+    if (cursor <= 0) {
+      return entry.action;
+    }
+  }
+
+  return weightedActions.at(-1)?.action ?? actions[0]!;
+}
+
+function getActionSearchWeight(spell: CatalogEntry): number {
+  let weight = 1;
+  for (const effect of spell.effects) {
+    if (effect.type === "damage") {
+      weight += (effect.base * (effect.times ?? 1)) / 25;
+    }
+    if (effect.type === "resourceDelta" && (!effect.target || effect.target === "caster") && effect.amount > 0) {
+      weight += 1;
+    }
+  }
+
+  for (const tag of spell.tags) {
+    if (tag === "light" || tag === "burst" || tag === "rune-consumer" || tag === "mark" || tag === "scales-with-bq") {
+      weight += 2;
+    }
+  }
+
+  return Math.max(1, weight);
+}
+
+function getSoftCostAmount(cost: SpellCost | undefined, resource: Resource): number {
+  return Math.max(0, cost?.[resource] ?? 0);
+}
+
+function countsAsSoftTargetCast(action: Action): boolean {
+  return action.target?.kind !== "emptyCell";
 }
 
 function createMctsCandidate(context: EngineContext, statsByPositionAction: Map<string, ActionStat>): OptimizerExperimentCandidateInput {
@@ -1181,7 +1810,10 @@ function getSearchActions(options: NormalizedExperimentOptions): Action[] {
   return spellIds.flatMap((spellId) => {
     const actions: Action[] = [{ spellId }];
     const entry = entriesById.get(spellId);
-    if (entry?.constraints.some((constraint) => constraint.type === "maxCastsPerTarget")) {
+    if (entry?.constraints.some((constraint) => (
+      constraint.type === "maxCastsPerTarget"
+      || (constraint.type === "requiresTarget" && constraint.target === "emptyCell")
+    ))) {
       actions.push({ spellId, target: { kind: "emptyCell" } });
     }
     return actions;

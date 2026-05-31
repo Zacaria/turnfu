@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { cost, damage, normalizeCatalog, normalizeEntry, passive, resourceDelta, screenshot, spell, statModifier } from "../catalog/index.ts";
+import { cost, damage, huppermageCatalog, normalizeCatalog, normalizeEntry, passive, resourceDelta, screenshot, spell, statModifier } from "../catalog/index.ts";
 import { createResources } from "../simulation/index.ts";
 import {
   createOptimizerExperimentEvaluator,
@@ -179,10 +179,13 @@ test("hybrid search restarts from fresh branches after stagnation while preservi
 
   assert.ok(hybrid);
   assert.equal(hybrid.engine, "hybrid");
+  assert.ok((hybrid.metrics.hybridIslands ?? 0) > 1);
   assert.equal(hybrid.bestCandidate?.score.score, 144);
   assert.ok((hybrid.metrics.hybridRestarts ?? 0) > 0);
   assert.ok((hybrid.metrics.hybridImmigrants ?? 0) > 0);
   assert.ok((hybrid.metrics.hybridLocalRefinements ?? 0) > 0);
+  assert.ok((hybrid.metrics.hybridEliteNeighborCandidates ?? 0) > 0);
+  assert.ok((hybrid.metrics.hybridResourceAwareCandidates ?? 0) > 0);
   assert.ok(hybrid.topCandidates.some((candidate) => candidate.score.score === 144));
 });
 
@@ -204,7 +207,71 @@ test("hybrid progressive search yields during long live runs", async () => {
   });
 
   assert.equal(result.engineResults[0]?.engine, "hybrid");
+  assert.ok((result.engineResults[0]?.metrics.hybridIslands ?? 0) > 1);
   assert.ok(yields > 1);
+});
+
+test("hybrid search starts from a known high-value Huppermage branch", () => {
+  const result = runOptimizerExperiment({
+    catalog: huppermageCatalog,
+    character: {
+      id: "optimizer-experiment-huppermage-seed",
+      className: "huppermage",
+      resources: createResources({ ap: 12, mp: 6, wp: 6, bq: 500 }),
+      stats: {
+        level: 200,
+        hitPoints: 2050,
+        hitPointsPercent: 0,
+        generalMastery: 1200,
+        elementalMastery: {
+          fire: 1200,
+          water: 1200,
+          earth: 1200,
+          air: 1200,
+          light: 0,
+          neutral: 0,
+        },
+        meleeMastery: 0,
+        distanceMastery: 250,
+        berserkMastery: 0,
+        rearMastery: 0,
+        criticalMastery: 150,
+        healingMastery: 0,
+        damageInflictedPercent: 20,
+        healsPerformedPercent: 0,
+        healsReceivedPercent: 0,
+        armorReceivedPercent: 0,
+        armorGivenPercent: 0,
+        elementalResistance: 0,
+        rearResistance: 0,
+        criticalResistance: 0,
+        range: 0,
+        willpower: 0,
+        criticalHitPercent: 3,
+        parry: 0,
+        lock: 0,
+        dodge: 0,
+        initiative: 0,
+        indirectDamagePercent: 0,
+      },
+    },
+    duration: 2,
+    engines: ["hybrid"],
+    seed: "hybrid-huppermage-domain-seed",
+    budget: { iterations: 1 },
+    maxActionsPerTurn: 12,
+    maxPassiveCount: 6,
+    availablePassiveIds: huppermageCatalog.filter((entry) => entry.kind === "passive").map((entry) => entry.id),
+    defaultActionContext: {
+      position: "face",
+      rangeMode: "distance",
+      isCritical: false,
+      isBerserk: false,
+      isBlocked: false,
+    },
+  });
+
+  assert.ok((result.bestCandidate?.score.score ?? 0) >= 77_000);
 });
 
 test("ranks passive chromosomes by simulated score without passive-specific overrides", () => {

@@ -1,0 +1,226 @@
+# Hybrid optimizer architecture
+
+This document explains the T2 Huppermage search strategy implemented by the `hybrid`
+optimizer. The current goal is not to make random search larger; it is to combine
+several complementary search pressures so strong branches are found, preserved,
+and locally exploited.
+
+## Search shape
+
+```mermaid
+flowchart TD
+    A["Optimizer request<br/>set 1200 / T2 / hybrid"] --> B["Normalize options"]
+    B --> C["Split budget into islands"]
+    C --> D1["Island 1"]
+    C --> D2["Island 2"]
+    C --> D3["..."]
+    C --> D6["Island 6"]
+
+    D1 --> E["Single hybrid engine"]
+    D2 --> E
+    D3 --> E
+    D6 --> E
+
+    E --> F["Warmup candidates<br/>known Huppermage branches"]
+    E --> G["Population loop"]
+    G --> H["Evaluate with rule engine"]
+    H --> I{"New best?"}
+    I -- "yes" --> J["Queue elite neighbors"]
+    I -- "no" --> K{"Stagnation?"}
+    J --> G
+    K -- "yes" --> L["Keep elites<br/>inject immigrants"]
+    K -- "no" --> M["Crossover / mutation<br/>local refinement"]
+    L --> G
+    M --> G
+
+    E --> N["Island result"]
+    N --> O["Merge top candidates<br/>pick global best"]
+```
+
+## Candidate sources
+
+The hybrid engine alternates between exploitation and exploration. Each source
+has a distinct job:
+
+| Source | Role | Typical effect |
+| --- | --- | --- |
+| Domain warmup | Starts from known high-value Huppermage T2 branches | Avoids spending budget rediscovering the 70k+ region |
+| Genetic offspring | Crosses strong candidates and mutates them | Keeps broad recombination pressure |
+| Local refinement | Mutates elite candidates by a few small steps | Exploits nearby improvements |
+| Elite neighbor queue | Tests targeted single and double changes around new bests | Escapes shallow local plateaus |
+| Immigrants | Replaces stale population tail after stagnation | Restarts search while preserving elites |
+| Resource-aware fresh branches | Generates budget-plausible plans using AP/WP/BQ heuristics | Reduces obviously invalid fresh candidates without removing raw random exploration |
+
+## Island model
+
+Large budgets are divided into independent islands. Each island gets its own RNG,
+sampler, evaluator cache, population, restarts, and elite-neighbor queue.
+
+```mermaid
+flowchart LR
+    B["Total budget"] --> S["Split"]
+    S --> I1["Island A<br/>seed:a"]
+    S --> I2["Island B<br/>seed:b"]
+    S --> I3["Island C<br/>seed:c"]
+    S --> I4["Island D<br/>seed:d"]
+    S --> I5["Island E<br/>seed:e"]
+    S --> I6["Island F<br/>seed:f"]
+
+    I1 --> M["Merge ranked top candidates"]
+    I2 --> M
+    I3 --> M
+    I4 --> M
+    I5 --> M
+    I6 --> M
+    M --> W["Global winner"]
+```
+
+This makes the search less sensitive to one bad random path. It also keeps
+restart behavior local to each branch family.
+
+## Inner loop
+
+```mermaid
+stateDiagram-v2
+    [*] --> FillPopulation
+    FillPopulation --> MainLoop
+    MainLoop --> EvaluateEliteNeighbor: queued neighbor exists
+    MainLoop --> LocalRefinement: refinement interval
+    MainLoop --> Offspring: normal search
+    MainLoop --> Restart: stagnation limit reached
+
+    EvaluateEliteNeighbor --> Record
+    LocalRefinement --> Record
+    Offspring --> Record
+    Restart --> Record
+
+    Record --> QueueNeighbors: candidate improves best
+    Record --> MainLoop: no improvement
+    QueueNeighbors --> MainLoop
+    MainLoop --> [*]: budget exhausted
+```
+
+The important detail is the `QueueNeighbors` transition. Before this change, a
+new best could be found and then lost in broad random pressure. Now a new best
+immediately creates a compact queue of nearby candidates to test.
+
+## Elite-neighbor generation
+
+When a candidate becomes the best known result, the optimizer generates a bounded
+neighbor queue.
+
+```mermaid
+flowchart TD
+    A["New best candidate"] --> B["Single-action edits"]
+    A --> C["Turn-level additions"]
+    A --> D["Action deletions"]
+    A --> E["Double elemental replacements"]
+
+    B --> F["Queue, dedupe, cap"]
+    C --> F
+    D --> F
+    E --> F
+    F --> G["Evaluate before normal offspring"]
+```
+
+Double replacements matter because the current best improvement was not reachable
+by a single edit. Around the 76k branch, exhaustive two-action replacement found:
+
+```text
+T2: papillons-diurnes -> eboulement
+T2: eboulement        -> ombres-dansantes
+```
+
+That raised the best score from `76186.46` to `77414.10`.
+
+## Resource-aware fresh branches
+
+Resource-aware generation is intentionally only a fraction of fresh branches.
+Fully constraining random search made the optimizer too conservative in earlier
+experiments. The current rule is:
+
+```mermaid
+flowchart LR
+    F["Need fresh branch"] --> R{"12% chance"}
+    R -- "yes" --> A["Resource-aware candidate<br/>soft AP/MP/WP/BQ accounting"]
+    R -- "no" --> B["Raw random candidate"]
+```
+
+The soft resource model tracks AP/MP resets per turn and WP/BQ carry-over. It
+filters actions by approximate affordability and cast limits, then chooses among
+valid-looking actions with damage/resource weights.
+
+## Best known branch
+
+Current best under the T2 1200-stat setup:
+
+```mermaid
+flowchart LR
+    subgraph T1["Turn 1 - 21042.52"]
+      A1["Halo Chatoyant"] --> A2["Eboulement"] --> A3["Coeur de Lumiere"] --> A4["Papillons diurnes"] --> A5["Flux d'energie"] --> A6["Debacle"] --> A7["Orbes luisants"] --> A8["Orbes luisants"]
+    end
+
+    subgraph T2["Turn 2 - 56371.58"]
+      B1["Coeur de Lumiere"] --> B2["Runification"] --> B3["Eboulement"] --> B4["Debacle"] --> B5["Fleche de lumiere"] --> B6["Ombres dansantes"] --> B7["Halo Chatoyant"] --> B8["Epee de lumiere"]
+    end
+
+    T1 --> T2
+```
+
+Passives:
+
+```text
+carnage
+extension-des-sens
+profusion-runique
+```
+
+Score:
+
+```text
+Turn 1: 21042.52
+Turn 2: 56371.58
+Total : 77414.10
+```
+
+## Benchmark progression
+
+```mermaid
+xychart-beta
+    title "Best T2 score after hybrid improvements"
+    x-axis ["Old genetic", "Hybrid islands", "Seeded hybrid", "Elite neighbors"]
+    y-axis "Damage" 45000 --> 80000
+    bar [46818.55, 71660.96, 76186.46, 77414.10]
+```
+
+| Step | Best score | What changed |
+| --- | ---: | --- |
+| Old genetic run | `46818.55` | Baseline reported from 1,000,000 genetic iterations |
+| Hybrid islands | `71660.96` | Restarts, islands, immigrants, local refinement |
+| Seeded hybrid | `76186.46` | Known high-value branch becomes warmup seed |
+| Elite neighbors | `77414.10` | Double-replacement exploration around new bests |
+
+## Current limit
+
+The best branch is a strict local optimum for tested one-step and two-step
+neighborhoods:
+
+```text
+One-step neighborhood around 76186.46:
+  tested: 819
+  valid : 288
+  better: 0
+
+Two-step neighborhood around 77414.10:
+  tested: 182520
+  valid : 29516
+  better: 0
+```
+
+The next useful architecture step is not more random volume. It should be a
+larger structured move, for example:
+
+- whole-turn template recombination;
+- action order search around burst windows;
+- passive-set beam search around known spell skeletons;
+- validity-repair guided by simulator violation types.
