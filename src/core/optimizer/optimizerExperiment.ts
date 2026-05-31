@@ -454,7 +454,7 @@ function runGeneticEngine(context: EngineContext): OptimizerExperimentEngineResu
 }
 
 function runHybridEngine(context: EngineContext): OptimizerExperimentEngineResult {
-  const islandCount = getHybridIslandCount(context.options.budget.iterations);
+  const islandCount = getHybridIslandCount(context.options);
   if (islandCount <= 1) {
     const result = runHybridSingleEngine(context);
     return {
@@ -614,8 +614,9 @@ function runHybridSingleEngine(context: EngineContext): OptimizerExperimentEngin
   return finalizeEngineResult(context, accumulator);
 }
 
-function getHybridIslandCount(iterations: number): number {
-  if (iterations < 80) {
+function getHybridIslandCount(options: NormalizedExperimentOptions): number {
+  const iterations = options.budget.iterations;
+  if (iterations < 80 || (options.duration <= 2 && iterations < 120)) {
     return 1;
   }
 
@@ -1260,7 +1261,7 @@ function rankPopulation(
 }
 
 async function runHybridEngineProgressive(context: EngineContext): Promise<OptimizerExperimentEngineResult> {
-  const islandCount = getHybridIslandCount(context.options.budget.iterations);
+  const islandCount = getHybridIslandCount(context.options);
   if (islandCount <= 1) {
     const result = await runHybridSingleEngineProgressive(context);
     return {

@@ -219,7 +219,7 @@ test("hybrid progressive search yields during long live runs", async () => {
     availableSpellIds: ["setup", "hit", "burst"],
     engines: ["hybrid"],
     seed: "hybrid-progressive-yields",
-    budget: { iterations: 80 },
+    budget: { iterations: 120 },
     maxActionsPerTurn: 1,
     progressInterval: 10,
     yieldProgress: async () => {
