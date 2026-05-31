@@ -1231,9 +1231,11 @@ function applyHaloChatoyant(
   actionContext: ActionContext,
 ): { damage: number; huppermageState: NonNullable<ClassTurnState["huppermage"]>; appliedEffects: AppliedEffect[] } {
   const before = huppermageState.haloChatoyantMarks;
-  const triggersExistingMark = before > 0;
+  // The simulator is currently single-target, so only one existing Halo can be relevant.
+  // Revisit this if enemy positions / multi-target zones are modeled.
+  const triggeredExistingMarks = before > 0 ? 1 : 0;
   const triggersCurrentMark = huppermageState.runes.active.aerial;
-  const triggerCount = (triggersExistingMark ? 1 : 0) + (triggersCurrentMark ? 1 : 0);
+  const triggerCount = triggeredExistingMarks + (triggersCurrentMark ? 1 : 0);
   const after = triggersCurrentMark ? 0 : 1;
   const appliedEffects: AppliedEffect[] = [
     {

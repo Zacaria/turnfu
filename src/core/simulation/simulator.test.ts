@@ -2244,6 +2244,29 @@ test("tracks and triggers Halo Chatoyant marks", () => {
   assert.equal(aerialResult.finalState.classState.huppermage?.runes.active.aerial, false);
 });
 
+test("caps existing Halo Chatoyant triggers to one mark in single-target simulation", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      classState: {
+        huppermage: {
+          haloChatoyantMarks: 2,
+          runes: {
+            aerial: true,
+          },
+        },
+      },
+    },
+    sequence: { actions: [{ spellId: "halo-chatoyant" }] },
+  });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.totalDamage, 445.5);
+  assert.equal(result.finalState.classState.huppermage?.haloChatoyantMarks, 0);
+  assert.equal(result.finalState.classState.huppermage?.runes.active.aerial, false);
+});
+
 test("evolves caster stats during the turn from supported stat modifiers", () => {
   const result = simulateTurn({
     catalog: testCatalog,
