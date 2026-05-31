@@ -217,10 +217,10 @@ Two-step neighborhood around 77414.10:
   better: 0
 ```
 
-The next useful architecture step is not more random volume. It should be a
-larger structured move, for example:
+The next useful architecture step is not more random volume. The hybrid engine
+now seeds two small structured neighborhoods from improved elites: adjacent
+action-order swaps around burst windows and passive-set variants around known
+spell skeletons. Larger structured moves remain useful, for example:
 
 - whole-turn template recombination;
-- action order search around burst windows;
-- passive-set beam search around known spell skeletons;
 - validity-repair guided by simulator violation types.

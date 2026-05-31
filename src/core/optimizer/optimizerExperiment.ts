@@ -495,7 +495,7 @@ function runHybridSingleEngine(context: EngineContext): OptimizerExperimentEngin
     if (result) {
       population.push({ input, result });
       if (improved) {
-        enqueueHybridEliteNeighbors(eliteNeighborQueue, input, context);
+        enqueueHybridEliteNeighbors(eliteNeighborQueue, input, context, accumulator);
       }
     }
   }
@@ -514,7 +514,7 @@ function runHybridSingleEngine(context: EngineContext): OptimizerExperimentEngin
       if (result) {
         population.push({ input, result });
         if (improved) {
-          enqueueHybridEliteNeighbors(eliteNeighborQueue, input, context);
+          enqueueHybridEliteNeighbors(eliteNeighborQueue, input, context, accumulator);
         }
         population = rankPopulation(population).slice(0, populationSize);
       }
@@ -548,7 +548,7 @@ function runHybridSingleEngine(context: EngineContext): OptimizerExperimentEngin
     if (result) {
       population.push({ input, result });
       if (improved) {
-        enqueueHybridEliteNeighbors(eliteNeighborQueue, input, context);
+        enqueueHybridEliteNeighbors(eliteNeighborQueue, input, context, accumulator);
       }
       population = rankPopulation(population).slice(0, populationSize);
     }
@@ -666,7 +666,7 @@ function injectHybridImmigrants(
     if (tracked.result) {
       nextPopulation.push({ input, result: tracked.result });
       if (tracked.improved) {
-        enqueueHybridEliteNeighbors(eliteNeighborQueue, input, context);
+        enqueueHybridEliteNeighbors(eliteNeighborQueue, input, context, accumulator);
       }
     }
   }
@@ -709,6 +709,7 @@ function enqueueHybridEliteNeighbors(
   queue: OptimizerExperimentCandidateInput[],
   input: OptimizerExperimentCandidateInput,
   context: EngineContext,
+  accumulator: EngineAccumulator,
 ) {
   const maxQueueSize = 1_024;
   const maxGenerated = 640;
@@ -717,7 +718,7 @@ function enqueueHybridEliteNeighbors(
   const seen = new Set(queue.map((candidate) => serializeExperimentCandidate(normalizeCandidate(candidate))));
   let generated = 0;
 
-  const addCandidate = (candidate: OptimizerExperimentCandidateInput) => {
+  const addCandidate = (candidate: OptimizerExperimentCandidateInput, metric?: string) => {
     if (queue.length >= maxQueueSize || generated >= maxGenerated) {
       return;
     }
@@ -731,12 +732,60 @@ function enqueueHybridEliteNeighbors(
     seen.add(key);
     queue.push(normalized);
     generated += 1;
+    if (metric) {
+      accumulator.metrics[metric] = (accumulator.metrics[metric] ?? 0) + 1;
+    }
   };
+
+  const availablePassiveIds = getAvailablePassiveIds(context.options)
+    .sort((left, right) => getPassiveSearchWeight(right, context.options) - getPassiveSearchWeight(left, context.options));
+  const activePassiveIds = [...new Set(input.passiveIds ?? [])]
+    .filter((passiveId) => availablePassiveIds.includes(passiveId))
+    .sort();
+  const missingPassiveIds = availablePassiveIds.filter((passiveId) => !activePassiveIds.includes(passiveId));
+  const passiveLimit = Math.min(context.options.maxPassiveCount, availablePassiveIds.length);
+
+  for (const passiveId of activePassiveIds) {
+    const candidate = cloneCandidateInput(input);
+    candidate.passiveIds = activePassiveIds.filter((activePassiveId) => activePassiveId !== passiveId);
+    addCandidate(candidate, "hybridPassiveNeighborCandidates");
+  }
+
+  if (activePassiveIds.length < passiveLimit) {
+    for (const passiveId of missingPassiveIds.slice(0, 12)) {
+      const candidate = cloneCandidateInput(input);
+      candidate.passiveIds = [...activePassiveIds, passiveId].sort();
+      addCandidate(candidate, "hybridPassiveNeighborCandidates");
+    }
+  }
+
+  for (const passiveId of activePassiveIds) {
+    for (const replacementPassiveId of missingPassiveIds.slice(0, 8)) {
+      const candidate = cloneCandidateInput(input);
+      candidate.passiveIds = activePassiveIds
+        .filter((activePassiveId) => activePassiveId !== passiveId)
+        .concat(replacementPassiveId)
+        .sort();
+      addCandidate(candidate, "hybridPassiveNeighborCandidates");
+    }
+  }
 
   for (let turnIndex = input.plan.turns.length - 1; turnIndex >= 0; turnIndex -= 1) {
     const turn = input.plan.turns[turnIndex];
     if (!turn) {
       continue;
+    }
+
+    for (let actionIndex = 0; actionIndex < turn.actions.length - 1; actionIndex += 1) {
+      if (serializeAction(turn.actions[actionIndex]!) === serializeAction(turn.actions[actionIndex + 1]!)) {
+        continue;
+      }
+      const candidate = cloneCandidateInput(input);
+      const actionsToSwap = candidate.plan.turns[turnIndex]!.actions;
+      const left = actionsToSwap[actionIndex]!;
+      actionsToSwap[actionIndex] = actionsToSwap[actionIndex + 1]!;
+      actionsToSwap[actionIndex + 1] = left;
+      addCandidate(candidate, "hybridOrderNeighborCandidates");
     }
 
     for (let firstIndex = 0; firstIndex < turn.actions.length - 1; firstIndex += 1) {
@@ -923,7 +972,7 @@ async function runHybridSingleEngineProgressive(context: EngineContext): Promise
     if (result) {
       population.push({ input, result });
       if (improved) {
-        enqueueHybridEliteNeighbors(eliteNeighborQueue, input, context);
+        enqueueHybridEliteNeighbors(eliteNeighborQueue, input, context, accumulator);
       }
     }
     await yieldHybridProgress(context, accumulator, population.length, populationSize);
@@ -943,7 +992,7 @@ async function runHybridSingleEngineProgressive(context: EngineContext): Promise
       if (result) {
         population.push({ input, result });
         if (improved) {
-          enqueueHybridEliteNeighbors(eliteNeighborQueue, input, context);
+          enqueueHybridEliteNeighbors(eliteNeighborQueue, input, context, accumulator);
         }
         population = rankPopulation(population).slice(0, populationSize);
       }
@@ -979,7 +1028,7 @@ async function runHybridSingleEngineProgressive(context: EngineContext): Promise
     if (result) {
       population.push({ input, result });
       if (improved) {
-        enqueueHybridEliteNeighbors(eliteNeighborQueue, input, context);
+        enqueueHybridEliteNeighbors(eliteNeighborQueue, input, context, accumulator);
       }
       population = rankPopulation(population).slice(0, populationSize);
     }

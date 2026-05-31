@@ -272,6 +272,8 @@ test("hybrid search starts from a known high-value Huppermage branch", () => {
   });
 
   assert.ok((result.bestCandidate?.score.score ?? 0) >= 77_000);
+  assert.ok((result.engineResults[0]?.metrics.hybridOrderNeighborCandidates ?? 0) > 0);
+  assert.ok((result.engineResults[0]?.metrics.hybridPassiveNeighborCandidates ?? 0) > 0);
 });
 
 test("ranks passive chromosomes by simulated score without passive-specific overrides", () => {
