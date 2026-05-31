@@ -16,7 +16,7 @@ test("uses French UI wording by default", () => {
   assert.equal(defaultLocale, "fr");
   setUiLocale("fr");
   assert.equal(getUiLocale(), "fr");
-  assert.equal(t("app.title"), "Optimiseur de tour Wakfu");
+  assert.equal(t("app.title"), "Turnfu");
   assert.equal(t("app.heading"), "Planificateur de tour");
   assert.equal(t("status.valid"), "Valide");
 });
@@ -24,7 +24,7 @@ test("uses French UI wording by default", () => {
 test("can switch UI wording to English", () => {
   setUiLocale("en");
   assert.equal(getUiLocale(), "en");
-  assert.equal(t("app.title"), "Wakfu Turn Optimizer");
+  assert.equal(t("app.title"), "Turnfu");
   assert.equal(t("app.heading"), "Turn Planner");
   assert.equal(t("status.valid"), "Valid");
   setUiLocale("fr");

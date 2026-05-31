@@ -126,7 +126,7 @@ export type DeleteSavedCombosInput = {
 
 export type WorkspaceStorage = Pick<Storage, "getItem" | "removeItem" | "setItem">;
 
-export const researchWorkspaceStorageKey = "wakfu-turn-optimizer:research-workspace:v1";
+export const researchWorkspaceStorageKey = "turnfu:research-workspace:v1";
 
 export const wakfuClassOptions: WakfuClassOption[] = [
   { id: "huppermage", label: "Huppermage", selectable: true },

@@ -12,8 +12,8 @@ export const supportedLocales: Array<{ locale: UiLocale; flag: string; label: st
 ];
 
 const fr = {
-  "app.title": "Optimiseur de tour Wakfu",
-  "app.projectName": "Wakfu Turn Optimizer",
+  "app.title": "Turnfu",
+  "app.projectName": "Turnfu",
   "app.heading": "Planificateur de tour",
   "app.liveResults": "Résultat en direct",
   "app.className": "Huppermage",
@@ -251,8 +251,8 @@ const fr = {
 const translations = {
   fr,
   en: {
-    "app.title": "Wakfu Turn Optimizer",
-    "app.projectName": "Wakfu Turn Optimizer",
+    "app.title": "Turnfu",
+    "app.projectName": "Turnfu",
     "app.heading": "Turn Planner",
     "app.liveResults": "Live results",
     "app.className": "Huppermage",
