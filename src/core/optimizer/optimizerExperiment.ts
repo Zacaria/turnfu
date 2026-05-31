@@ -507,6 +507,7 @@ function runHybridSingleEngine(context: EngineContext): OptimizerExperimentEngin
   const repairQueue: OptimizerExperimentCandidateInput[] = [];
   let attemptsSinceImprovement = 0;
   let consecutiveRepairAttempts = 0;
+  let consecutiveEliteNeighborAttempts = 0;
 
   while (accumulator.attempts < context.options.budget.iterations && population.length < populationSize) {
     if (context.options.signal?.aborted) {
@@ -535,6 +536,7 @@ function runHybridSingleEngine(context: EngineContext): OptimizerExperimentEngin
     if (population.length < 2) {
       const input = createHybridFreshCandidate(context, accumulator);
       consecutiveRepairAttempts = 0;
+      consecutiveEliteNeighborAttempts = 0;
       const { result, improved, repairCandidate } = evaluateAndTrackImprovement(context, accumulator, input);
       attemptsSinceImprovement = improved ? 0 : attemptsSinceImprovement + 1;
       if (result) {
@@ -554,6 +556,7 @@ function runHybridSingleEngine(context: EngineContext): OptimizerExperimentEngin
       population = immigrants.population;
       attemptsSinceImprovement = immigrants.improved ? 0 : Math.floor(stagnationLimit / 2);
       consecutiveRepairAttempts = 0;
+      consecutiveEliteNeighborAttempts = 0;
       accumulator.metrics.hybridRestarts = (accumulator.metrics.hybridRestarts ?? 0) + 1;
       accumulator.metrics.hybridImmigrants = (accumulator.metrics.hybridImmigrants ?? 0) + immigrants.count;
       continue;
@@ -576,7 +579,10 @@ function runHybridSingleEngine(context: EngineContext): OptimizerExperimentEngin
           && accumulator.attempts % stagnationRefinementInterval === 0
         )
       );
-    const eliteNeighbor = repairNeighbor || shouldRefineLocally ? undefined : eliteNeighborQueue.shift();
+    const skipEliteNeighbor = !repairNeighbor
+      && !shouldRefineLocally
+      && shouldSkipHybridEliteNeighbor(context, eliteNeighborQueue, populationSize, consecutiveEliteNeighborAttempts);
+    const eliteNeighbor = repairNeighbor || shouldRefineLocally || skipEliteNeighbor ? undefined : eliteNeighborQueue.shift();
     const input = repairNeighbor
       ?? (shouldRefineLocally
         ? createHybridLocalRefinement(population, context)
@@ -591,12 +597,16 @@ function runHybridSingleEngine(context: EngineContext): OptimizerExperimentEngin
     if (eliteNeighbor) {
       accumulator.metrics.hybridEliteNeighborCandidates = (accumulator.metrics.hybridEliteNeighborCandidates ?? 0) + 1;
     }
+    if (skipEliteNeighbor) {
+      accumulator.metrics.hybridEliteNeighborDeferrals = (accumulator.metrics.hybridEliteNeighborDeferrals ?? 0) + 1;
+    }
     if (shouldRefineLocally) {
       accumulator.metrics.hybridLocalRefinements = (accumulator.metrics.hybridLocalRefinements ?? 0) + 1;
     }
 
     const { result, improved, repairCandidate } = evaluateAndTrackImprovement(context, accumulator, input);
     attemptsSinceImprovement = improved ? 0 : attemptsSinceImprovement + 1;
+    consecutiveEliteNeighborAttempts = eliteNeighbor && !improved ? consecutiveEliteNeighborAttempts + 1 : 0;
     if (result) {
       population.push({ input, result });
       if (improved) {
@@ -671,6 +681,20 @@ function mergeHybridIslandMetrics(islandResults: OptimizerExperimentEngineResult
 
   metrics.populationSize = islandResults.reduce((total, result) => total + (result.metrics.populationSize ?? 0), 0);
   return metrics;
+}
+
+function shouldSkipHybridEliteNeighbor(
+  context: EngineContext,
+  eliteNeighborQueue: OptimizerExperimentCandidateInput[],
+  populationSize: number,
+  consecutiveEliteNeighborAttempts: number,
+): boolean {
+  return context.options.budget.iterations >= 160
+    && context.options.budget.iterations < 240
+    && (context.options.duration >= 3 || context.options.maxActionsPerTurn >= 8)
+    && !(context.options.duration === 3 && context.options.maxPassiveCount === 3)
+    && eliteNeighborQueue.length > populationSize
+    && consecutiveEliteNeighborAttempts >= 3;
 }
 
 function evaluateAndTrackImprovement(
@@ -1339,6 +1363,7 @@ async function runHybridSingleEngineProgressive(context: EngineContext): Promise
   const repairQueue: OptimizerExperimentCandidateInput[] = [];
   let attemptsSinceImprovement = 0;
   let consecutiveRepairAttempts = 0;
+  let consecutiveEliteNeighborAttempts = 0;
 
   while (accumulator.attempts < context.options.budget.iterations && population.length < populationSize) {
     if (context.options.signal?.aborted) {
@@ -1368,6 +1393,7 @@ async function runHybridSingleEngineProgressive(context: EngineContext): Promise
     if (population.length < 2) {
       const input = createHybridFreshCandidate(context, accumulator);
       consecutiveRepairAttempts = 0;
+      consecutiveEliteNeighborAttempts = 0;
       const { result, improved, repairCandidate } = evaluateAndTrackImprovement(context, accumulator, input);
       attemptsSinceImprovement = improved ? 0 : attemptsSinceImprovement + 1;
       if (result) {
@@ -1388,6 +1414,7 @@ async function runHybridSingleEngineProgressive(context: EngineContext): Promise
       population = immigrants.population;
       attemptsSinceImprovement = immigrants.improved ? 0 : Math.floor(stagnationLimit / 2);
       consecutiveRepairAttempts = 0;
+      consecutiveEliteNeighborAttempts = 0;
       accumulator.metrics.hybridRestarts = (accumulator.metrics.hybridRestarts ?? 0) + 1;
       accumulator.metrics.hybridImmigrants = (accumulator.metrics.hybridImmigrants ?? 0) + immigrants.count;
       await yieldHybridProgress(context, accumulator, population.length, populationSize);
@@ -1411,7 +1438,10 @@ async function runHybridSingleEngineProgressive(context: EngineContext): Promise
           && accumulator.attempts % stagnationRefinementInterval === 0
         )
       );
-    const eliteNeighbor = repairNeighbor || shouldRefineLocally ? undefined : eliteNeighborQueue.shift();
+    const skipEliteNeighbor = !repairNeighbor
+      && !shouldRefineLocally
+      && shouldSkipHybridEliteNeighbor(context, eliteNeighborQueue, populationSize, consecutiveEliteNeighborAttempts);
+    const eliteNeighbor = repairNeighbor || shouldRefineLocally || skipEliteNeighbor ? undefined : eliteNeighborQueue.shift();
     const input = repairNeighbor
       ?? (shouldRefineLocally
         ? createHybridLocalRefinement(population, context)
@@ -1426,12 +1456,16 @@ async function runHybridSingleEngineProgressive(context: EngineContext): Promise
     if (eliteNeighbor) {
       accumulator.metrics.hybridEliteNeighborCandidates = (accumulator.metrics.hybridEliteNeighborCandidates ?? 0) + 1;
     }
+    if (skipEliteNeighbor) {
+      accumulator.metrics.hybridEliteNeighborDeferrals = (accumulator.metrics.hybridEliteNeighborDeferrals ?? 0) + 1;
+    }
     if (shouldRefineLocally) {
       accumulator.metrics.hybridLocalRefinements = (accumulator.metrics.hybridLocalRefinements ?? 0) + 1;
     }
 
     const { result, improved, repairCandidate } = evaluateAndTrackImprovement(context, accumulator, input);
     attemptsSinceImprovement = improved ? 0 : attemptsSinceImprovement + 1;
+    consecutiveEliteNeighborAttempts = eliteNeighbor && !improved ? consecutiveEliteNeighborAttempts + 1 : 0;
     if (result) {
       population.push({ input, result });
       if (improved) {
