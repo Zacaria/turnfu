@@ -764,11 +764,22 @@ function injectHybridImmigrants(
       && context.options.duration <= 2
       && immigrantCount === 0
       && nextPopulation.length > 0;
-    const input = shouldUseDiverseImmigrant
+    const shouldUseEliteRestartImmigrant = context.options.budget.iterations >= 160
+      && context.options.budget.iterations < 240
+      && context.options.duration === 3
+      && context.options.maxPassiveCount === 3
+      && immigrantCount === 0
+      && eliteNeighborQueue.length > 0;
+    const input = shouldUseEliteRestartImmigrant
+      ? eliteNeighborQueue.shift()!
+      : shouldUseDiverseImmigrant
       ? createHybridDiverseImmigrant(context, nextPopulation, accumulator)
       : context.rng.chance(0.35) && nextPopulation.length > 0
       ? createHybridLocalRefinement(nextPopulation, context)
       : createHybridFreshCandidate(context, accumulator);
+    if (shouldUseEliteRestartImmigrant) {
+      accumulator.metrics.hybridEliteRestartImmigrants = (accumulator.metrics.hybridEliteRestartImmigrants ?? 0) + 1;
+    }
     const tracked = evaluateAndTrackImprovement(context, accumulator, input);
     improved = improved || tracked.improved;
     immigrantCount += 1;
