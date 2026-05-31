@@ -606,6 +606,32 @@ pub struct EvaluatorCacheAccess {
     pub cache: EvaluatorCacheSnapshot,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TopCandidateEntry {
+    pub id: String,
+    pub candidate: OptimizerCandidateInput,
+    pub score: f64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TopCandidateTrackerSnapshot {
+    pub max_candidates: usize,
+    pub candidates: Vec<TopCandidateEntry>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TopCandidateUpdate {
+    pub accepted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub removed_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub best_candidate: Option<TopCandidateEntry>,
+    pub tracker: TopCandidateTrackerSnapshot,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct OptimizerCandidateInput {
@@ -1334,6 +1360,104 @@ impl EvaluatorCache {
         self.order.retain(|entry_key| entry_key != key);
         self.order.push_back(key.to_string());
     }
+}
+
+pub fn update_top_candidates(
+    mut tracker: TopCandidateTrackerSnapshot,
+    candidate: TopCandidateEntry,
+) -> TopCandidateUpdate {
+    tracker.max_candidates = clamp_top_candidate_limit(tracker.max_candidates);
+    tracker.candidates = deduplicate_top_candidates(tracker.candidates);
+
+    let mut removed_id = None;
+    if let Some(existing_index) = tracker
+        .candidates
+        .iter()
+        .position(|entry| entry.id == candidate.id)
+    {
+        if compare_top_candidates(&candidate, &tracker.candidates[existing_index])
+            != std::cmp::Ordering::Less
+        {
+            tracker.candidates.sort_by(compare_top_candidates);
+            return TopCandidateUpdate {
+                accepted: false,
+                removed_id,
+                best_candidate: tracker.candidates.first().cloned(),
+                tracker,
+            };
+        }
+        tracker.candidates.remove(existing_index);
+    } else if tracker.candidates.len() >= tracker.max_candidates {
+        tracker.candidates.sort_by(compare_top_candidates);
+        let Some(worst) = tracker.candidates.last() else {
+            return TopCandidateUpdate {
+                accepted: false,
+                removed_id,
+                best_candidate: None,
+                tracker,
+            };
+        };
+        if compare_top_candidates(&candidate, worst) != std::cmp::Ordering::Less {
+            return TopCandidateUpdate {
+                accepted: false,
+                removed_id,
+                best_candidate: tracker.candidates.first().cloned(),
+                tracker,
+            };
+        }
+        removed_id = tracker.candidates.pop().map(|entry| entry.id);
+    }
+
+    tracker.candidates.push(candidate);
+    tracker.candidates.sort_by(compare_top_candidates);
+    tracker.candidates.truncate(tracker.max_candidates);
+
+    TopCandidateUpdate {
+        accepted: true,
+        removed_id,
+        best_candidate: tracker.candidates.first().cloned(),
+        tracker,
+    }
+}
+
+fn deduplicate_top_candidates(candidates: Vec<TopCandidateEntry>) -> Vec<TopCandidateEntry> {
+    let mut by_id: BTreeMap<String, TopCandidateEntry> = BTreeMap::new();
+    for candidate in candidates {
+        match by_id.get(&candidate.id) {
+            Some(existing)
+                if compare_top_candidates(&candidate, existing) != std::cmp::Ordering::Less => {}
+            _ => {
+                by_id.insert(candidate.id.clone(), candidate);
+            }
+        }
+    }
+    let mut candidates = by_id.into_values().collect::<Vec<_>>();
+    candidates.sort_by(compare_top_candidates);
+    candidates
+}
+
+fn compare_top_candidates(
+    left: &TopCandidateEntry,
+    right: &TopCandidateEntry,
+) -> std::cmp::Ordering {
+    right
+        .score
+        .partial_cmp(&left.score)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| {
+            left.candidate
+                .passive_ids
+                .len()
+                .cmp(&right.candidate.passive_ids.len())
+        })
+        .then_with(|| {
+            count_candidate_actions(&left.candidate).cmp(&count_candidate_actions(&right.candidate))
+        })
+        .then_with(|| left.id.cmp(&right.id))
+}
+
+fn clamp_top_candidate_limit(max_candidates: usize) -> usize {
+    max_candidates.clamp(1, 200)
 }
 
 fn compare_population_entries(
@@ -3820,6 +3944,24 @@ pub fn create_evaluation_cache_key_json(
     Ok(create_evaluation_cache_key(prefix, &candidate))
 }
 
+#[wasm_bindgen]
+pub fn update_top_candidates_json(
+    tracker_json: &str,
+    candidate_json: &str,
+) -> Result<String, JsValue> {
+    let tracker: TopCandidateTrackerSnapshot =
+        serde_json::from_str(tracker_json).map_err(|error| {
+            JsValue::from_str(&format!("Invalid top-candidate tracker JSON: {error}"))
+        })?;
+    let candidate: TopCandidateEntry = serde_json::from_str(candidate_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid top candidate JSON: {error}")))?;
+    serde_json::to_string(&update_top_candidates(tracker, candidate)).map_err(|error| {
+        JsValue::from_str(&format!(
+            "Failed to serialize Rust top-candidate update: {error}"
+        ))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4301,6 +4443,102 @@ mod tests {
         assert_eq!(evicted.cache.metrics.cache_hits, 1);
         assert_eq!(evicted.cache.metrics.cache_misses, 3);
         assert_eq!(evicted.cache.metrics.cache_evictions, 1);
+    }
+
+    #[test]
+    fn tracks_top_candidates_with_deterministic_tie_breaking() {
+        let tracker = TopCandidateTrackerSnapshot {
+            max_candidates: 3,
+            candidates: vec![],
+        };
+
+        let update =
+            update_top_candidates(tracker, top_candidate("heavy", 10.0, vec!["passive-a"], 3));
+        assert!(update.accepted);
+        let update = update_top_candidates(update.tracker, top_candidate("lean", 10.0, vec![], 2));
+        assert_eq!(
+            update
+                .best_candidate
+                .as_ref()
+                .map(|entry| entry.id.as_str()),
+            Some("lean")
+        );
+        let update = update_top_candidates(update.tracker, top_candidate("alpha", 10.0, vec![], 2));
+        assert_eq!(
+            update
+                .tracker
+                .candidates
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha", "lean", "heavy"]
+        );
+
+        let rejected = update_top_candidates(
+            update.tracker.clone(),
+            top_candidate("weak", 1.0, vec![], 1),
+        );
+        assert!(!rejected.accepted);
+        assert_eq!(rejected.tracker.candidates.len(), 3);
+
+        let evicted =
+            update_top_candidates(rejected.tracker, top_candidate("winner", 20.0, vec![], 1));
+        assert!(evicted.accepted);
+        assert_eq!(evicted.removed_id.as_deref(), Some("heavy"));
+        assert_eq!(
+            evicted
+                .tracker
+                .candidates
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["winner", "alpha", "lean"]
+        );
+
+        let replacement =
+            update_top_candidates(evicted.tracker, top_candidate("lean", 30.0, vec![], 2));
+        assert!(replacement.accepted);
+        assert_eq!(
+            replacement
+                .best_candidate
+                .as_ref()
+                .map(|entry| entry.id.as_str()),
+            Some("lean")
+        );
+        assert_eq!(
+            replacement
+                .tracker
+                .candidates
+                .iter()
+                .filter(|entry| entry.id == "lean")
+                .count(),
+            1
+        );
+    }
+
+    fn top_candidate(
+        id: &str,
+        score: f64,
+        passive_ids: Vec<&str>,
+        action_count: usize,
+    ) -> TopCandidateEntry {
+        TopCandidateEntry {
+            id: id.to_string(),
+            candidate: OptimizerCandidateInput {
+                passive_ids: passive_ids.into_iter().map(str::to_string).collect(),
+                plan: CandidatePlan {
+                    turns: vec![CandidateTurn {
+                        actions: (0..action_count)
+                            .map(|index| CandidateAction {
+                                spell_id: format!("hit-{index}"),
+                                target: None,
+                            })
+                            .collect(),
+                    }],
+                },
+            },
+            score,
+        }
     }
 
     fn transformation_request() -> OptimizerRequest {
