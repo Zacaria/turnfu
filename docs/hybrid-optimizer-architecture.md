@@ -220,7 +220,10 @@ Two-step neighborhood around 77414.10:
 The next useful architecture step is not more random volume. The hybrid engine
 now seeds two small structured neighborhoods from improved elites: adjacent
 action-order swaps around burst windows and passive-set variants around known
-spell skeletons. Larger structured moves remain useful, for example:
+spell skeletons. Known domain branches can also be reused as longer-duration
+prefixes; for example, a strong two-turn Huppermage seed can initialize a
+three-turn search and leave later turns open for extension. Larger structured
+moves remain useful, for example:
 
 - whole-turn template recombination;
 - validity-repair guided by simulator violation types.

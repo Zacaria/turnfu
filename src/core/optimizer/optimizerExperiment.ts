@@ -1218,10 +1218,11 @@ function createDomainWarmupCandidates(
   const seeds = getHuppermageDomainSeedCandidates();
   const actionByKey = new Map(actions.map((action) => [serializeAction(action), action]));
   const availablePassiveIds = new Set(getAvailablePassiveIds(options));
+  const extensionActions = getTopWeightedActions(options, Math.min(16, actions.length));
   const candidates: OptimizerExperimentCandidateInput[] = [];
 
   for (const seed of seeds) {
-    if (seed.turns.length !== options.duration || seed.passiveIds.length > options.maxPassiveCount) {
+    if (seed.turns.length > options.duration || seed.passiveIds.length > options.maxPassiveCount) {
       continue;
     }
 
@@ -1238,14 +1239,32 @@ function createDomainWarmupCandidates(
       continue;
     }
 
+    const baseTurns = [
+      ...turns.map((turn) => ({
+        actions: turn.map((action) => cloneAction(action!)),
+      })),
+      ...Array.from({ length: options.duration - seed.turns.length }, () => ({ actions: [] })),
+    ];
+
     candidates.push({
       passiveIds: [...seed.passiveIds],
       plan: {
-        turns: turns.map((turn) => ({
-          actions: turn.map((action) => cloneAction(action!)),
-        })),
+        turns: baseTurns.map(cloneTurn),
       },
     });
+
+    if (seed.turns.length < options.duration) {
+      for (const action of extensionActions) {
+        const extendedTurns = baseTurns.map(cloneTurn);
+        extendedTurns[seed.turns.length]!.actions.push(cloneAction(action));
+        candidates.push({
+          passiveIds: [...seed.passiveIds],
+          plan: {
+            turns: extendedTurns,
+          },
+        });
+      }
+    }
   }
 
   return candidates;
