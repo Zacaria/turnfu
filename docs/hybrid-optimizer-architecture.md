@@ -110,7 +110,11 @@ immediately creates a compact queue of nearby candidates to test.
 Repair candidates still run first, but long per-island searches periodically
 let local refinement preempt the elite-neighbor queue. This keeps the local
 hill-climber from being starved by large neighbor queues while preserving the
-short-budget warmup behavior.
+short-budget warmup behavior. For long T3 searches, and for the wider two-turn
+8-action setup, the loop also adds a deterministic mid-stagnation refinement
+cadence before restart pressure takes over. The narrower 7-action T2 cap stays
+on the older cadence because benchmarks showed the extra local pressure was not
+useful there.
 
 ## Elite-neighbor generation
 

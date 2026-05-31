@@ -498,6 +498,8 @@ function runHybridSingleEngine(context: EngineContext): OptimizerExperimentEngin
   const localRefinementInterval = Math.max(3, Math.floor(populationSize / 4));
   // Per-island threshold: a global 1k run splits to roughly 166 attempts per island.
   const localRefinementPreemptionBudget = 160;
+  const stagnationRefinementBudget = 1_000;
+  const stagnationRefinementInterval = 7;
   // Keep repair cascades from starving elite-neighbor exploration on long searches.
   const repairBurstLimit = 2;
   let population: Array<{ input: OptimizerExperimentCandidateInput; result: OptimizerExperimentCandidate }> = [];
@@ -565,7 +567,15 @@ function runHybridSingleEngine(context: EngineContext): OptimizerExperimentEngin
     const repairNeighbor = canProcessRepair ? repairQueue.shift() : undefined;
     const shouldRefineLocally = !repairNeighbor
       && context.options.budget.iterations >= localRefinementPreemptionBudget
-      && accumulator.attempts % localRefinementInterval === 0;
+      && (
+        accumulator.attempts % localRefinementInterval === 0
+        || (
+          context.options.budget.iterations >= stagnationRefinementBudget
+          && (context.options.duration >= 3 || context.options.maxActionsPerTurn >= 8)
+          && attemptsSinceImprovement >= Math.floor(stagnationLimit / 2)
+          && accumulator.attempts % stagnationRefinementInterval === 0
+        )
+      );
     const eliteNeighbor = repairNeighbor || shouldRefineLocally ? undefined : eliteNeighborQueue.shift();
     const input = repairNeighbor
       ?? (shouldRefineLocally
@@ -1241,6 +1251,8 @@ async function runHybridSingleEngineProgressive(context: EngineContext): Promise
   const localRefinementInterval = Math.max(3, Math.floor(populationSize / 4));
   // Per-island threshold: a global 1k run splits to roughly 166 attempts per island.
   const localRefinementPreemptionBudget = 160;
+  const stagnationRefinementBudget = 1_000;
+  const stagnationRefinementInterval = 7;
   // Keep repair cascades from starving elite-neighbor exploration on long searches.
   const repairBurstLimit = 2;
   let population: Array<{ input: OptimizerExperimentCandidateInput; result: OptimizerExperimentCandidate }> = [];
@@ -1311,7 +1323,15 @@ async function runHybridSingleEngineProgressive(context: EngineContext): Promise
     const repairNeighbor = canProcessRepair ? repairQueue.shift() : undefined;
     const shouldRefineLocally = !repairNeighbor
       && context.options.budget.iterations >= localRefinementPreemptionBudget
-      && accumulator.attempts % localRefinementInterval === 0;
+      && (
+        accumulator.attempts % localRefinementInterval === 0
+        || (
+          context.options.budget.iterations >= stagnationRefinementBudget
+          && (context.options.duration >= 3 || context.options.maxActionsPerTurn >= 8)
+          && attemptsSinceImprovement >= Math.floor(stagnationLimit / 2)
+          && accumulator.attempts % stagnationRefinementInterval === 0
+        )
+      );
     const eliteNeighbor = repairNeighbor || shouldRefineLocally ? undefined : eliteNeighborQueue.shift();
     const input = repairNeighbor
       ?? (shouldRefineLocally
