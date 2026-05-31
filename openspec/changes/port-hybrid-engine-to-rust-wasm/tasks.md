@@ -29,7 +29,7 @@
 - [x] 4.3 Add multi-turn fixtures covering rune carryover, WP/BQ carryover, cooldown aging, stored BQ, active passives, Feu-Follet recovery, and sustainable-cycle replay.
 - [x] 4.4 Add seeded candidate-batch generation that evaluates the same normalized candidates through TypeScript and Rust.
 - [x] 4.5 Report first mismatch details with fixture or seed, turn index, action index, spell id, field path, TypeScript value, and Rust value.
-- [ ] 4.6 Add CI-sized differential tests and a larger local soak command.
+- [x] 4.6 Add CI-sized differential tests and a larger local soak command.
 
 ## 5. Rust Hybrid Search
 

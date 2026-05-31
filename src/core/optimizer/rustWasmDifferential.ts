@@ -4,6 +4,7 @@ import {
   createRustWasmDifferentialFixtures,
   normalizeViolation,
   type RustWasmDifferentialFixture,
+  type RustWasmDifferentialFixtureOptions,
 } from "./rustWasmDifferentialFixtures.ts";
 import { roundDamage, type ResourcePool } from "../simulation/index.ts";
 
@@ -79,8 +80,12 @@ export type RustWasmDifferentialMismatch = {
 export type RustWasmDifferentialResult = {
   passed: boolean;
   fixtureCount: number;
+  generatedCandidateCount: number;
   mismatchCount: number;
   firstMismatch?: RustWasmDifferentialMismatch;
+  fixtureSetupMs: number;
+  rustWasmElapsedMs: number;
+  candidateEvaluationsPerSecond: number;
   elapsedMs: number;
 };
 
@@ -90,9 +95,17 @@ const numericToleranceByFieldPath: Record<string, number> = {
 
 const defaultNumericTolerance = 1e-9;
 
-export function runRustWasmDifferentialSuite(wasm: RustWasmDifferentialWasmExports): RustWasmDifferentialResult {
+export type RustWasmDifferentialOptions = RustWasmDifferentialFixtureOptions;
+
+export function runRustWasmDifferentialSuite(
+  wasm: RustWasmDifferentialWasmExports,
+  options: RustWasmDifferentialOptions = {},
+): RustWasmDifferentialResult {
   const startedAt = performance.now();
-  const fixtures = createRustWasmDifferentialFixtures();
+  const fixtures = createRustWasmDifferentialFixtures(options);
+  const fixtureSetupMs = Math.round((performance.now() - startedAt) * 100) / 100;
+  const rustWasmStartedAt = performance.now();
+  const generatedCandidateCount = countGeneratedCandidates(fixtures);
   let firstMismatch: RustWasmDifferentialMismatch | undefined;
   let mismatchCount = 0;
 
@@ -106,13 +119,34 @@ export function runRustWasmDifferentialSuite(wasm: RustWasmDifferentialWasmExpor
     }
   }
 
+  const rustWasmElapsedMs = Math.round((performance.now() - rustWasmStartedAt) * 100) / 100;
   return {
     passed: mismatchCount === 0,
     fixtureCount: fixtures.length,
+    generatedCandidateCount,
     mismatchCount,
     firstMismatch,
+    fixtureSetupMs,
+    rustWasmElapsedMs,
+    candidateEvaluationsPerSecond: calculateCandidateEvaluationsPerSecond(
+      generatedCandidateCount,
+      rustWasmElapsedMs,
+    ),
     elapsedMs: Math.round((performance.now() - startedAt) * 100) / 100,
   };
+}
+
+function countGeneratedCandidates(fixtures: RustWasmDifferentialFixture[]): number {
+  return fixtures.reduce((total, fixture) =>
+    total + (fixture.kind === "candidateBatch" ? fixture.candidates.length : 0), 0);
+}
+
+function calculateCandidateEvaluationsPerSecond(candidateCount: number, elapsedMs: number): number {
+  if (candidateCount === 0 || elapsedMs <= 0) {
+    return 0;
+  }
+
+  return Math.round((candidateCount / elapsedMs) * 100_000) / 100;
 }
 
 function createMismatchReport(

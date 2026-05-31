@@ -13,6 +13,8 @@
     "wasm:build": "wasm-pack build rust/optimizer-wasm --target nodejs --out-dir ../../src/wasm/optimizer_wasm_pkg",
     "wasm:test": "cargo test --manifest-path rust/optimizer-wasm/Cargo.toml",
     "diff:rust-wasm": "node --experimental-strip-types scripts/differential-rust-wasm.ts",
+    "diff:rust-wasm:ci": "node --experimental-strip-types scripts/differential-rust-wasm.ts --profile ci",
+    "diff:rust-wasm:soak": "node --experimental-strip-types scripts/differential-rust-wasm.ts --profile soak",
     "validate:openspec:huppermage": "openspec validate catalog-huppermage-spells-effects --strict --no-interactive"
   },
   "dependencies": {

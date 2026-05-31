@@ -116,6 +116,11 @@ export type RustWasmDifferentialFixture =
       expected: unknown;
     };
 
+export type RustWasmDifferentialFixtureOptions = {
+  candidateBatchSeeds?: readonly string[];
+  candidatesPerBatch?: number;
+};
+
 type RustPassiveEntry = {
   id: string;
   effects: Array<
@@ -168,6 +173,16 @@ const resources = ["ap", "mp", "wp", "bq"] as const;
 
 const baseResources = createResources({ ap: 20, mp: 10, wp: 10, bq: 2_000 });
 
+export const rustWasmDifferentialCiFixtureOptions = {
+  candidateBatchSeeds: ["rust-wasm-differential-ci"],
+  candidatesPerBatch: 24,
+} satisfies Required<RustWasmDifferentialFixtureOptions>;
+
+export const rustWasmDifferentialSoakFixtureOptions = {
+  candidateBatchSeeds: Array.from({ length: 8 }, (_, index) => `rust-wasm-differential-soak:${index}`),
+  candidatesPerBatch: 128,
+} satisfies Required<RustWasmDifferentialFixtureOptions>;
+
 const baseStats = {
   level: 200,
   generalMastery: 1_050,
@@ -204,15 +219,38 @@ const damageContext: Partial<ActionContext> = {
   isBlocked: false,
 };
 
-export function createRustWasmDifferentialFixtures(): RustWasmDifferentialFixture[] {
+export function createRustWasmDifferentialFixtures(
+  options: RustWasmDifferentialFixtureOptions = {},
+): RustWasmDifferentialFixture[] {
+  const normalizedOptions = normalizeRustWasmDifferentialFixtureOptions(options);
+
   return [
     ...createSpellCostFixtures(),
     ...createDamageFixtures(),
     ...createInitialPassiveFixtures(),
     ...createInvalidPlanFixtures(),
     ...createMultiTurnFixtures(),
-    ...createSeededCandidateBatchFixtures(),
+    ...createSeededCandidateBatchFixtures(normalizedOptions),
   ];
+}
+
+function normalizeRustWasmDifferentialFixtureOptions(
+  options: RustWasmDifferentialFixtureOptions,
+): Required<RustWasmDifferentialFixtureOptions> {
+  const candidateBatchSeeds = Array.from(
+    options.candidateBatchSeeds ?? rustWasmDifferentialCiFixtureOptions.candidateBatchSeeds,
+  );
+  const candidatesPerBatch = options.candidatesPerBatch
+    ?? rustWasmDifferentialCiFixtureOptions.candidatesPerBatch;
+
+  if (!Number.isInteger(candidatesPerBatch) || candidatesPerBatch < 1) {
+    throw new Error(`Expected candidatesPerBatch to be a positive integer, got ${candidatesPerBatch}.`);
+  }
+
+  return {
+    candidateBatchSeeds,
+    candidatesPerBatch,
+  };
 }
 
 function createSpellCostFixtures(): RustWasmDifferentialFixture[] {
@@ -501,8 +539,9 @@ function createMultiTurnFixtures(): RustWasmDifferentialFixture[] {
   return fixtures;
 }
 
-function createSeededCandidateBatchFixtures(): RustWasmDifferentialFixture[] {
-  const seed = "rust-wasm-differential-ci";
+function createSeededCandidateBatchFixtures(
+  options: Required<RustWasmDifferentialFixtureOptions>,
+): RustWasmDifferentialFixture[] {
   const character = createGeneratedBatchCharacter();
   const spellIds = [
     "epee-de-lumiere",
@@ -515,19 +554,22 @@ function createSeededCandidateBatchFixtures(): RustWasmDifferentialFixture[] {
     const spell = requireSpell(spellId);
     return [spellId, createGeneratedSpellProjection(spell)];
   }));
-  const candidates = createSeededGeneratedCandidates(seed, spellIds, 24);
 
-  return [{
-    kind: "candidateBatch",
-    name: `candidate-batch:${seed}`,
-    seed,
-    candidates,
-    resources: character.resources,
-    stats: normalizeStatsForRust(character.stats),
-    initialHuppermage: createRustHuppermageState({ bqMax: character.resources.bq }),
-    spellBook,
-    expected: candidates.map((candidate) => evaluateGeneratedCandidateWithTypeScript(candidate, character)),
-  }];
+  return options.candidateBatchSeeds.map((seed) => {
+    const candidates = createSeededGeneratedCandidates(seed, spellIds, options.candidatesPerBatch);
+
+    return {
+      kind: "candidateBatch",
+      name: `candidate-batch:${seed}`,
+      seed,
+      candidates,
+      resources: character.resources,
+      stats: normalizeStatsForRust(character.stats),
+      initialHuppermage: createRustHuppermageState({ bqMax: character.resources.bq }),
+      spellBook,
+      expected: candidates.map((candidate) => evaluateGeneratedCandidateWithTypeScript(candidate, character)),
+    };
+  });
 }
 
 function createSeededGeneratedCandidates(seed: string, spellIds: string[], count: number): GeneratedCandidate[] {
