@@ -494,7 +494,7 @@ function runHybridSingleEngine(context: EngineContext): OptimizerExperimentEngin
   const populationSize = Math.max(8, Math.min(96, Math.floor(Math.sqrt(context.options.budget.iterations)) * 2));
   const eliteCount = Math.max(2, Math.ceil(populationSize * 0.15));
   const immigrantBatchSize = Math.max(2, Math.ceil(populationSize * 0.25));
-  const stagnationLimit = Math.max(8, Math.min(80, Math.floor(populationSize * 0.75)));
+  const stagnationLimit = Math.max(8, Math.min(80, populationSize));
   const localRefinementInterval = Math.max(3, Math.floor(populationSize / 4));
   // Keep repair cascades from starving elite-neighbor exploration on long searches.
   const repairBurstLimit = 2;
@@ -1166,7 +1166,7 @@ async function runHybridSingleEngineProgressive(context: EngineContext): Promise
   const populationSize = Math.max(8, Math.min(96, Math.floor(Math.sqrt(context.options.budget.iterations)) * 2));
   const eliteCount = Math.max(2, Math.ceil(populationSize * 0.15));
   const immigrantBatchSize = Math.max(2, Math.ceil(populationSize * 0.25));
-  const stagnationLimit = Math.max(8, Math.min(80, Math.floor(populationSize * 0.75)));
+  const stagnationLimit = Math.max(8, Math.min(80, populationSize));
   const localRefinementInterval = Math.max(3, Math.floor(populationSize / 4));
   // Keep repair cascades from starving elite-neighbor exploration on long searches.
   const repairBurstLimit = 2;
