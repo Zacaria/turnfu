@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
   ClipboardPaste,
@@ -873,28 +873,6 @@ export function App() {
           </button>
         ) : null}
 
-        <section className="live-results" aria-label={t("app.liveResults")}>
-          <div className="brand-block">
-            <span>{t("app.className")}</span>
-            <h1>{t("app.heading")}</h1>
-          </div>
-          <div className="live-score-card" title={t("metric.comboDamage")}>
-            <span>{t("metric.comboDamage")}</span>
-            <b>{simulation.totalDamage}</b>
-          </div>
-          <div className="live-support">
-            <div className="live-metrics">
-              <div>
-                <span>{t("metric.stepDamage")}</span>
-                <b>{currentSnapshot?.totalDamageSoFar ?? 0}</b>
-              </div>
-            </div>
-            <div className={simulation.valid ? "status-pill status-ok" : "status-pill status-error"}>
-              {simulation.valid ? t("status.valid") : t("status.invalid")}
-            </div>
-          </div>
-        </section>
-
         <section className={`workspace ${centerTab !== "combos" ? "workspace-center-only" : ""}`}>
           <aside className="panel setup-panel" aria-label={t("panel.stateTracker")}>
             <PanelHeader title={t("panel.stateTracker")} />
@@ -905,6 +883,17 @@ export function App() {
             <PanelHeader
               title={t(centerTab === "combos" ? "panel.sequence" : centerTab === "aptitudes" ? "panel.aptitudes" : "panel.equipment")}
               subtitle={t(centerTab === "combos" ? "panel.actionOrder" : centerTab === "aptitudes" ? "panel.importFormat" : "panel.equipmentSubtitle")}
+              actions={
+                <div className="sequence-summary" aria-label={t("app.liveResults")}>
+                  <div className="sequence-summary-score" title={t("metric.comboDamage")}>
+                    <span>{t("metric.comboDamage")}</span>
+                    <b>{simulation.totalDamage}</b>
+                  </div>
+                  <div className={simulation.valid ? "status-pill status-ok" : "status-pill status-error"}>
+                    {simulation.valid ? t("status.valid") : t("status.invalid")}
+                  </div>
+                </div>
+              }
             />
             <CenterTabs value={centerTab} onChange={setCenterTab} />
             {centerTab === "combos" ? (
@@ -1387,11 +1376,22 @@ function getBuilderBackLabel(route: ResearchRoute): string {
   }
 }
 
-function PanelHeader({ title, subtitle }: { title: string; subtitle?: string }) {
+function PanelHeader({
+  title,
+  subtitle,
+  actions,
+}: {
+  title: string;
+  subtitle?: string;
+  actions?: ReactNode;
+}) {
   return (
     <div className="panel-header">
-      <h2>{title}</h2>
-      {subtitle ? <span>{subtitle}</span> : null}
+      <div className="panel-header-title">
+        <h2>{title}</h2>
+        {subtitle ? <span className="panel-header-subtitle">{subtitle}</span> : null}
+      </div>
+      {actions ? <div className="panel-header-actions">{actions}</div> : null}
     </div>
   );
 }
