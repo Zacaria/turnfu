@@ -268,6 +268,9 @@ Huppermage pivot spells such as `coeur-de-lumiere`, `runification`,
 search limited to T2, while still letting long T3 budgets fix local ordering
 around the high-value pivots. On the reference Huppermage benchmarks it found
 the current best T3 warmup line without changing the verified T2 capped scores.
+The T2 neighborhood also tests empty-cell target flips around elite plans, using
+the same small axis that helped long-budget mutation while keeping action order
+and resource costs intact.
 For broader T3 passive budgets, the neighborhood expands around `halo-chatoyant`,
 `debacle`, and `orbes-luisants`, and can flip empty-cell capable actions or
 insert weighted actions near those pivots. The full expansion is disabled for

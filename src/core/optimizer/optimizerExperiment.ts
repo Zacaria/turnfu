@@ -899,6 +899,26 @@ function enqueueHybridEliteNeighbors(
           }
         }
       }
+
+      const targetFlipSpellIds = new Set(actions
+        .filter((action) => action.target?.kind === "emptyCell")
+        .map((action) => action.spellId));
+      for (let actionIndex = 0; actionIndex < turn.actions.length; actionIndex += 1) {
+        if (targetFlipGenerated >= 64) {
+          break;
+        }
+        const action = turn.actions[actionIndex]!;
+        if (!targetFlipSpellIds.has(action.spellId)) {
+          continue;
+        }
+        const candidate = cloneCandidateInput(input);
+        candidate.plan.turns[turnIndex]!.actions[actionIndex] = action.target?.kind === "emptyCell"
+          ? { spellId: action.spellId }
+          : { spellId: action.spellId, target: { kind: "emptyCell" } };
+        if (addCandidate(candidate, "hybridTargetFlipNeighborCandidates")) {
+          targetFlipGenerated += 1;
+        }
+      }
     } else if (context.options.duration === 3) {
       const useBroadT3Neighbors = context.options.maxPassiveCount > 3;
       const useMicroT3Neighbors = context.options.maxPassiveCount === 3 && context.options.budget.iterations >= 1_000;
