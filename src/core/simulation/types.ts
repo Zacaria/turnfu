@@ -26,6 +26,7 @@ export type HuppermageTurnState = {
   bqMax: number;
   storedBq: number;
   haloChatoyantMarks: number;
+  cooldownsBySpellId: Record<string, number>;
   deckSpellLimit: number;
   passiveLimit: number;
 };
@@ -102,6 +103,7 @@ export type SimulatedCharacter = {
       bqMax?: number;
       storedBq?: number;
       haloChatoyantMarks?: number;
+      cooldownsBySpellId?: Record<string, number>;
       convertWpToBq?: boolean;
       deckSpellLimit?: number;
       passiveLimit?: number;
@@ -134,7 +136,8 @@ export type SimulationViolationType =
   | "unsupportedEntryKind"
   | "invalidClassStateAction"
   | "invalidTarget"
-  | "deckLimitExceeded";
+  | "deckLimitExceeded"
+  | "cooldownActive";
 
 export type SimulationViolation = {
   type: SimulationViolationType;
@@ -143,6 +146,7 @@ export type SimulationViolation = {
   resource?: Resource;
   required?: number;
   available?: number;
+  scope?: "turn" | "target";
   message: string;
   source?: CatalogSource;
 };
@@ -272,6 +276,7 @@ export type TurnState = {
   classState: ClassTurnState;
   currentStats: BaseStats;
   castsBySpellId: Record<string, number>;
+  targetCastsBySpellId: Record<string, number>;
   totalDamage: number;
   actionLog: ActionResult[];
   turnEndEffects: AppliedEffect[];

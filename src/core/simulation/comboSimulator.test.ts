@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { cost, damage, normalizeCatalog, resourceDelta, screenshot, spell } from "../catalog/index.ts";
+import { cooldownTurns, cost, damage, normalizeCatalog, resourceDelta, screenshot, spell } from "../catalog/index.ts";
 import { createResources, simulateCombo } from "./index.ts";
 import type { CatalogEntry } from "../catalog/types.ts";
 import type { SimulatedCharacter } from "./types.ts";
@@ -43,6 +43,14 @@ const catalog = normalizeCatalog([
     cost: cost({ ap: 99 }),
     effects: [damage({ element: "light", base: 50 })],
     constraints: [],
+    metadata: { status: "extracted", sources: [source] },
+  }),
+  spell("cooldown-spell", {
+    name: "Cooldown Spell",
+    level: 200,
+    cost: cost({ ap: 1 }),
+    effects: [damage({ element: "light", base: 10 })],
+    constraints: [cooldownTurns(2)],
     metadata: { status: "extracted", sources: [source] },
   }),
 ]) as CatalogEntry[];
@@ -122,6 +130,42 @@ test("refreshes AP and PM while carrying PW and BQ into the next turn", () => {
   assert.equal(secondTurnResources.mp, 3);
   assert.equal(secondTurnResources.wp, 1);
   assert.equal(secondTurnResources.bq, 110);
+});
+
+test("blocks cooldown spells during their waiting turns", () => {
+  const result = simulateCombo({
+    catalog,
+    character,
+    combo: {
+      turns: [
+        { actions: [{ spellId: "cooldown-spell" }] },
+        { actions: [{ spellId: "cooldown-spell" }] },
+      ],
+    },
+  });
+
+  assert.equal(result.valid, false);
+  assert.equal(result.violations[0].type, "cooldownActive");
+  assert.equal(result.violations[0].turnIndex, 1);
+  assert.equal(result.violations[0].actionIndex, 0);
+});
+
+test("allows cooldown spells after waiting the cooldown duration", () => {
+  const result = simulateCombo({
+    catalog,
+    character,
+    combo: {
+      turns: [
+        { actions: [{ spellId: "cooldown-spell" }] },
+        { actions: [] },
+        { actions: [] },
+        { actions: [{ spellId: "cooldown-spell" }] },
+      ],
+    },
+  });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.turns[3].result.breakdown[0].spellId, "cooldown-spell");
 });
 
 test("preserves completed turns and annotates violations from invalid later turns", () => {

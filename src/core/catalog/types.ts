@@ -213,6 +213,14 @@ export type SpellConstraint =
       value: number;
     }
   | {
+      type: "maxCastsPerTarget";
+      value: number;
+    }
+  | {
+      type: "cooldownTurns";
+      value: number;
+    }
+  | {
       type: "requiresTarget";
       target: "fighter" | "feuFollet" | "emptyCell" | "ally" | "enemy";
     }

@@ -60,7 +60,7 @@ test("creates one initial snapshot and one snapshot per completed action", () =>
   assert.equal(snapshots[1].resources.bq, 20);
   assert.equal(snapshots[1].totalDamageSoFar, 20);
   assert.equal(snapshots[2].resources.ap, 3);
-  assert.equal(snapshots[2].totalDamageSoFar, 40);
+  assert.equal(snapshots[2].totalDamageSoFar, 44);
 });
 
 test("keeps completed snapshots available when a later action is invalid", () => {
@@ -101,5 +101,5 @@ test("flattens multi-turn combo snapshots into a global cursor sequence", () => 
   assert.equal(snapshots[1].totalDamageSoFar, 20);
   assert.equal(snapshots[2].turnIndex, 1);
   assert.equal(snapshots[2].actionIndex, 0);
-  assert.equal(snapshots[2].totalDamageSoFar, 40);
+  assert.equal(snapshots[2].totalDamageSoFar, 44);
 });

@@ -149,6 +149,14 @@ export function maxCastsPerTurn(value: number): SpellConstraint {
   return { [DSL_CONSTRAINT]: true, type: "maxCastsPerTurn", value } as DslConstraint;
 }
 
+export function maxCastsPerTarget(value: number): SpellConstraint {
+  return { [DSL_CONSTRAINT]: true, type: "maxCastsPerTarget", value } as DslConstraint;
+}
+
+export function cooldownTurns(value: number): SpellConstraint {
+  return { [DSL_CONSTRAINT]: true, type: "cooldownTurns", value } as DslConstraint;
+}
+
 export function requiresTarget(target: Extract<SpellConstraint, { type: "requiresTarget" }>["target"]): SpellConstraint {
   return { [DSL_CONSTRAINT]: true, type: "requiresTarget", target } as DslConstraint;
 }

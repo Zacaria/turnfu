@@ -62,3 +62,8 @@ test("formats parameterized UI messages through the shared dictionary", () => {
   assert.equal(formatUiMessage("cursor.step", { value: 2, max: 5 }), "Étape 2/5");
   assert.equal(formatUiMessage("stat.decrementTitle", { label: "Maîtrise" }), "Retirer 1 Maîtrise. Maj : -10");
 });
+
+test("falls back to the key when a parameterized UI message is missing", () => {
+  setUiLocale("fr");
+  assert.equal(formatUiMessage("missing.runtime.key" as never, { value: 1 }), "missing.runtime.key");
+});

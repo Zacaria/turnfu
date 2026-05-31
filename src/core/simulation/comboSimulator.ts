@@ -80,11 +80,12 @@ function createNextTurnCharacter(baseCharacter: SimulatedCharacter, previousFina
     ...baseCharacter,
     resources,
     stats: cloneStats(baseCharacter.stats),
-    classState: createNextClassState(previousFinalState.classState),
+    classState: createNextClassState(previousFinalState),
   };
 }
 
-function createNextClassState(previousClassState: ClassTurnState): SimulatedCharacter["classState"] {
+function createNextClassState(previousFinalState: TurnState): SimulatedCharacter["classState"] {
+  const previousClassState = previousFinalState.classState;
   if (!previousClassState.huppermage) {
     return undefined;
   }
@@ -112,10 +113,24 @@ function createNextClassState(previousClassState: ClassTurnState): SimulatedChar
       bqMax: huppermage.bqMax,
       storedBq: huppermage.storedBq,
       haloChatoyantMarks: huppermage.haloChatoyantMarks,
+      cooldownsBySpellId: ageCooldowns(huppermage.cooldownsBySpellId, previousFinalState.castsBySpellId),
       deckSpellLimit: huppermage.deckSpellLimit,
       passiveLimit: huppermage.passiveLimit,
     },
   };
+}
+
+function ageCooldowns(cooldownsBySpellId: Record<string, number>, castsBySpellId: Record<string, number>): Record<string, number> {
+  const nextCooldowns: Record<string, number> = {};
+
+  for (const [spellId, cooldownRemaining] of Object.entries(cooldownsBySpellId)) {
+    const nextCooldown = castsBySpellId[spellId] ? cooldownRemaining : cooldownRemaining - 1;
+    if (nextCooldown > 0) {
+      nextCooldowns[spellId] = nextCooldown;
+    }
+  }
+
+  return nextCooldowns;
 }
 
 function cloneCharacter(character: SimulatedCharacter): SimulatedCharacter {
@@ -134,6 +149,7 @@ function cloneCharacter(character: SimulatedCharacter): SimulatedCharacter {
           feuFolletStoredLastRunes: huppermage.feuFolletStoredLastRunes ? [...huppermage.feuFolletStoredLastRunes] : undefined,
           usedSpellIds: huppermage.usedSpellIds ? [...huppermage.usedSpellIds] : undefined,
           activePassives: huppermage.activePassives ? [...huppermage.activePassives] : undefined,
+          cooldownsBySpellId: huppermage.cooldownsBySpellId ? { ...huppermage.cooldownsBySpellId } : undefined,
         },
       }
       : character.classState,

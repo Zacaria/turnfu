@@ -242,6 +242,8 @@ const fr = {
   "violation.unknownSpell": "Sort inconnu : {spellId}.",
   "violation.insufficientResource": "Ressource insuffisante : {required} {resource} requis, {available} disponible.",
   "violation.castLimitExceeded": "Limite de lancer atteinte pour {spellId} ({required} par tour).",
+  "violation.castLimitExceededTarget": "Limite de lancer atteinte pour {spellId} ({required} par cible).",
+  "violation.cooldownActive": "{spellId} est en cooldown pour encore {available} tour(s).",
   "violation.unsupportedEntryKind": "L'entrée {spellId} n'est pas un sort jouable.",
   "violation.invalidClassStateAction": "Action impossible avec l'état Huppermage actuel pour {spellId}.",
 } as const;
@@ -479,6 +481,8 @@ const translations = {
     "violation.unknownSpell": "Unknown spell: {spellId}.",
     "violation.insufficientResource": "Insufficient resource: {required} {resource} required, {available} available.",
     "violation.castLimitExceeded": "Cast limit reached for {spellId} ({required} per turn).",
+    "violation.castLimitExceededTarget": "Cast limit reached for {spellId} ({required} per target).",
+    "violation.cooldownActive": "{spellId} is on cooldown for {available} more turn(s).",
     "violation.unsupportedEntryKind": "Entry {spellId} is not a playable spell.",
     "violation.invalidClassStateAction": "Action unavailable with current Huppermage state for {spellId}.",
   },
@@ -496,7 +500,7 @@ export function setUiLocale(locale: UiLocale): void {
 }
 
 export function t(key: UiTextKey, locale: UiLocale = currentLocale): string {
-  return translations[locale][key];
+  return translations[locale][key] ?? translations[defaultLocale][key] ?? key;
 }
 
 export function formatUiMessage(
@@ -504,7 +508,8 @@ export function formatUiMessage(
   params: UiMessageParams,
   locale: UiLocale = currentLocale,
 ): string {
-  return t(key, locale).replace(/\{(\w+)\}/g, (match, name: string) => {
+  const template = t(key, locale) ?? String(key);
+  return template.replace(/\{(\w+)\}/g, (match, name: string) => {
     const value = params[name];
     return value === undefined ? match : String(value);
   });

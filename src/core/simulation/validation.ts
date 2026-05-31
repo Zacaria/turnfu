@@ -15,6 +15,7 @@ export function validateSpellAction(input: {
   state: TurnState;
   effectiveCost?: SpellCost;
   action?: Action;
+  maxCastsPerTurnOverride?: number;
 }): SimulationViolation | undefined {
   if (!input.spell) {
     return {
@@ -35,13 +36,40 @@ export function validateSpellAction(input: {
     };
   }
 
+  const cooldownViolation = validateCooldown(input.spell, input.state, input.actionIndex);
+  if (cooldownViolation) {
+    return cooldownViolation;
+  }
+
   const resourceViolation = validateResources(input.spell, input.effectiveCost ?? input.spell.cost, input.state.remainingResources, input.actionIndex);
   if (resourceViolation) {
     return resourceViolation;
   }
 
   return validateTarget(input.spell, input.action, input.actionIndex)
-    ?? validateCastLimit(input.spell, input.state, input.actionIndex);
+    ?? validateCastLimit(input.spell, input.state, input.actionIndex, input.maxCastsPerTurnOverride, input.action);
+}
+
+function validateCooldown(
+  spell: CatalogEntry,
+  state: TurnState,
+  actionIndex: number,
+): SimulationViolation | undefined {
+  const cooldownRemaining = state.classState.huppermage?.cooldownsBySpellId[spell.id] ?? 0;
+  if (cooldownRemaining <= 0) {
+    return undefined;
+  }
+
+  const cooldown = spell.constraints.find((constraint) => constraint.type === "cooldownTurns");
+  return {
+    type: "cooldownActive",
+    actionIndex,
+    spellId: spell.id,
+    required: cooldown?.type === "cooldownTurns" ? cooldown.value : undefined,
+    available: cooldownRemaining,
+    message: `Spell '${spell.id}' is on cooldown for ${cooldownRemaining} more turn(s).`,
+    source: spell.metadata.sources[0],
+  };
 }
 
 function validateResources(
@@ -98,24 +126,59 @@ function validateCastLimit(
   spell: CatalogEntry,
   state: TurnState,
   actionIndex: number,
+  maxCastsPerTurnOverride?: number,
+  action?: Action,
 ): SimulationViolation | undefined {
+  const targetCastLimit = spell.constraints.find((constraint) => constraint.type === "maxCastsPerTarget");
+  if (targetCastLimit?.type === "maxCastsPerTarget") {
+    if (!countsAsTargetCast(action)) {
+      return undefined;
+    }
+
+    const currentTargetCasts = state.targetCastsBySpellId[spell.id] ?? 0;
+    if (currentTargetCasts >= targetCastLimit.value) {
+      return {
+        type: "castLimitExceeded",
+        actionIndex,
+        spellId: spell.id,
+        required: targetCastLimit.value,
+        available: currentTargetCasts,
+        scope: "target",
+        message: `Spell '${spell.id}' exceeds max casts per target (${targetCastLimit.value}).`,
+        source: spell.metadata.sources[0],
+      };
+    }
+
+    return undefined;
+  }
+
   const castLimit = spell.constraints.find((constraint) => constraint.type === "maxCastsPerTurn");
-  if (!castLimit || castLimit.type !== "maxCastsPerTurn") {
+  if (maxCastsPerTurnOverride === undefined && (!castLimit || castLimit.type !== "maxCastsPerTurn")) {
+    return undefined;
+  }
+
+  const maxCastsPerTurn = maxCastsPerTurnOverride ?? castLimit?.value;
+  if (maxCastsPerTurn === undefined) {
     return undefined;
   }
 
   const currentCasts = state.castsBySpellId[spell.id] ?? 0;
-  if (currentCasts >= castLimit.value) {
+  if (currentCasts >= maxCastsPerTurn) {
     return {
       type: "castLimitExceeded",
       actionIndex,
       spellId: spell.id,
-      required: castLimit.value,
+      required: maxCastsPerTurn,
       available: currentCasts,
-      message: `Spell '${spell.id}' exceeds max casts per turn (${castLimit.value}).`,
+      scope: "turn",
+      message: `Spell '${spell.id}' exceeds max casts per turn (${maxCastsPerTurn}).`,
       source: spell.metadata.sources[0],
     };
   }
 
   return undefined;
+}
+
+function countsAsTargetCast(action: Action | undefined): boolean {
+  return action?.target?.kind !== "emptyCell";
 }

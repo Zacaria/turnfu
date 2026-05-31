@@ -142,9 +142,16 @@ export function describeViolation(violation: SimulationViolation): string {
   }
 
   if (violation.type === "castLimitExceeded") {
-    return formatUiMessage("violation.castLimitExceeded", {
+    return formatUiMessage(violation.scope === "target" ? "violation.castLimitExceededTarget" : "violation.castLimitExceeded", {
       spellId,
       required: violation.required ?? 0,
+    });
+  }
+
+  if (violation.type === "cooldownActive") {
+    return formatUiMessage("violation.cooldownActive", {
+      spellId,
+      available: violation.available ?? 0,
     });
   }
 

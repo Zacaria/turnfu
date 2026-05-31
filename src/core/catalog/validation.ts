@@ -24,6 +24,8 @@ const validEffectTypes = new Set<Effect["type"]>([
   "unsupportedMechanic",
 ]);
 const validConstraintTypes = new Set<SpellConstraint["type"]>([
+  "cooldownTurns",
+  "maxCastsPerTarget",
   "maxCastsPerTurn",
   "requiresTarget",
   "custom",
@@ -78,6 +80,12 @@ export function validateCatalog(entries: CatalogEntry[]): CatalogValidationError
       }
       if (constraint.type === "maxCastsPerTurn" && constraint.value <= 0) {
         errors.push(error(entry, "constraints.maxCastsPerTurn", "Max casts per turn must be positive.", source));
+      }
+      if (constraint.type === "maxCastsPerTarget" && constraint.value <= 0) {
+        errors.push(error(entry, "constraints.maxCastsPerTarget", "Max casts per target must be positive.", source));
+      }
+      if (constraint.type === "cooldownTurns" && constraint.value <= 0) {
+        errors.push(error(entry, "constraints.cooldownTurns", "Cooldown turns must be positive.", source));
       }
     }
 

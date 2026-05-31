@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   cost,
   damage,
+  maxCastsPerTarget,
   maxCastsPerTurn,
   movement,
   normalizeCatalog,
@@ -175,6 +176,16 @@ const testCatalog = normalizeCatalog([
     constraints: [],
     metadata: { status: "extracted", sources: [source] },
   }),
+  spell("disque-luminescent-test", {
+    name: "Disque Luminescent Test",
+    level: 200,
+    element: "fire",
+    effects: [
+      when({ type: "exactRuneCount", count: 3 }, [tag("consumeAllRunes", true)]),
+    ],
+    constraints: [],
+    metadata: { status: "extracted", sources: [source] },
+  }),
   spell("rayon-crepusculaire", {
     name: "Rayon Crepusculaire Test",
     level: 200,
@@ -232,7 +243,14 @@ const testCatalog = normalizeCatalog([
     level: 200,
     cost: cost({ wp: 1 }),
     effects: [
+      statModifier({
+        stat: "damageInflictedPercent",
+        amount: 10,
+        duration: "1 turn",
+        target: "caster",
+      }),
       tag("dynamicBqCostPerRune", 40),
+      tag("statModifiersScalePerRune", true),
       tag("consumesRunes", true),
     ],
     constraints: [],
@@ -269,7 +287,7 @@ const testCatalog = normalizeCatalog([
     level: 200,
     cost: cost({}),
     effects: [],
-    constraints: [],
+    constraints: [maxCastsPerTurn(1)],
     metadata: { status: "extracted", sources: [source] },
   }),
   spell("cycle-elementaire", {
@@ -286,6 +304,21 @@ const testCatalog = normalizeCatalog([
     cost: cost({ ap: 1 }),
     effects: [],
     constraints: [requiresTarget("emptyCell")],
+    metadata: { status: "extracted", sources: [source] },
+  }),
+  spell("target-limit-test", {
+    name: "Target Limit Test",
+    level: 200,
+    element: "fire",
+    cost: cost({ ap: 1 }),
+    effects: [
+      damage({ element: "fire", base: 10 }),
+      resourceDelta({ resource: "bq", amount: 5 }),
+    ],
+    constraints: [
+      maxCastsPerTurn(1),
+      maxCastsPerTarget(1),
+    ],
     metadata: { status: "extracted", sources: [source] },
   }),
   passive("motivation", {
@@ -531,6 +564,67 @@ test("consumes all active runes from consumeAllRunes tags", () => {
   assert.deepEqual(consumed.runes, ["incandescent", "aquatic"]);
 });
 
+test("does not regenerate Disque Luminescent's fire rune when it consumed three active runes", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      classState: {
+        huppermage: {
+          runes: {
+            incandescent: true,
+            aquatic: true,
+            telluric: true,
+          },
+          lastGeneratedRune: "incandescent",
+        },
+      },
+    },
+    sequence: { actions: [{ spellId: "disque-luminescent-test" }] },
+  });
+
+  assert.equal(result.valid, true);
+  assert.deepEqual(result.finalState.classState.huppermage?.runes.active, {
+    incandescent: false,
+    aquatic: false,
+    telluric: false,
+    aerial: false,
+  });
+  const consumed = result.breakdown[0].appliedEffects.find((effect) => effect.type === "runeConsumed");
+  assert.ok(consumed && consumed.type === "runeConsumed");
+  assert.deepEqual(consumed.runes, ["incandescent", "aquatic", "telluric"]);
+  assert.equal(result.breakdown[0].appliedEffects.some((effect) => effect.type === "runeGenerated"), false);
+});
+
+test("keeps existing runes and generates fire when Disque Luminescent starts below three runes", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      classState: {
+        huppermage: {
+          runes: {
+            aquatic: true,
+            telluric: true,
+          },
+          lastGeneratedRune: "telluric",
+        },
+      },
+    },
+    sequence: { actions: [{ spellId: "disque-luminescent-test" }] },
+  });
+
+  assert.equal(result.valid, true);
+  assert.deepEqual(result.finalState.classState.huppermage?.runes.active, {
+    incandescent: true,
+    aquatic: true,
+    telluric: true,
+    aerial: false,
+  });
+  assert.equal(result.breakdown[0].appliedEffects.some((effect) => effect.type === "runeConsumed"), false);
+  assert.equal(result.finalState.classState.huppermage?.runes.lastGeneratedRune, "incandescent");
+});
+
 test("applies dynamic costs from active runes before paying spell cost", () => {
   const result = simulateTurn({
     catalog: testCatalog,
@@ -553,6 +647,127 @@ test("applies dynamic costs from active runes before paying spell cost", () => {
   assert.equal(result.breakdown[0].resourceAfter.bq, 120);
   assert.equal(result.finalState.classState.huppermage?.runes.active.incandescent, false);
   assert.equal(result.finalState.classState.huppermage?.runes.active.aquatic, false);
+});
+
+test("keeps Runification's per-rune damage bonus for later actions in the turn", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      resources: createResources({ ap: 6, mp: 3, wp: 2, bq: 200 }),
+      classState: {
+        huppermage: {
+          runes: {
+            incandescent: true,
+            aquatic: true,
+          },
+        },
+      },
+    },
+    sequence: {
+      actions: [
+        { spellId: "runification-test" },
+        { spellId: "lueur-test" },
+      ],
+    },
+  });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.breakdown[0].statsAfter.damageInflictedPercent, 30);
+  assert.equal(result.breakdown[1].statsBefore.damageInflictedPercent, 30);
+  assert.equal(result.breakdown[1].damage, 120);
+  assert.equal(result.breakdown[1].statsAfter.damageInflictedPercent, 30);
+});
+
+test("scales Runification damage inflicted bonus by active rune count", () => {
+  const cases = [
+    { runes: { incandescent: true }, expectedBonus: 10 },
+    { runes: { incandescent: true, aquatic: true }, expectedBonus: 20 },
+    { runes: { incandescent: true, aquatic: true, telluric: true }, expectedBonus: 30 },
+    { runes: { incandescent: true, aquatic: true, telluric: true, aerial: true }, expectedBonus: 40 },
+  ];
+
+  for (const { runes, expectedBonus } of cases) {
+    const zeroDamageInflictedCharacter: SimulatedCharacter = {
+      ...character,
+      stats: {
+        ...character.stats,
+        damageInflictedPercent: 0,
+      },
+    };
+    const result = simulateTurn({
+      catalog: testCatalog,
+      character: {
+        ...zeroDamageInflictedCharacter,
+        resources: createResources({ ap: 6, mp: 3, wp: 2, bq: 200 }),
+        classState: {
+          huppermage: {
+            runes,
+          },
+        },
+      },
+      sequence: {
+        actions: [{ spellId: "runification-test" }],
+      },
+    });
+
+    assert.equal(result.valid, true);
+    assert.equal(result.breakdown[0].statsAfter.damageInflictedPercent, expectedBonus);
+    assert.equal(
+      result.breakdown[0].appliedEffects.some((effect) => effect.type === "statModifier"),
+      expectedBonus > 0,
+    );
+  }
+});
+
+test("rejects Runification without an active rune", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      resources: createResources({ ap: 6, mp: 3, wp: 2, bq: 200 }),
+      classState: {
+        huppermage: {
+          runes: {},
+        },
+      },
+    },
+    sequence: {
+      actions: [{ spellId: "runification-test" }],
+    },
+  });
+
+  assert.equal(result.valid, false);
+  assert.equal(result.violations[0].type, "invalidClassStateAction");
+  assert.equal(result.breakdown.length, 0);
+});
+
+test("consumes Abondance on the next light spell without persisting the bonus", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      resources: createResources({ ap: 6, mp: 3, wp: 1, bq: 0 }),
+      classState: {
+        huppermage: {
+          abundanceLevel: 30,
+        },
+      },
+    },
+    sequence: {
+      actions: [
+        { spellId: "lueur-test" },
+        { spellId: "lueur-test" },
+      ],
+    },
+  });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.breakdown[0].damage, 105);
+  assert.equal(result.breakdown[0].statsAfter.damageInflictedPercent, 10);
+  assert.equal(result.breakdown[1].statsBefore.damageInflictedPercent, 10);
+  assert.equal(result.breakdown[1].damage, 82.5);
+  assert.equal(result.finalState.classState.huppermage?.abundanceLevel, 0);
 });
 
 test("applies conditional cost deltas and additional BQ costs", () => {
@@ -596,6 +811,24 @@ test("applies conditional caster effects before damage", () => {
   assert.equal(result.valid, true);
   assert.equal(result.breakdown[0].damage, 30);
   assert.equal(result.breakdown[0].statsAfter.damageInflictedPercent, 20);
+});
+
+test("adds 20% damage to the last generated rune element", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      classState: {
+        huppermage: {
+          lastGeneratedRune: "incandescent",
+        },
+      },
+    },
+    sequence: { actions: [{ spellId: "lueur-de-laube" }] },
+  });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.breakdown[0].damage, 260);
 });
 
 test("applies selected passive initial stat and resource modifiers", () => {
@@ -674,6 +907,35 @@ test("rejects Coeur de Lumiere before any rune has been generated", () => {
 
   assert.equal(result.valid, false);
   assert.equal(result.violations[0].type, "invalidClassStateAction");
+});
+
+test("allows Refraction Elementaire to raise Coeur de Lumiere cast limit", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      classState: {
+        huppermage: {
+          activePassives: ["refraction-elementaire"],
+          lastGeneratedRune: "incandescent",
+        },
+      },
+    },
+    sequence: {
+      actions: [
+        { spellId: "coeur-de-lumiere" },
+        { spellId: "coeur-de-lumiere" },
+        { spellId: "coeur-de-lumiere" },
+        { spellId: "coeur-de-lumiere" },
+        { spellId: "coeur-de-lumiere" },
+      ],
+    },
+  });
+
+  assert.equal(result.valid, false);
+  assert.equal(result.violations[0].type, "castLimitExceeded");
+  assert.equal(result.violations[0].actionIndex, 4);
+  assert.equal(result.breakdown.length, 4);
 });
 
 test("Cycle Elementaire restores the last generated rune when it is inactive", () => {
@@ -790,6 +1052,43 @@ test("validates catalog target constraints", () => {
 
   assert.equal(result.valid, false);
   assert.equal(result.violations[0].type, "invalidTarget");
+});
+
+test("uses max casts per target instead of max casts per turn when both exist", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character,
+    sequence: {
+      actions: [
+        { spellId: "target-limit-test", target: { kind: "enemy" } },
+        { spellId: "target-limit-test", target: { kind: "emptyCell" } },
+      ],
+    },
+  });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.breakdown.length, 2);
+  assert.ok(result.breakdown[0]?.damage);
+  assert.equal(result.breakdown[1]?.damage, 0);
+  assert.equal(result.finalState.remainingResources.bq, 10);
+});
+
+test("rejects repeated casts on the same target when max casts per target is reached", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character,
+    sequence: {
+      actions: [
+        { spellId: "target-limit-test", target: { kind: "enemy" } },
+        { spellId: "target-limit-test", target: { kind: "enemy" } },
+      ],
+    },
+  });
+
+  assert.equal(result.valid, false);
+  assert.equal(result.violations[0]?.type, "castLimitExceeded");
+  assert.equal(result.violations[0]?.required, 1);
+  assert.equal(result.violations[0]?.available, 1);
 });
 
 test("enforces deck spell limit unless a Feu-Follet temporary element unlock applies", () => {
@@ -955,7 +1254,6 @@ test("counts active Feu-Follets when placing and recovering them", () => {
         huppermage: {
           runes: {
             incandescent: true,
-            aquatic: true,
           },
           lastGeneratedRune: "incandescent",
         },
@@ -964,6 +1262,7 @@ test("counts active Feu-Follets when placing and recovering them", () => {
     sequence: {
       actions: [
         { spellId: "feu-follet-test", target: { kind: "emptyCell" } },
+        { spellId: "water-rune-test" },
         { spellId: "feu-follet-test", target: { kind: "emptyCell" } },
         { spellId: "feu-follet-test", target: { kind: "feuFollet" } },
       ],
@@ -976,7 +1275,7 @@ test("counts active Feu-Follets when placing and recovering them", () => {
   assert.equal(result.breakdown[0].classStateBefore.huppermage?.feuFolletsActive, 0);
   assert.equal(result.breakdown[0].classStateAfter.huppermage?.feuFolletsActive, 1);
   assert.equal(result.breakdown[0].appliedEffects.at(-1)?.type, "feuFolletChanged");
-  assert.deepEqual(result.breakdown.map((action) => action.classStateAfter.huppermage?.feuFolletsActive), [1, 2, 1]);
+  assert.deepEqual(result.breakdown.map((action) => action.classStateAfter.huppermage?.feuFolletsActive), [1, 1, 2, 1]);
 });
 
 test("rejects placing more Feu-Follets than the active maximum allows", () => {
@@ -988,8 +1287,6 @@ test("rejects placing more Feu-Follets than the active maximum allows", () => {
         huppermage: {
           runes: {
             incandescent: true,
-            aquatic: true,
-            telluric: true,
           },
           lastGeneratedRune: "incandescent",
         },
@@ -998,7 +1295,9 @@ test("rejects placing more Feu-Follets than the active maximum allows", () => {
     sequence: {
       actions: [
         { spellId: "feu-follet-test", target: { kind: "emptyCell" } },
+        { spellId: "water-rune-test" },
         { spellId: "feu-follet-test", target: { kind: "emptyCell" } },
+        { spellId: "air-movement-test" },
         { spellId: "feu-follet-test", target: { kind: "emptyCell" } },
       ],
     },
@@ -1006,7 +1305,7 @@ test("rejects placing more Feu-Follets than the active maximum allows", () => {
 
   assert.equal(result.valid, false);
   assert.equal(result.violations[0].type, "invalidClassStateAction");
-  assert.equal(result.violations[0].actionIndex, 2);
+  assert.equal(result.violations[0].actionIndex, 4);
   assert.equal(result.finalState.classState.huppermage?.feuFolletsActive, 2);
 });
 
@@ -1020,7 +1319,6 @@ test("applies passive Feu-Follet placement limits", () => {
           activePassives: ["nouveau-souffle"],
           runes: {
             incandescent: true,
-            aquatic: true,
           },
           lastGeneratedRune: "incandescent",
         },
@@ -1029,6 +1327,7 @@ test("applies passive Feu-Follet placement limits", () => {
     sequence: {
       actions: [
         { spellId: "feu-follet-test", target: { kind: "emptyCell" } },
+        { spellId: "water-rune-test" },
         { spellId: "feu-follet-test", target: { kind: "emptyCell" } },
       ],
     },
@@ -1036,7 +1335,7 @@ test("applies passive Feu-Follet placement limits", () => {
 
   assert.equal(result.valid, false);
   assert.equal(result.violations[0].type, "invalidClassStateAction");
-  assert.equal(result.violations[0].actionIndex, 1);
+  assert.equal(result.violations[0].actionIndex, 2);
   assert.equal(result.finalState.classState.huppermage?.feuFolletsActive, 1);
 });
 
@@ -1050,7 +1349,6 @@ test("applies Sauvegarde Runique Feu-Follet cast limit", () => {
           activePassives: ["sauvegarde-runique"],
           runes: {
             incandescent: true,
-            aquatic: true,
           },
           lastGeneratedRune: "incandescent",
         },
@@ -1059,6 +1357,7 @@ test("applies Sauvegarde Runique Feu-Follet cast limit", () => {
     sequence: {
       actions: [
         { spellId: "feu-follet-test", target: { kind: "emptyCell" } },
+        { spellId: "water-rune-test" },
         { spellId: "feu-follet-test", target: { kind: "emptyCell" } },
       ],
     },
@@ -1066,7 +1365,7 @@ test("applies Sauvegarde Runique Feu-Follet cast limit", () => {
 
   assert.equal(result.valid, false);
   assert.equal(result.violations[0].type, "castLimitExceeded");
-  assert.equal(result.violations[0].actionIndex, 1);
+  assert.equal(result.violations[0].actionIndex, 2);
   assert.equal(result.finalState.classState.huppermage?.feuFolletsActive, 1);
 });
 
@@ -1112,7 +1411,7 @@ test("rejects casting Feu-Follet on an entity target", () => {
   }
 });
 
-test("attaches an active rune to a placed Feu-Follet", () => {
+test("attaches the active last generated rune to a placed Feu-Follet", () => {
   const result = simulateTurn({
     catalog: testCatalog,
     character: {
@@ -1122,7 +1421,7 @@ test("attaches an active rune to a placed Feu-Follet", () => {
           runes: {
             incandescent: true,
           },
-          lastGeneratedRune: null,
+          lastGeneratedRune: "incandescent",
         },
       },
     },
@@ -1135,6 +1434,59 @@ test("attaches an active rune to a placed Feu-Follet", () => {
   assert.deepEqual(result.finalState.classState.huppermage?.feuFolletStoredLastRunes, ["incandescent"]);
   assert.deepEqual(result.finalState.classState.huppermage?.feuFolletStoredRunes, [[]]);
   assert.equal(result.finalState.classState.huppermage?.runes.active.incandescent, false);
+});
+
+test("places a Feu-Follet by removing the last generated rune when multiple runes are active", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      classState: {
+        huppermage: {
+          runes: {
+            incandescent: true,
+            aquatic: true,
+          },
+          lastGeneratedRune: "aquatic",
+        },
+      },
+    },
+    sequence: {
+      actions: [{ spellId: "feu-follet-test", target: { kind: "emptyCell" } }],
+    },
+  });
+
+  assert.equal(result.valid, true);
+  assert.deepEqual(result.finalState.classState.huppermage?.feuFolletStoredLastRunes, ["aquatic"]);
+  assert.equal(result.finalState.classState.huppermage?.runes.active.incandescent, true);
+  assert.equal(result.finalState.classState.huppermage?.runes.active.aquatic, false);
+});
+
+test("rejects placing a Feu-Follet when the last generated rune was consumed", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      classState: {
+        huppermage: {
+          runes: {
+            incandescent: true,
+            aquatic: false,
+          },
+          lastGeneratedRune: "aquatic",
+        },
+      },
+    },
+    sequence: {
+      actions: [{ spellId: "feu-follet-test", target: { kind: "emptyCell" } }],
+    },
+  });
+
+  assert.equal(result.valid, false);
+  assert.equal(result.violations[0].type, "invalidClassStateAction");
+  assert.equal(result.finalState.classState.huppermage?.feuFolletsActive, 0);
+  assert.deepEqual(result.finalState.classState.huppermage?.feuFolletStoredLastRunes, []);
+  assert.equal(result.finalState.classState.huppermage?.runes.active.incandescent, true);
 });
 
 test("recovers the rune transferred to a Feu-Follet", () => {
@@ -1219,7 +1571,7 @@ test("stores and recovers missing runes with Sauvegarde Runique", () => {
   });
 
   assert.equal(result.valid, true);
-  assert.deepEqual(result.breakdown[0].classStateAfter.huppermage?.feuFolletStoredLastRunes, ["aerial"]);
+  assert.deepEqual(result.breakdown[0].classStateAfter.huppermage?.feuFolletStoredLastRunes, [null]);
   assert.deepEqual(result.breakdown[0].classStateAfter.huppermage?.feuFolletStoredRunes, [
     ["incandescent", "aquatic", "telluric"],
   ]);
@@ -1228,7 +1580,7 @@ test("stores and recovers missing runes with Sauvegarde Runique", () => {
   assert.equal(result.finalState.classState.huppermage?.runes.active.incandescent, true);
   assert.equal(result.finalState.classState.huppermage?.runes.active.aquatic, true);
   assert.equal(result.finalState.classState.huppermage?.runes.active.telluric, true);
-  assert.equal(result.finalState.classState.huppermage?.runes.active.aerial, true);
+  assert.equal(result.finalState.classState.huppermage?.runes.active.aerial, false);
   assert.equal(result.finalState.classState.huppermage?.runes.lastGeneratedRune, "telluric");
 
   const storeEffect = result.breakdown[0].appliedEffects.at(-1);
@@ -1847,10 +2199,10 @@ test("adds Lueur de l'Aube delayed damage when the fire rune is consumed", () =>
   });
 
   assert.equal(result.valid, true);
-  assert.equal(result.totalDamage, 242);
+  assert.equal(result.totalDamage, 286);
   const damageEffects = result.breakdown[0].appliedEffects.filter((effect) => effect.type === "damage");
   assert.equal(damageEffects.length, 2);
-  assert.equal(damageEffects[1].amount, 22);
+  assert.equal(damageEffects[1].amount, 26);
 });
 
 test("tracks and triggers Halo Chatoyant marks", () => {

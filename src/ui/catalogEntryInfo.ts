@@ -158,6 +158,14 @@ export function describeCatalogConstraint(constraint: SpellConstraint): string {
     return `${constraint.value} lancer(s) par tour`;
   }
 
+  if (constraint.type === "maxCastsPerTarget") {
+    return `${constraint.value} lancer(s) par cible`;
+  }
+
+  if (constraint.type === "cooldownTurns") {
+    return `Cooldown ${constraint.value} tour(s)`;
+  }
+
   if (constraint.type === "requiresTarget") {
     return `Cible requise : ${constraint.target}`;
   }

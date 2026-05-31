@@ -8,6 +8,7 @@ import {
   getHuppermagePassives,
   getHuppermageSpells,
   huppermageCatalog,
+  maxCastsPerTarget,
   maxCastsPerTurn,
   normalizeCatalog,
   passive,
@@ -84,6 +85,91 @@ test("contains the complete Huppermage passive list", () => {
   const passiveIds = getHuppermagePassives().map((entry) => entry.id).sort();
 
   assert.deepEqual(passiveIds, expectedPassiveIds);
+});
+
+test("records Huppermage per-turn cast limits from spell conditions", () => {
+  const expectedLimits: Record<string, number> = {
+    "averse": 4,
+    "coeur-de-lumiere": 1,
+    "debacle": 2,
+    "disque-luminescent": 3,
+    "eboulement": 3,
+    "epee-de-lumiere": 2,
+    "faille": 3,
+    "faisceau-de-lune": 2,
+    "feu-follet": 2,
+    "feuillure": 2,
+    "flux-denergie": 3,
+    "halo-chatoyant": 3,
+    "larmes-scintillantes": 3,
+    "lueur-de-laube": 4,
+    "mirage": 3,
+    "ombres-dansantes": 3,
+    "orbes-luisants": 3,
+    "papillons-diurnes": 4,
+    "resonance": 3,
+    "runification": 1,
+    "vestige": 2,
+  };
+
+  for (const [spellId, expectedLimit] of Object.entries(expectedLimits)) {
+    const entry = getHuppermageEntry(spellId);
+    const constraint = entry?.constraints.find((item) => item.type === "maxCastsPerTurn");
+
+    assert.equal(
+      constraint?.value,
+      expectedLimit,
+      `${spellId} should have maxCastsPerTurn(${expectedLimit})`,
+    );
+  }
+});
+
+test("records Huppermage spell cooldowns from spell conditions", () => {
+  const expectedCooldowns: Record<string, number> = {
+    "fleche-de-lumiere": 2,
+    "forteresse-solaire": 3,
+    "mur-energie": 2,
+    "principio-valere": 2,
+    "surcharge-runique": 2,
+    "visio-imperium": 2,
+  };
+
+  for (const [spellId, expectedCooldown] of Object.entries(expectedCooldowns)) {
+    const entry = getHuppermageEntry(spellId);
+    const constraint = entry?.constraints.find((item) => item.type === "cooldownTurns");
+
+    assert.equal(
+      constraint?.value,
+      expectedCooldown,
+      `${spellId} should have cooldownTurns(${expectedCooldown})`,
+    );
+  }
+});
+
+test("records Huppermage per-target cast limits from spell conditions", () => {
+  const expectedLimits: Record<string, number> = {
+    "averse": 2,
+    "disque-luminescent": 2,
+    "eboulement": 2,
+    "halo-chatoyant": 1,
+    "larmes-scintillantes": 2,
+    "lueur-de-laube": 2,
+    "ombres-dansantes": 2,
+    "orbes-luisants": 2,
+    "papillons-diurnes": 3,
+    "rayon-crepusculaire": 2,
+  };
+
+  for (const [spellId, expectedLimit] of Object.entries(expectedLimits)) {
+    const entry = getHuppermageEntry(spellId);
+    const constraint = entry?.constraints.find((item) => item.type === "maxCastsPerTarget");
+
+    assert.equal(
+      constraint?.value,
+      expectedLimit,
+      `${spellId} should have maxCastsPerTarget(${expectedLimit})`,
+    );
+  }
 });
 
 test("records unsupported mechanics explicitly", () => {
@@ -192,7 +278,7 @@ test("supports conditions, max-cast constraints, and screenshot provenance", () 
       effects: [
         when({ type: "hasRune", rune: "aquatic" }, [resourceDelta({ resource: "ap", amount: 1 })]),
       ],
-      constraints: [maxCastsPerTurn(2)],
+      constraints: [maxCastsPerTurn(2), maxCastsPerTarget(1)],
       metadata: {
         status: "extracted",
         sources: [testSource],
@@ -203,5 +289,6 @@ test("supports conditions, max-cast constraints, and screenshot provenance", () 
   const [entry] = entries as CatalogEntry[];
   assert.equal(entry.metadata.sources[0].kind, "screenshot");
   assert.equal(entry.constraints[0].type, "maxCastsPerTurn");
+  assert.equal(entry.constraints[1].type, "maxCastsPerTarget");
   assert.equal(validateCatalog(entries).length, 0);
 });
