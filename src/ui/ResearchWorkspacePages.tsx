@@ -1,6 +1,8 @@
-import { ArrowLeft, BarChart3, Boxes, Check, Pencil, Pin, Play, Plus, Save, Search, Trash2, Wrench, X } from "lucide-react";
+import { ArrowLeft, BarChart3, Boxes, Check, Pencil, Pin, Play, Plus, Save, ScrollText, Search, Swords, Trash2, Wrench, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CatalogEntry } from "../core/catalog/types.ts";
+import type { SublimationBuild, SublimationCatalogEntry, SublimationCategory } from "../core/sublimations/types.ts";
+import { sublimationCatalog, validateSublimationBuild } from "../core/sublimations/index.ts";
 import {
   createDefaultOptimizerControls,
   createOptimizerCandidateSpellIconRows,
@@ -35,6 +37,7 @@ import {
   type SavedComboComparisonRow,
 } from "./savedComboComparison.ts";
 import { getHuppermageIconSrc } from "./icons.ts";
+import { createSublimationPreviewItems, type SublimationPreviewItem } from "./sublimationPreview.ts";
 
 export type OptimizerRunStatus = "idle" | "running" | "done" | "stopped" | "error";
 
@@ -536,20 +539,63 @@ export function SavedComboComparisonPage({
 
 export function SetupPage({
   build,
+  catalog,
   onBack,
+  onChangeSublimations,
   onOpenBuilder,
   onOpenOptimizer,
   onRenameSetup,
   setup,
 }: {
   build: ResearchBuild;
+  catalog: CatalogEntry[];
   onBack: () => void;
+  onChangeSublimations: (sublimations: SublimationBuild) => void;
   onOpenBuilder: () => void;
   onOpenOptimizer: () => void;
   onRenameSetup: (name: string) => void;
   setup: SetupSnapshot;
 }) {
   const stats = setup.character.stats;
+  const catalogNamesById = new Map(catalog.map((entry) => [entry.id, entry.name]));
+  const deckSpellItems = setup.deckSpellIds.map((spellId) => ({
+    label: catalogNamesById.get(spellId) ?? spellId,
+    spellId,
+  }));
+  const passiveItems = setup.passiveIds.map((passiveId) => ({
+    label: catalogNamesById.get(passiveId) ?? passiveId,
+    passiveId,
+  }));
+  const setupSublimationItems = createSublimationPreviewItems(setup.sublimations);
+  const sublimationValidation = validateSublimationBuild(setup.sublimations);
+  const selectedSublimationCounts = countSelectedSublimations(setup.sublimations);
+  const selectedEntries = setup.sublimations.selections
+    .map((selection) => sublimationCatalog.find((entry) => entry.id === selection.sublimationId))
+    .filter((entry): entry is SublimationCatalogEntry => Boolean(entry));
+  const selectedCategoryCounts = countSelectedSublimationCategories(selectedEntries);
+  const selectedFamilyRawLevels = countSelectedSublimationFamilyLevels(selectedEntries);
+
+  function addSublimation(sublimation: SublimationCatalogEntry) {
+    onChangeSublimations({
+      ...setup.sublimations,
+      hpAssumption: setup.sublimations.hpAssumption ?? setup.hpAssumption,
+      selections: [...setup.sublimations.selections, { sublimationId: sublimation.id }],
+    });
+  }
+
+  function removeSublimation(sublimationId: string) {
+    const removalIndex = setup.sublimations.selections.findIndex((selection) => selection.sublimationId === sublimationId);
+    if (removalIndex < 0) {
+      return;
+    }
+
+    onChangeSublimations({
+      ...setup.sublimations,
+      hpAssumption: setup.sublimations.hpAssumption ?? setup.hpAssumption,
+      selections: setup.sublimations.selections.filter((_, index) => index !== removalIndex),
+    });
+  }
+
   return (
     <main className="research-shell">
       <PageBackButton onBack={onBack} label={build.name} />
@@ -590,8 +636,97 @@ export function SetupPage({
       <section className="workspace-section">
         <h2>Contexte du set</h2>
         <p>{setup.equipmentNotes}</p>
-        <p>Passifs: {setup.passiveIds.join(", ") || "Aucun"}</p>
+        <div className="setup-detail-blocks">
+          <section className="setup-detail-block">
+            <h3>Sorts</h3>
+            <div className="setup-detail-scroll setup-detail-icon-grid">
+              {deckSpellItems.length > 0 ? deckSpellItems.map((item) => (
+                <SpellMiniIcon key={item.spellId} label={item.label} spellId={item.spellId} />
+              )) : <span className="setup-detail-empty">Aucun sort</span>}
+            </div>
+          </section>
+          <section className="setup-detail-block">
+            <h3>Passifs</h3>
+            <div className="setup-detail-scroll setup-detail-passive-list">
+              {passiveItems.length > 0 ? passiveItems.map((item) => (
+                <span className="setup-detail-passive" key={item.passiveId}>
+                  <PassiveMiniIcon label={item.label} passiveId={item.passiveId} />
+                  <span>{item.label}</span>
+                </span>
+              )) : <span className="setup-detail-empty">Aucun passif</span>}
+            </div>
+          </section>
+          <section className="setup-detail-block setup-detail-sublimations">
+            <h3>Sublimations</h3>
+            <div className="candidate-sublimation-row">
+              {setupSublimationItems.length > 0 ? setupSublimationItems.map((item) => (
+                <SublimationMiniCard item={item} key={item.id} />
+              )) : <span className="setup-detail-empty">Aucune sublimation</span>}
+            </div>
+          </section>
+        </div>
         <p>Cible: {setup.target.kind}</p>
+        <p>Hypothèse PV: {formatHpAssumption(setup.hpAssumption)}</p>
+      </section>
+      <section className="workspace-section">
+        <h2>Sublimations</h2>
+        {sublimationValidation.violations.length > 0 ? (
+          <ul className="compact-effect-list">
+            {sublimationValidation.violations.map((violation, index) => <li key={`${violation.type}-${index}`}>{violation.message}</li>)}
+          </ul>
+        ) : null}
+        <div className="sublimation-catalog-grid">
+          {sublimationCatalog.map((sublimation) => {
+            const selectedCount = selectedSublimationCounts.get(sublimation.id) ?? 0;
+            const selectedRawLevel = selectedFamilyRawLevels.get(sublimation.familyId) ?? 0;
+            const disabledReason = getSublimationDisabledReason(sublimation.supportStatus, sublimation.supportReason);
+            const slotLimitReached = selectedCategoryCounts[sublimation.category] >= sublimationSlotLimits[sublimation.category];
+            const stackLimitReached = selectedRawLevel >= sublimation.cumulativeMax;
+            const canAdd = !disabledReason && !slotLimitReached && !stackLimitReached;
+            return (
+              <div
+                aria-label={`${sublimation.name}, ${selectedCount} selection`}
+                className={selectedCount > 0 ? "sublimation-chip selected" : "sublimation-chip"}
+                key={sublimation.id}
+                title={disabledReason ?? `${sublimation.name} (${sublimation.category})`}
+              >
+                <div className="sublimation-chip-main">
+                  <span>{sublimation.name}</span>
+                  <small>{disabledReason ?? formatSublimationChipHint(sublimation, selectedRawLevel, slotLimitReached, stackLimitReached)}</small>
+                </div>
+                <div className="sublimation-chip-controls">
+                  <button
+                    aria-label={`Retirer ${sublimation.name}`}
+                    disabled={selectedCount === 0}
+                    type="button"
+                    onClick={() => removeSublimation(sublimation.id)}
+                  >
+                    -
+                  </button>
+                  <b>{selectedCount}</b>
+                  <button
+                    aria-label={`Ajouter ${sublimation.name}`}
+                    disabled={!canAdd}
+                    type="button"
+                    onClick={() => addSublimation(sublimation)}
+                  >
+                    +
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        {sublimationValidation.effectiveStacks.length > 0 ? (
+          <ul className="compact-effect-list">
+            {sublimationValidation.effectiveStacks.map((stack) => (
+              <li key={stack.familyId}>
+                {stack.familyId}: niveau {stack.effectiveLevel}/{stack.cumulativeMax}
+                {stack.rawLevel !== stack.effectiveLevel ? ` (brut ${stack.rawLevel})` : ""}
+              </li>
+            ))}
+          </ul>
+        ) : null}
       </section>
     </main>
   );
@@ -945,6 +1080,7 @@ export function OptimizerWorkspacePage({
                 key={candidate.id}
                 pinned={pinnedIds.includes(candidate.id)}
                 saved={savedCandidateIdSet.has(candidate.id)}
+                sublimations={setup.sublimations}
                 onOpen={() => {
                   onSessionChange?.(createOptimizerWorkspaceSession({
                     controls,
@@ -1113,6 +1249,7 @@ function CandidateRow({
   onTogglePin,
   pinned,
   saved,
+  sublimations,
 }: {
   candidate: OptimizerCandidateViewModel;
   catalog: CatalogEntry[];
@@ -1121,6 +1258,7 @@ function CandidateRow({
   onTogglePin: () => void;
   pinned: boolean;
   saved: boolean;
+  sublimations: SublimationBuild | undefined;
 }) {
   const spellRows = createOptimizerCandidateSpellIconRows(candidate.plan, catalog);
   const catalogNamesById = new Map(catalog.map((entry) => [entry.id, entry.name]));
@@ -1128,6 +1266,7 @@ function CandidateRow({
     label: catalogNamesById.get(passiveId) ?? passiveId,
     passiveId,
   }));
+  const sublimationItems = createSublimationPreviewItems(sublimations);
 
   return (
     <article className="candidate-row">
@@ -1142,6 +1281,14 @@ function CandidateRow({
               {passiveIcons.map((icon) => (
                 <PassiveMiniIcon key={icon.passiveId} label={icon.label} passiveId={icon.passiveId} />
               ))}
+            </div>
+          </div>
+        ) : null}
+        {sublimationItems.length > 0 ? (
+          <div className="candidate-spell-icon-rows candidate-sublimation-preview" aria-label="Sublimations du candidat">
+            <small>Sublimations</small>
+            <div className="candidate-sublimation-row">
+              {sublimationItems.map((item) => <SublimationMiniCard item={item} key={item.id} />)}
             </div>
           </div>
         ) : null}
@@ -1182,6 +1329,41 @@ function CandidateRow({
         <button className="secondary-button" type="button" onClick={onOpen}>Ouvrir</button>
       </div>
     </article>
+  );
+}
+
+function SublimationMiniCard({ item }: { item: SublimationPreviewItem }) {
+  return (
+    <div className="sublimation-preview-card" tabIndex={0}>
+      <span className="sublimation-preview-icon" aria-hidden="true">
+        <ScrollText size={15} />
+      </span>
+      <span className="sublimation-preview-name">{item.name}</span>
+      <div className="sublimation-preview-tooltip" role="tooltip">
+        <div className="sublimation-tooltip-title">
+          <span className="sublimation-tooltip-icon" aria-hidden="true">
+            <ScrollText size={22} />
+          </span>
+          <strong>{item.name}</strong>
+        </div>
+        <ul>
+          {item.effectLines.length > 0 ? item.effectLines.map((line) => (
+            <li key={line}>
+              <Swords size={13} />
+              <span>{line}</span>
+            </li>
+          )) : (
+            <li>
+              <Swords size={13} />
+              <span>Effet prévu plus tard</span>
+            </li>
+          )}
+        </ul>
+        {item.rawLevel !== item.effectiveLevel ? (
+          <small>Niveau effectif {item.effectiveLevel}/{item.cumulativeMax} · brut {item.rawLevel}</small>
+        ) : null}
+      </div>
+    </div>
   );
 }
 
@@ -1326,6 +1508,76 @@ function MetricTile({ label, value }: { label: string; value: number | string })
 
 function formatDateTime(value: string): string {
   return value.slice(0, 16).replace("T", " ");
+}
+
+const sublimationSlotLimits: Record<SublimationCategory, number> = {
+  normal: 10,
+  epic: 1,
+  relic: 1,
+};
+
+function countSelectedSublimations(build: SublimationBuild): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const selection of build.selections) {
+    counts.set(selection.sublimationId, (counts.get(selection.sublimationId) ?? 0) + 1);
+  }
+  return counts;
+}
+
+function countSelectedSublimationCategories(entries: SublimationCatalogEntry[]): Record<SublimationCategory, number> {
+  return entries.reduce<Record<SublimationCategory, number>>((counts, entry) => ({
+    ...counts,
+    [entry.category]: counts[entry.category] + 1,
+  }), { normal: 0, epic: 0, relic: 0 });
+}
+
+function countSelectedSublimationFamilyLevels(entries: SublimationCatalogEntry[]): Map<string, number> {
+  const levels = new Map<string, number>();
+  for (const entry of entries) {
+    levels.set(entry.familyId, (levels.get(entry.familyId) ?? 0) + entry.level);
+  }
+  return levels;
+}
+
+function formatSublimationChipHint(
+  sublimation: SublimationCatalogEntry,
+  selectedRawLevel: number,
+  slotLimitReached: boolean,
+  stackLimitReached: boolean,
+): string {
+  if (stackLimitReached) {
+    return `cumul max ${sublimation.cumulativeMax}`;
+  }
+
+  if (slotLimitReached) {
+    return `slots ${sublimation.category} pleins`;
+  }
+
+  return `cumul ${Math.min(selectedRawLevel, sublimation.cumulativeMax)}/${sublimation.cumulativeMax}`;
+}
+
+function formatHpAssumption(assumption: SetupSnapshot["hpAssumption"]): string {
+  if (assumption === "healthy90") {
+    return "90%+";
+  }
+
+  if (assumption === "berserk50") {
+    return "Berserk 50%-";
+  }
+
+  if (assumption === "berserk20") {
+    return "Berserk 20%-";
+  }
+
+  return "Normal";
+}
+
+function getSublimationDisabledReason(status: string, reason: string | undefined): string | null {
+  if (status === "supported") {
+    return null;
+  }
+
+  return reason ?? (status === "ignored" ? "Ignorée" : "Prévue plus tard");
 }
 
 function createOptimizerControlsKey(controls: OptimizerWorkspaceControls): string {

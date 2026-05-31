@@ -1,4 +1,5 @@
 import type { CatalogEntry, DamageEffect, Effect, Element, Resource, Rune, SpellCost, StatModifierEffect } from "../catalog/types.ts";
+import { validateSublimationBuild } from "../sublimations/validation.ts";
 import { computeRawDamage, resolveActionContext, resolveDamageElement, roundDamage } from "./damage.ts";
 import {
   addResource,
@@ -22,6 +23,7 @@ import type {
   SimulationResult,
   TurnState,
 } from "./types.ts";
+import type { EffectiveSublimationStack, SublimationCatalogEntry, SublimationEffect } from "../sublimations/types.ts";
 
 const RUNE_APPLICATION_ORDER: Rune[] = ["incandescent", "aquatic", "telluric", "aerial"];
 const SAUVEGARDE_RUNIQUE_PASSIVE_ID = "sauvegarde-runique";
@@ -54,7 +56,24 @@ type EffectApplicationContext = {
 };
 
 export function simulateTurn(options: SimulationOptions): SimulationResult {
-  let state = createInitialTurnState(options.character, options.catalog);
+  const sublimationValidation = validateSublimationBuild(options.character.sublimations);
+  let state = createInitialTurnState(options.character, options.catalog, sublimationValidation.effectiveStacks);
+
+  if (!sublimationValidation.valid) {
+    return {
+      valid: false,
+      sequence: options.sequence,
+      totalDamage: state.totalDamage,
+      finalState: state,
+      breakdown: state.actionLog,
+      violations: sublimationValidation.violations.map((violation) => ({
+        type: "invalidSublimation",
+        actionIndex: -1,
+        spellId: violation.sublimationId,
+        message: violation.message,
+      })),
+    };
+  }
 
   for (const [actionIndex, action] of options.sequence.actions.entries()) {
     const spell = findSpell(options.catalog, action.spellId);
@@ -107,12 +126,17 @@ export function simulateTurn(options: SimulationOptions): SimulationResult {
 
     const damageBonusApplication = resolveSpellDamageBonus(spell, nextResources, nextClassState, action);
     appliedEffects.push(...damageBonusApplication.appliedEffects);
+    const sublimationActionApplication = resolveActionSublimationEffects(
+      spell,
+      sublimationValidation.effectiveStacks,
+    );
+    appliedEffects.push(...sublimationActionApplication.appliedEffects);
 
     const effectContext = {
       action,
       actionContext,
       classState: nextClassState,
-      damageInflictedBonusPercent: damageBonusApplication.damageInflictedBonusPercent,
+      damageInflictedBonusPercent: damageBonusApplication.damageInflictedBonusPercent + sublimationActionApplication.damageInflictedBonusPercent,
       resources: nextResources,
       spell,
     };
@@ -212,10 +236,13 @@ export function simulateTurn(options: SimulationOptions): SimulationResult {
       totalDamage: roundDamage(state.totalDamage + actionDamage),
       actionLog: [...state.actionLog, actionResult],
       turnEndEffects: state.turnEndEffects,
+      resourceCarryover: state.resourceCarryover,
     };
   }
 
-  const finalizedState = options.includeTurnEnd ? applyTurnEnd(state) : state;
+  const finalizedState = options.includeTurnEnd
+    ? applyTurnEnd(state, sublimationValidation.effectiveStacks)
+    : state;
 
   return {
     valid: true,
@@ -227,7 +254,11 @@ export function simulateTurn(options: SimulationOptions): SimulationResult {
   };
 }
 
-function createInitialTurnState(character: SimulationOptions["character"], catalog: CatalogEntry[]): TurnState {
+function createInitialTurnState(
+  character: SimulationOptions["character"],
+  catalog: CatalogEntry[],
+  sublimationStacks: EffectiveSublimationStack[] = [],
+): TurnState {
   const initialResources = character.classState?.huppermage?.convertWpToBq
     ? addResource(character.resources, "bq", character.resources.wp * huppermageBqPerWp)
     : cloneResources(character.resources);
@@ -239,19 +270,26 @@ function createInitialTurnState(character: SimulationOptions["character"], catal
     initialResources,
   );
 
+  const initialSublimationState = applyInitialSublimations(
+    initialPassiveState.stats,
+    initialPassiveState.resources,
+    sublimationStacks,
+  );
+
   return {
-    remainingResources: initialPassiveState.resources,
+    remainingResources: initialSublimationState.resources,
     classState: baseClassState,
-    currentStats: initialPassiveState.stats,
+    currentStats: initialSublimationState.stats,
     castsBySpellId: {},
     targetCastsBySpellId: {},
     totalDamage: 0,
     actionLog: [],
     turnEndEffects: [],
+    resourceCarryover: {},
   };
 }
 
-function applyTurnEnd(state: TurnState): TurnState {
+function applyTurnEnd(state: TurnState, sublimationStacks: EffectiveSublimationStack[] = []): TurnState {
   const huppermageState = getHuppermageState(state.classState);
   if (!state.classState.huppermage) {
     return state;
@@ -311,6 +349,7 @@ function applyTurnEnd(state: TurnState): TurnState {
     };
   }
 
+  const carryoverApplication = applySublimationCarryover(nextResources, sublimationStacks);
   const turnEndEffects: AppliedEffect[] = [
     {
       type: "turnEndBq",
@@ -321,6 +360,7 @@ function applyTurnEnd(state: TurnState): TurnState {
       storedAfter: nextHuppermageState.storedBq,
       source: "huppermageClassMechanic",
     },
+    ...carryoverApplication.appliedEffects,
   ];
 
   return {
@@ -329,7 +369,53 @@ function applyTurnEnd(state: TurnState): TurnState {
     classState: nextClassState,
     currentStats: nextStats,
     turnEndEffects,
+    resourceCarryover: carryoverApplication.resourceCarryover,
   };
+}
+
+function applySublimationCarryover(
+  resources: TurnState["remainingResources"],
+  sublimationStacks: EffectiveSublimationStack[],
+): { resourceCarryover: Partial<TurnState["remainingResources"]>; appliedEffects: AppliedEffect[] } {
+  const resourceCarryover: Partial<TurnState["remainingResources"]> = {};
+  const appliedEffects: AppliedEffect[] = [];
+
+  for (const stack of sublimationStacks) {
+    const entry = stack.entries[0];
+    if (!entry) {
+      continue;
+    }
+
+    for (const effect of getStackEffects(stack)) {
+      if (effect.type !== "carryoverResource") {
+        continue;
+      }
+
+      const before = resources[effect.resource];
+      const amount = Math.min(before, effect.maxAmount === undefined ? before : effect.maxAmount * stack.effectiveLevel);
+      if (amount <= 0) {
+        continue;
+      }
+
+      resourceCarryover[effect.resource] = (resourceCarryover[effect.resource] ?? 0) + amount;
+      appliedEffects.push({
+        type: "resourceCarryover",
+        resource: effect.resource,
+        amount,
+        before,
+        after: (resourceCarryover[effect.resource] ?? 0),
+        sublimationId: entry.id,
+        sublimationName: entry.name,
+        source: "sublimation",
+      });
+    }
+  }
+
+  return { resourceCarryover, appliedEffects };
+}
+
+function getStackEffects(stack: EffectiveSublimationStack): SublimationEffect[] {
+  return stack.entries[0]?.effects ?? [];
 }
 
 function applyUniversaliteStats(stats: BaseStats, activeRunes: Record<Rune, boolean>): BaseStats {
@@ -436,6 +522,44 @@ function applyInitialPassives(
   }
 
   return { stats: nextStats, resources: nextResources };
+}
+
+function applyInitialSublimations(
+  stats: BaseStats,
+  resources: TurnState["remainingResources"],
+  sublimationStacks: EffectiveSublimationStack[],
+): { stats: BaseStats; resources: TurnState["remainingResources"] } {
+  let nextStats = stats;
+  let nextResources = resources;
+
+  for (const stack of sublimationStacks) {
+    for (const effect of getStackEffects(stack)) {
+      if (effect.type === "statModifier") {
+        nextStats = applyNumericSublimationStat(nextStats, effect.stat, effect.amount * stack.effectiveLevel);
+      }
+
+      if (effect.type === "resourceDelta") {
+        nextResources = addResource(nextResources, effect.resource, effect.amount * stack.effectiveLevel);
+      }
+    }
+  }
+
+  return { stats: nextStats, resources: nextResources };
+}
+
+function applyNumericSublimationStat(stats: BaseStats, stat: SublimationEffect & { type: "statModifier" }["stat"], amount: number): BaseStats {
+  const before = stats[stat];
+  if (typeof before !== "number") {
+    return {
+      ...stats,
+      [stat]: amount,
+    };
+  }
+
+  return {
+    ...stats,
+    [stat]: before + amount,
+  };
 }
 
 function shouldApplyInitialPassiveStatModifier(passiveId: string, effect: StatModifierEffect): boolean {
@@ -1180,6 +1304,88 @@ function resolveSpellDamageBonus(
   return { damageInflictedBonusPercent, appliedEffects };
 }
 
+function resolveActionSublimationEffects(
+  spell: CatalogEntry,
+  sublimationStacks: EffectiveSublimationStack[],
+): { damageInflictedBonusPercent: number; appliedEffects: AppliedEffect[] } {
+  let damageInflictedBonusPercent = 0;
+  const appliedEffects: AppliedEffect[] = [];
+
+  for (const stack of sublimationStacks) {
+    const entry = stack.entries[0];
+    if (!entry) {
+      continue;
+    }
+
+    for (const effect of getStackEffects(stack)) {
+      if (effect.type !== "actionDamageInflictedPercent") {
+        continue;
+      }
+
+      const eligibility = isSublimationActionEligible(spell, effect.condition);
+      if (!eligibility.eligible) {
+        appliedEffects.push({
+          type: "sublimationEffect",
+          sublimationId: entry.id,
+          sublimationName: entry.name,
+          status: "skipped",
+          reason: eligibility.reason,
+          source: "sublimation",
+        });
+        continue;
+      }
+
+      const amount = effect.amount * stack.effectiveLevel;
+      damageInflictedBonusPercent += amount;
+      appliedEffects.push({
+        type: "sublimationEffect",
+        sublimationId: entry.id,
+        sublimationName: entry.name,
+        status: "applied",
+        reason: eligibility.reason,
+        amount,
+        source: "sublimation",
+      });
+    }
+  }
+
+  return { damageInflictedBonusPercent, appliedEffects };
+}
+
+function isSublimationActionEligible(
+  spell: CatalogEntry,
+  condition: Extract<SublimationEffect, { type: "actionDamageInflictedPercent" }>["condition"],
+): { eligible: boolean; reason: string } {
+  const profile = spell.castProfile;
+  if (!profile) {
+    return { eligible: false, reason: "missingCastProfile" };
+  }
+
+  if (condition.type === "zone") {
+    return profile.isZone
+      ? { eligible: true, reason: "zoneCapable" }
+      : { eligible: false, reason: "notZoneCapable" };
+  }
+
+  if (condition.type === "geometry") {
+    return profile.geometry?.includes(condition.geometry)
+      ? { eligible: true, reason: `${condition.geometry}Capable` }
+      : { eligible: false, reason: `${condition.geometry}NotCapable` };
+  }
+
+  if (condition.mode === "melee") {
+    return profile.canMelee
+      ? { eligible: true, reason: "meleeCapable" }
+      : { eligible: false, reason: "notMeleeCapable" };
+  }
+
+  const satisfiesDistance = Boolean(profile.canDistance)
+    && (condition.minRange === undefined || (profile.maxDistance ?? 0) >= condition.minRange);
+  return satisfiesDistance
+    ? { eligible: true, reason: "distanceCapable" }
+    : { eligible: false, reason: "notDistanceCapable" };
+}
+
 function applySpellDamageMechanics(
   spell: CatalogEntry,
   actionDamage: number,
@@ -1298,6 +1504,10 @@ function createDerivedDamageEffect(element: Element, amount: number): AppliedEff
       elementalMastery: 0,
       extraMastery: 0,
       masteryMultiplier: 1,
+      criticalMode: "forcedNonCritical",
+      effectiveCriticalHitPercent: 0,
+      nonCriticalResult: amount,
+      criticalResult: amount,
       criticalMultiplier: 1,
       positionMultiplier: 1,
       finalMultiplier: 1,

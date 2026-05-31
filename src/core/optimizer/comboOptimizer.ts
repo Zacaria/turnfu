@@ -614,12 +614,18 @@ function createReplayCharacter(baseCharacter: SimulatedCharacter, previousFinalS
     ...baseCharacter,
     resources: {
       ...baseCharacter.resources,
-      ap: baseCharacter.resources.ap,
-      mp: baseCharacter.resources.mp,
+      ap: baseCharacter.resources.ap + (previousFinalState.resourceCarryover.ap ?? 0),
+      mp: baseCharacter.resources.mp + (previousFinalState.resourceCarryover.mp ?? 0),
       wp: previousResources.wp,
       bq: previousResources.bq,
     },
     stats: cloneStats(baseCharacter.stats),
+    sublimations: baseCharacter.sublimations
+      ? {
+        ...baseCharacter.sublimations,
+        selections: baseCharacter.sublimations.selections.map((selection) => ({ ...selection })),
+      }
+      : undefined,
     classState: createReplayClassState(previousFinalState),
   };
 }

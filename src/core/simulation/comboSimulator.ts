@@ -70,8 +70,8 @@ function createNextTurnCharacter(baseCharacter: SimulatedCharacter, previousFina
   const previousResources = previousFinalState.remainingResources;
   const resources: ResourcePool = {
     ...baseCharacter.resources,
-    ap: baseCharacter.resources.ap,
-    mp: baseCharacter.resources.mp,
+    ap: baseCharacter.resources.ap + (previousFinalState.resourceCarryover.ap ?? 0),
+    mp: baseCharacter.resources.mp + (previousFinalState.resourceCarryover.mp ?? 0),
     wp: previousResources.wp,
     bq: previousResources.bq,
   };
@@ -139,6 +139,12 @@ function cloneCharacter(character: SimulatedCharacter): SimulatedCharacter {
     ...character,
     resources: { ...character.resources },
     stats: cloneStats(character.stats),
+    sublimations: character.sublimations
+      ? {
+        ...character.sublimations,
+        selections: character.sublimations.selections.map((selection) => ({ ...selection })),
+      }
+      : undefined,
     classState: huppermage
       ? {
         huppermage: {

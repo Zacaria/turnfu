@@ -12,6 +12,7 @@ import type {
   SpellConstraint,
   SpellCost,
 } from "./types.ts";
+import type { SpellCastProfile } from "../sublimations/types.ts";
 
 const DSL_ENTRY = Symbol("wakfu.catalog.dslEntry");
 const DSL_EFFECT = Symbol("wakfu.catalog.dslEffect");
@@ -37,6 +38,7 @@ type EntryInput = {
   element?: Element;
   cost?: SpellCost;
   range?: RangeSpec;
+  castProfile?: SpellCastProfile;
   effects?: Effect[];
   constraints?: SpellConstraint[];
   tags?: string[];
@@ -57,6 +59,7 @@ function createEntry(kind: CatalogEntryKind, id: string, input: EntryInput): Dsl
     element: input.element,
     cost: input.cost,
     range: input.range,
+    castProfile: input.castProfile,
     effects: input.effects ?? [],
     constraints: input.constraints ?? [],
     tags: input.tags ?? [],
@@ -191,11 +194,45 @@ export function normalizeEntry(entry: unknown): CatalogEntry {
     element: entry.element,
     cost: entry.cost,
     range: entry.range,
+    castProfile: entry.castProfile ?? inferCastProfile(entry),
     effects: entry.effects.map((entryEffect) => normalizeEffect(entryEffect)),
     constraints: entry.constraints,
     tags: entry.tags,
     metadata: entry.metadata,
   };
+}
+
+function inferCastProfile(entry: DslEntry): SpellCastProfile | undefined {
+  if (!entry.range) {
+    return undefined;
+  }
+
+  return {
+    canMelee: entry.range.min <= 1,
+    canDistance: entry.range.max >= 3,
+    maxDistance: entry.range.max,
+    isZone: entry.tags.includes("zone") || entry.effects.some(isZoneEffect),
+  };
+}
+
+function isZoneEffect(effectValue: Effect): boolean {
+  if (effectValue.type === "zone") {
+    return true;
+  }
+
+  if (effectValue.type === "damage" && effectValue.note?.toLowerCase().includes("zone")) {
+    return true;
+  }
+
+  if (effectValue.type === "conditional") {
+    return effectValue.effects.some(isZoneEffect);
+  }
+
+  if (effectValue.type === "trigger") {
+    return effectValue.effects.some(isZoneEffect);
+  }
+
+  return false;
 }
 
 function normalizeEffect(value: unknown): Effect {

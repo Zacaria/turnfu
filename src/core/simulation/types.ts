@@ -1,4 +1,5 @@
 import type { CatalogEntry, CatalogSource, Element, Resource, Rune } from "../catalog/types.ts";
+import type { SublimationBuild } from "../sublimations/types.ts";
 
 export type ResourcePool = Record<Resource, number>;
 
@@ -39,10 +40,13 @@ export type AttackPosition = "face" | "side" | "rear";
 
 export type RangeMode = "melee" | "distance";
 
+export type CriticalEvaluationMode = "expected" | "forcedCritical" | "forcedNonCritical";
+
 export type ActionContext = {
   position: AttackPosition;
   rangeMode?: RangeMode;
   isCritical: boolean;
+  criticalMode?: CriticalEvaluationMode;
   isBerserk: boolean;
   isBlocked: boolean;
 };
@@ -86,6 +90,7 @@ export type SimulatedCharacter = {
   className: "huppermage";
   stats: BaseStats;
   resources: ResourcePool;
+  sublimations?: SublimationBuild;
   classState?: {
     huppermage?: {
       runes?: Partial<Record<Rune, boolean>>;
@@ -137,7 +142,8 @@ export type SimulationViolationType =
   | "invalidClassStateAction"
   | "invalidTarget"
   | "deckLimitExceeded"
-  | "cooldownActive";
+  | "cooldownActive"
+  | "invalidSublimation";
 
 export type SimulationViolation = {
   type: SimulationViolationType;
@@ -255,6 +261,25 @@ export type AppliedEffect =
       storedBefore: number;
       storedAfter: number;
       source: "huppermageClassMechanic";
+    }
+  | {
+      type: "sublimationEffect";
+      sublimationId: string;
+      sublimationName: string;
+      status: "applied" | "skipped";
+      reason: string;
+      amount?: number;
+      source: "sublimation";
+    }
+  | {
+      type: "resourceCarryover";
+      resource: Extract<Resource, "ap" | "mp">;
+      amount: number;
+      before: number;
+      after: number;
+      sublimationId: string;
+      sublimationName: string;
+      source: "sublimation";
     };
 
 export type ActionResult = {
@@ -280,6 +305,7 @@ export type TurnState = {
   totalDamage: number;
   actionLog: ActionResult[];
   turnEndEffects: AppliedEffect[];
+  resourceCarryover: Partial<ResourcePool>;
 };
 
 export type SimulationResult = {
@@ -332,6 +358,10 @@ export type DamageFormulaBreakdown = {
   elementalMastery: number;
   extraMastery: number;
   masteryMultiplier: number;
+  criticalMode: CriticalEvaluationMode;
+  effectiveCriticalHitPercent: number;
+  nonCriticalResult: number;
+  criticalResult: number;
   criticalMultiplier: number;
   positionMultiplier: number;
   finalMultiplier: number;

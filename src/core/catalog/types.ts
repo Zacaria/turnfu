@@ -1,3 +1,5 @@
+import type { SpellCastProfile } from "../sublimations/types.ts";
+
 export type CharacterClass = "huppermage";
 
 export type CatalogEntryKind = "spell" | "passive" | "classMechanic";
@@ -237,6 +239,7 @@ export type CatalogEntry = {
   level: number;
   cost?: SpellCost;
   range?: RangeSpec;
+  castProfile?: SpellCastProfile;
   element?: Element;
   effects: Effect[];
   constraints: SpellConstraint[];

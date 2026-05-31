@@ -81,7 +81,7 @@ import {
   SavedComboComparisonPage,
   SetupPage,
   type OptimizerWorkspaceSession,
-} from "./ResearchWorkspacePages.tsx?v=editable-title-icon-v2";
+} from "./ResearchWorkspacePages.tsx?v=sublimations-rebase-v1";
 import {
   createBalancedElementSet,
   createBuild,
@@ -104,6 +104,7 @@ import {
   type SetupSnapshot,
   type WakfuClassId,
 } from "./researchWorkspace.ts";
+import type { SublimationBuild } from "../core/sublimations/types.ts";
 import {
   createResearchRoute,
   openBuilderFromSetup,
@@ -355,6 +356,26 @@ export function App() {
       name,
       now: new Date().toISOString(),
     }));
+  }
+
+  function updateSetupSublimations(setup: SetupSnapshot, sublimations: SublimationBuild) {
+    const now = new Date().toISOString();
+    const nextSublimations = {
+      ...sublimations,
+      selections: [...sublimations.selections],
+      hpAssumption: sublimations.hpAssumption ?? setup.hpAssumption,
+    };
+    const result = saveSetupVersion(researchWorkspace, {
+      buildId: setup.buildId,
+      character: {
+        ...setup.character,
+        sublimations: nextSublimations,
+      },
+      sourceSetupSnapshotId: setup.id,
+      now,
+    });
+    setResearchWorkspace(result.workspace);
+    setResearchRoute((route) => openSetup(route, setup.buildId, result.setupSnapshotId));
   }
 
   function openSetupInBuilder(setup: SetupSnapshot, candidate?: OptimizerCandidateViewModel) {
@@ -915,8 +936,10 @@ export function App() {
         <AppHeader locale={locale} onChangeLocale={changeLocale} />
         <SetupPage
           build={activeBuild}
+          catalog={catalog}
           setup={activeSetup}
           onBack={() => setResearchRoute(returnToPrevious(researchRoute))}
+          onChangeSublimations={(sublimations) => updateSetupSublimations(activeSetup, sublimations)}
           onOpenBuilder={() => openSetupInBuilder(activeSetup)}
           onOpenOptimizer={() => setResearchRoute(openOptimizerFromSetup(researchRoute, activeBuild.id, activeSetup.id))}
           onRenameSetup={(name) => renameResearchSetup(activeSetup, name)}
@@ -1687,6 +1710,7 @@ function SelectionDetail({
                   times: effect.formula.times,
                   masteryMultiplier: effect.formula.masteryMultiplier,
                   finalMultiplier: effect.formula.finalMultiplier,
+                  criticalHit: effect.formula.effectiveCriticalHitPercent,
                 })}
               >
                 <ElementIcon element={effect.element} />
@@ -2847,6 +2871,9 @@ function DamageBreakdown({ snapshot }: { snapshot: TimelineSnapshot | undefined 
             <div><dt>{t("formula.extraMastery")}</dt><dd>{effect.formula.extraMastery}</dd></div>
             <div><dt>{t("formula.masteryMultiplier")}</dt><dd>{effect.formula.masteryMultiplier}</dd></div>
             <div><dt>{t("formula.critical")}</dt><dd>{effect.formula.criticalMultiplier}</dd></div>
+            <div><dt>{t("formula.criticalChance")}</dt><dd>{effect.formula.effectiveCriticalHitPercent}%</dd></div>
+            <div><dt>{t("formula.nonCritical")}</dt><dd>{effect.formula.nonCriticalResult}</dd></div>
+            <div><dt>{t("formula.criticalResult")}</dt><dd>{effect.formula.criticalResult}</dd></div>
             <div><dt>{t("formula.position")}</dt><dd>{effect.formula.positionMultiplier}</dd></div>
             <div><dt>{t("formula.inflicted")}</dt><dd>{effect.formula.finalMultiplier}</dd></div>
             <div><dt>{t("formula.block")}</dt><dd>{effect.formula.blockMultiplier}</dd></div>

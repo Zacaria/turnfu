@@ -119,6 +119,14 @@ export function describeEffect(effect: AppliedEffect): string {
     });
   }
 
+  if (effect.type === "sublimationEffect") {
+    return `${effect.sublimationName}: ${effect.status === "applied" ? "appliquée" : "ignorée"} (${effect.reason})${effect.amount ? ` ${formatSignedNumber(effect.amount)}%` : ""}`;
+  }
+
+  if (effect.type === "resourceCarryover") {
+    return `${effect.sublimationName}: ${formatSignedNumber(effect.amount)} ${formatResourceLabel(effect.resource)} reporté`;
+  }
+
   return formatUiMessage("effect.statModifier", {
     stat: formatStatLabel(effect.stat),
     amount: formatSignedNumber(effect.amount),

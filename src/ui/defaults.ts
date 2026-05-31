@@ -6,6 +6,7 @@ export const defaultActionContext: ActionContext = {
   position: "face",
   rangeMode: "distance",
   isCritical: false,
+  criticalMode: "expected",
   isBerserk: false,
   isBlocked: false,
 };
@@ -57,6 +58,10 @@ export function createDefaultCharacter(): SimulatedCharacter {
     className: "huppermage",
     resources: createResources({ ap: 12, mp: 6, wp: 6, bq: 0 }),
     stats: defaultStats,
+    sublimations: {
+      selections: [],
+      hpAssumption: "normal",
+    },
     classState: {
       huppermage: {
         runes: {},

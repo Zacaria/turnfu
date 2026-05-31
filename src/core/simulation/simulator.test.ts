@@ -9,6 +9,7 @@ import {
   movement,
   normalizeCatalog,
   passive,
+  range,
   requiresTarget,
   resourceDelta,
   screenshot,
@@ -34,6 +35,24 @@ const testCatalog = normalizeCatalog([
       resourceDelta({ resource: "bq", amount: 10 }),
     ],
     constraints: [maxCastsPerTurn(2)],
+    metadata: { status: "extracted", sources: [source] },
+  }),
+  spell("distance-damage-test", {
+    name: "Distance Damage Test",
+    level: 200,
+    element: "fire",
+    cost: cost({ ap: 1 }),
+    range: range(1, 4),
+    effects: [damage({ element: "fire", base: 10 })],
+    constraints: [],
+    metadata: { status: "extracted", sources: [source] },
+  }),
+  spell("cost-10-test", {
+    name: "Cost 10 Test",
+    level: 200,
+    cost: cost({ ap: 10 }),
+    effects: [],
+    constraints: [],
     metadata: { status: "extracted", sources: [source] },
   }),
   spell("orbe-test", {
@@ -2101,6 +2120,110 @@ test("applies complete damage formula without target resistance", () => {
   assert.equal(damageEffect.formula.criticalMultiplier, 1.25);
   assert.equal(damageEffect.formula.positionMultiplier, 1.25);
   assert.equal(damageEffect.formula.blockMultiplier, 0.8);
+});
+
+test("computes expected critical damage from current critical stats", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      stats: {
+        ...character.stats,
+        criticalHitPercent: 50,
+        criticalMastery: 100,
+      },
+    },
+    sequence: {
+      actions: [
+        {
+          spellId: "lueur-test",
+          context: { criticalMode: "expected" },
+        },
+      ],
+    },
+  });
+
+  const damageEffect = result.breakdown[0].appliedEffects[0];
+  assert.equal(damageEffect.type, "damage");
+  assert.equal(damageEffect.formula.criticalMode, "expected");
+  assert.equal(damageEffect.formula.effectiveCriticalHitPercent, 50);
+  assert.equal(damageEffect.formula.nonCriticalResult, 82.5);
+  assert.equal(damageEffect.formula.criticalResult, 144.38);
+  assert.equal(damageEffect.amount, 113.44);
+});
+
+test("clamps expected critical chance and preserves forced modes", () => {
+  const clamped = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      stats: {
+        ...character.stats,
+        criticalHitPercent: 150,
+        criticalMastery: 100,
+      },
+    },
+    sequence: { actions: [{ spellId: "lueur-test", context: { criticalMode: "expected" } }] },
+  });
+  const clampedDamage = clamped.breakdown[0].appliedEffects[0];
+  assert.equal(clampedDamage.type, "damage");
+  assert.equal(clampedDamage.formula.effectiveCriticalHitPercent, 100);
+  assert.equal(clampedDamage.amount, clampedDamage.formula.criticalResult);
+
+  const forced = simulateTurn({
+    catalog: testCatalog,
+    character,
+    sequence: { actions: [{ spellId: "lueur-test", context: { criticalMode: "forcedCritical" } }] },
+  });
+  const forcedDamage = forced.breakdown[0].appliedEffects[0];
+  assert.equal(forcedDamage.type, "damage");
+  assert.equal(forcedDamage.formula.criticalMode, "forcedCritical");
+  assert.equal(forcedDamage.formula.effectiveCriticalHitPercent, 100);
+});
+
+test("applies supported sublimation flat stats and action conditions", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      stats: {
+        ...character.stats,
+        generalMastery: 0,
+        elementalMastery: { fire: 0 },
+        damageInflictedPercent: 0,
+      },
+      sublimations: {
+        selections: [
+          { sublimationId: "critique-maitrise-1" },
+          { sublimationId: "distance-1" },
+        ],
+        hpAssumption: "normal",
+      },
+    },
+    sequence: { actions: [{ spellId: "distance-damage-test" }] },
+  });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.breakdown[0].statsBefore.criticalMastery, 20);
+  assert.equal(result.breakdown[0].damage, 10.2);
+  assert.equal(result.breakdown[0].appliedEffects.some((effect) => effect.type === "sublimationEffect" && effect.status === "applied"), true);
+});
+
+test("rejects unsupported sublimations before simulation", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      sublimations: {
+        selections: [{ sublimationId: "premier-critique" }],
+        hpAssumption: "normal",
+      },
+    },
+    sequence: { actions: [{ spellId: "lueur-test" }] },
+  });
+
+  assert.equal(result.valid, false);
+  assert.equal(result.violations[0].type, "invalidSublimation");
 });
 
 test("uses highest elemental mastery when computing Light damage", () => {

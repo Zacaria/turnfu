@@ -7,6 +7,7 @@ import type {
   ComboPlan,
   SimulatedCharacter,
 } from "../core/simulation/types.ts";
+import type { SublimationBuild, SublimationHpAssumption } from "../core/sublimations/types.ts";
 import { createDefaultCharacter, defaultActionContext, defaultActionTarget } from "./defaults.ts";
 import { syncHuppermageBqFromWp } from "./statControls.ts";
 
@@ -59,6 +60,8 @@ export type SetupSnapshot = {
   equipmentNotes: string;
   deckSpellIds: string[];
   passiveIds: string[];
+  sublimations: SublimationBuild;
+  hpAssumption: SublimationHpAssumption;
   target: ActionTarget;
   defaultActionContext: ActionContext;
   initialClassState: ClassTurnState;
@@ -191,6 +194,7 @@ export function createSeedResearchWorkspace({ now = new Date().toISOString() }: 
   const setupId = "setup-hupper-lumiere-distance-v1";
   const character = createSeedHuppermageCharacter();
   const passiveIds = character.classState?.huppermage?.activePassives ?? [];
+  const sublimations = character.sublimations ?? { selections: [], hpAssumption: "normal" as const };
   const setup: SetupSnapshot = {
     id: setupId,
     buildId,
@@ -201,6 +205,8 @@ export function createSeedResearchWorkspace({ now = new Date().toISOString() }: 
     equipmentNotes: "Set de référence avec 1200 maîtrise générale et 1200 maîtrise sur Feu/Eau/Terre/Air; les items ne sont pas modelises.",
     deckSpellIds: ["lueur-de-laube", "coeur-de-lumiere", "rayon-crepusculaire", "cycle-elementaire"],
     passiveIds,
+    sublimations,
+    hpAssumption: sublimations.hpAssumption ?? "normal",
     target: defaultActionTarget,
     defaultActionContext,
     initialClassState: character.classState ?? {},
@@ -247,6 +253,7 @@ export function createBuild(
   const setupId = `${buildId}-setup-v1`;
   const character = createSeedHuppermageCharacter();
   const passiveIds = character.classState?.huppermage?.activePassives ?? [];
+  const sublimations = character.sublimations ?? { selections: [], hpAssumption: "normal" as const };
   const setup: SetupSnapshot = {
     id: setupId,
     buildId,
@@ -257,6 +264,8 @@ export function createBuild(
     equipmentNotes: "Set de référence avec 1200 maîtrise générale et 1200 maîtrise sur Feu/Eau/Terre/Air; les items ne sont pas modelises.",
     deckSpellIds: ["lueur-de-laube", "coeur-de-lumiere", "rayon-crepusculaire", "cycle-elementaire"],
     passiveIds,
+    sublimations,
+    hpAssumption: sublimations.hpAssumption ?? "normal",
     target: defaultActionTarget,
     defaultActionContext,
     initialClassState: character.classState ?? {},
@@ -347,11 +356,17 @@ export function saveSetupVersion(
 
   const character = cloneCharacter(input.character);
   const passiveIds = character.classState?.huppermage?.activePassives ?? sourceSetup.passiveIds;
+  const sublimations = character.sublimations ?? sourceSetup.sublimations;
   const candidateSetup: SetupSnapshot = {
     ...sourceSetup,
-    character,
+    character: {
+      ...character,
+      sublimations,
+    },
+    hpAssumption: sublimations.hpAssumption ?? sourceSetup.hpAssumption,
     initialClassState: character.classState ?? {},
     passiveIds: [...passiveIds],
+    sublimations,
   };
   const candidateKey = createSetupAssumptionsKey(candidateSetup);
   const sourceKey = createSetupAssumptionsKey(sourceSetup);
@@ -667,13 +682,29 @@ export function restoreResearchWorkspace(storage: WorkspaceStorage): ResearchWor
   try {
     const parsed = JSON.parse(serialized) as ResearchWorkspaceData;
     if (parsed.schemaVersion === 1 && Array.isArray(parsed.builds) && Array.isArray(parsed.setupSnapshots)) {
-      return parsed;
+      return {
+        ...parsed,
+        setupSnapshots: parsed.setupSnapshots.map(normalizeSetupSnapshot),
+      };
     }
   } catch {
     storage.removeItem(researchWorkspaceStorageKey);
   }
 
   return createSeedResearchWorkspace();
+}
+
+function normalizeSetupSnapshot(setup: SetupSnapshot): SetupSnapshot {
+  const sublimations = setup.sublimations ?? setup.character.sublimations ?? { selections: [], hpAssumption: "normal" as const };
+  return {
+    ...setup,
+    character: {
+      ...setup.character,
+      sublimations,
+    },
+    sublimations,
+    hpAssumption: setup.hpAssumption ?? sublimations.hpAssumption ?? "normal",
+  };
 }
 
 export function createMemoryWorkspaceStorage(): WorkspaceStorage {

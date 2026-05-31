@@ -8,6 +8,7 @@ import {
   createMemoryWorkspaceStorage,
   createOptimizerRunReference,
   createSeedResearchWorkspace,
+  createSetupSnapshotWithSublimations,
   deleteSavedCombo,
   deleteSavedCombos,
   deleteSetupSnapshot,
@@ -124,6 +125,9 @@ test("serializes setup snapshots with final stats, resources, equipment notes an
   assert.ok(setup.deckSpellIds.length > 0);
   assert.equal(setup.target.kind, "enemy");
   assert.equal(setup.defaultActionContext.rangeMode, "distance");
+  assert.equal(setup.defaultActionContext.criticalMode, "expected");
+  assert.deepEqual(setup.sublimations, { selections: [], hpAssumption: "normal" });
+  assert.equal(setup.hpAssumption, "normal");
   assert.equal(setup.character.classState?.huppermage?.bqMax, 500);
   assert.equal(setup.name, "Set 1200 maîtrise 4 éléments");
   assert.equal(setup.character.stats.generalMastery, 1200);
@@ -131,6 +135,36 @@ test("serializes setup snapshots with final stats, resources, equipment notes an
   assert.equal(setup.character.stats.elementalMastery.water, 1200);
   assert.equal(setup.character.stats.elementalMastery.earth, 1200);
   assert.equal(setup.character.stats.elementalMastery.air, 1200);
+});
+
+test("creates a versioned setup snapshot when sublimations change", () => {
+  const workspace = createSeedResearchWorkspace({ now: "2026-05-26T10:00:00.000Z" });
+  const setup = workspace.setupSnapshots[0];
+  assert.ok(setup);
+
+  const nextWorkspace = createSetupSnapshotWithSublimations(workspace, {
+    buildId: setup.buildId,
+    sourceSetupSnapshotId: setup.id,
+    sublimations: {
+      selections: [
+        { sublimationId: "appret-3" },
+        { sublimationId: "report-pa" },
+      ],
+      hpAssumption: "normal",
+    },
+    now: "2026-05-26T10:20:00.000Z",
+  });
+  const nextSetup = nextWorkspace.setupSnapshots.at(-1);
+
+  assert.ok(nextSetup);
+  assert.notEqual(nextSetup.id, setup.id);
+  assert.equal(nextSetup.version, setup.version + 1);
+  assert.deepEqual(nextSetup.sublimations.selections, [
+    { sublimationId: "appret-3" },
+    { sublimationId: "report-pa" },
+  ]);
+  assert.deepEqual(nextSetup.character.sublimations, nextSetup.sublimations);
+  assert.ok(nextWorkspace.builds[0].setupSnapshotIds.includes(nextSetup.id));
 });
 
 test("saves and restores workspace data from local storage", () => {

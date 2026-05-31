@@ -9,3 +9,4 @@ artifacts/
 /public/assets/areas/
 /public/assets/spellAttributes/
 /public/assets/stats/
+.worktrees

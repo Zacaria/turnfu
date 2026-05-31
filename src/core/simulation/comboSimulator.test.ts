@@ -36,6 +36,14 @@ const catalog = normalizeCatalog([
     constraints: [],
     metadata: { status: "extracted", sources: [source] },
   }),
+  spell("carryover-spend", {
+    name: "Carryover Spend",
+    level: 200,
+    cost: cost({ ap: 4 }),
+    effects: [],
+    constraints: [],
+    metadata: { status: "extracted", sources: [source] },
+  }),
   spell("expensive", {
     name: "Expensive",
     level: 200,
@@ -83,6 +91,29 @@ test("aggregates damage from valid multi-turn combo plans", () => {
   assert.equal(result.turns[0].result.totalDamage, 10);
   assert.equal(result.turns[1].result.totalDamage, 20);
   assert.equal(result.totalDamage, 30);
+});
+
+test("carries unused AP from supported sublimations into the next turn", () => {
+  const result = simulateCombo({
+    catalog,
+    character: {
+      ...character,
+      sublimations: {
+        selections: [{ sublimationId: "report-pa" }],
+        hpAssumption: "normal",
+      },
+    },
+    combo: {
+      turns: [
+        { actions: [{ spellId: "carryover-spend" }] },
+        { actions: [{ spellId: "spark" }] },
+      ],
+    },
+  });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.turns[0].result.finalState.resourceCarryover.ap, 2);
+  assert.equal(result.turns[1].initialCharacter.resources.ap, 8);
 });
 
 test("carries persistent Huppermage state and expires active Heart between turns", () => {
