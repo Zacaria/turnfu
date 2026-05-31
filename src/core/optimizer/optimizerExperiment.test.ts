@@ -464,7 +464,7 @@ test("hybrid search adapts known Huppermage branches to capped passive counts", 
     },
   });
 
-  assert.ok((result.bestCandidate?.score.score ?? 0) >= 70_000);
+  assert.ok((result.bestCandidate?.score.score ?? 0) >= 73_000);
   assert.ok((result.bestCandidate?.passiveIds.length ?? 0) <= 2);
   assert.ok((result.engineResults[0]?.metrics.hybridRelocateNeighborCandidates ?? 0) > 0);
 });

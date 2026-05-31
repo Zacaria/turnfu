@@ -1552,6 +1552,61 @@ function getHuppermageDomainSeedCandidates(): Array<{ passiveIds: string[]; turn
       ],
       turns: [
         [
+          "eboulement",
+          "coeur-de-lumiere",
+          "rayon-crepusculaire",
+          "flux-denergie",
+          "papillons-diurnes",
+          "debacle",
+          "orbes-luisants",
+        ],
+        [
+          "coeur-de-lumiere",
+          "runification",
+          "debacle",
+          "fleche-de-lumiere",
+          "orbes-luisants",
+          "papillons-diurnes",
+          "epee-de-lumiere",
+        ],
+      ],
+    },
+    {
+      passiveIds: [
+        "carnage",
+        "extension-des-sens",
+      ],
+      turns: [
+        [
+          "eboulement",
+          "coeur-de-lumiere",
+          "halo-chatoyant",
+          "papillons-diurnes",
+          "flux-denergie",
+          "debacle",
+          "orbes-luisants",
+          "orbes-luisants",
+        ],
+        [
+          "coeur-de-lumiere",
+          "runification",
+          "debacle",
+          "fleche-de-lumiere",
+          "epee-de-lumiere",
+          "eboulement",
+          "ombres-dansantes",
+          "halo-chatoyant",
+        ],
+      ],
+    },
+    {
+      passiveIds: [
+        "carnage",
+        "extension-des-sens",
+        "profusion-runique",
+      ],
+      turns: [
+        [
           "halo-chatoyant",
           "eboulement",
           "coeur-de-lumiere",
