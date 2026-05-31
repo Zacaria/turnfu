@@ -103,6 +103,17 @@ export type RustWasmDifferentialFixture =
       firstSummary: ReturnType<typeof createRustSimulationSummary>;
       replaySummary: ReturnType<typeof createRustSimulationSummary>;
       expected: unknown;
+    }
+  | {
+      kind: "candidateBatch";
+      name: string;
+      seed: string;
+      candidates: GeneratedCandidate[];
+      resources: ResourcePool;
+      stats: ReturnType<typeof normalizeStatsForRust>;
+      initialHuppermage: ReturnType<typeof createRustHuppermageState>;
+      spellBook: Record<string, GeneratedSpellProjection>;
+      expected: unknown;
     };
 
 type RustPassiveEntry = {
@@ -139,6 +150,18 @@ type RustSpellRules = {
   maxCastsPerTarget?: number;
   cooldownTurns?: number;
   requiredTarget?: ActionTarget["kind"];
+};
+
+export type GeneratedCandidate = {
+  id: string;
+  plan: ComboPlan;
+};
+
+export type GeneratedSpellProjection = {
+  id: string;
+  cost: Required<SpellCost>;
+  damageEffects: DamageEffect[];
+  rules: RustSpellRules;
 };
 
 const resources = ["ap", "mp", "wp", "bq"] as const;
@@ -188,6 +211,7 @@ export function createRustWasmDifferentialFixtures(): RustWasmDifferentialFixtur
     ...createInitialPassiveFixtures(),
     ...createInvalidPlanFixtures(),
     ...createMultiTurnFixtures(),
+    ...createSeededCandidateBatchFixtures(),
   ];
 }
 
@@ -477,6 +501,87 @@ function createMultiTurnFixtures(): RustWasmDifferentialFixture[] {
   return fixtures;
 }
 
+function createSeededCandidateBatchFixtures(): RustWasmDifferentialFixture[] {
+  const seed = "rust-wasm-differential-ci";
+  const character = createGeneratedBatchCharacter();
+  const spellIds = [
+    "epee-de-lumiere",
+    "faisceau-de-lune",
+    "resonance",
+    "fleche-de-lumiere",
+    "larmes-scintillantes",
+  ];
+  const spellBook = Object.fromEntries(spellIds.map((spellId) => {
+    const spell = requireSpell(spellId);
+    return [spellId, createGeneratedSpellProjection(spell)];
+  }));
+  const candidates = createSeededGeneratedCandidates(seed, spellIds, 24);
+
+  return [{
+    kind: "candidateBatch",
+    name: `candidate-batch:${seed}`,
+    seed,
+    candidates,
+    resources: character.resources,
+    stats: normalizeStatsForRust(character.stats),
+    initialHuppermage: createRustHuppermageState({ bqMax: character.resources.bq }),
+    spellBook,
+    expected: candidates.map((candidate) => evaluateGeneratedCandidateWithTypeScript(candidate, character)),
+  }];
+}
+
+function createSeededGeneratedCandidates(seed: string, spellIds: string[], count: number): GeneratedCandidate[] {
+  const rng = createSeededRandom(seed);
+  const candidates: GeneratedCandidate[] = [];
+
+  for (let candidateIndex = 0; candidateIndex < count; candidateIndex += 1) {
+    const turns = Array.from({ length: 3 }, () => ({
+      actions: Array.from({ length: rng.integer(1, 4) }, () => ({
+        spellId: rng.pick(spellIds),
+      })),
+    }));
+
+    candidates.push({
+      id: `${seed}:${candidateIndex}`,
+      plan: { turns },
+    });
+  }
+
+  return candidates;
+}
+
+function evaluateGeneratedCandidateWithTypeScript(
+  candidate: GeneratedCandidate,
+  character: SimulatedCharacter,
+) {
+  const simulation = simulateCombo({
+    catalog: huppermageCatalog,
+    character,
+    combo: candidate.plan,
+  });
+
+  return normalizeGeneratedCandidateResult(candidate.id, simulation);
+}
+
+export function normalizeGeneratedCandidateResult(
+  candidateId: string,
+  simulation: ComboSimulationResult,
+) {
+  return pruneUndefined({
+    candidateId,
+    valid: simulation.valid,
+    totalDamage: simulation.totalDamage,
+    finalResources: simulation.finalState.remainingResources,
+    finalHuppermage: normalizeHuppermageForRust(simulation.finalState.classState.huppermage),
+    firstViolation: simulation.violations[0]
+      ? {
+        turnIndex: simulation.violations[0].turnIndex,
+        ...normalizeViolation(simulation.violations[0]),
+      }
+      : undefined,
+  });
+}
+
 function createNextTurnFixture(
   name: string,
   baseCharacter: SimulatedCharacter,
@@ -613,6 +718,10 @@ function createBaseCharacter(
   };
 }
 
+function createGeneratedBatchCharacter(): SimulatedCharacter {
+  return createBaseCharacter(createResources({ ap: 30, mp: 6, wp: 6, bq: 3_000 }));
+}
+
 function simulateInvalidPlan(
   actions: Array<{ spellId: string; target?: ActionTarget }>,
   character: SimulatedCharacter,
@@ -714,6 +823,15 @@ function createRustSpellRules(spell: CatalogEntry): RustSpellRules {
     cooldownTurns: getConstraintValue(spell, "cooldownTurns"),
     requiredTarget: getRequiredTarget(spell),
   }) as RustSpellRules;
+}
+
+function createGeneratedSpellProjection(spell: CatalogEntry): GeneratedSpellProjection {
+  return {
+    id: spell.id,
+    cost: normalizeCost(spell.cost),
+    damageEffects: spell.effects.filter((effect): effect is DamageEffect => effect.type === "damage"),
+    rules: createRustSpellRules(spell),
+  };
 }
 
 function createRustHuppermageState(input: {
@@ -853,6 +971,41 @@ function getDeckLimitUsedSpellIds(excludedSpellId: string): string[] {
 
 function pruneUndefined<T extends Record<string, unknown>>(value: T): T {
   return Object.fromEntries(Object.entries(value).filter(([, entryValue]) => entryValue !== undefined)) as T;
+}
+
+type SeededRandom = {
+  next(): number;
+  integer(min: number, max: number): number;
+  pick<T>(values: T[]): T;
+};
+
+function createSeededRandom(seed: string): SeededRandom {
+  let state = hashSeed(seed);
+
+  return {
+    next() {
+      state += 0x6D2B79F5;
+      let value = state;
+      value = Math.imul(value ^ value >>> 15, value | 1);
+      value ^= value + Math.imul(value ^ value >>> 7, value | 61);
+      return ((value ^ value >>> 14) >>> 0) / 4294967296;
+    },
+    integer(min, max) {
+      return Math.floor(this.next() * (max - min + 1)) + min;
+    },
+    pick(values) {
+      return values[this.integer(0, values.length - 1)]!;
+    },
+  };
+}
+
+function hashSeed(seed: string): number {
+  let hash = 2166136261;
+  for (let index = 0; index < seed.length; index += 1) {
+    hash ^= seed.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
 }
 
 function normalizeStatsForRust(stats: BaseStats) {

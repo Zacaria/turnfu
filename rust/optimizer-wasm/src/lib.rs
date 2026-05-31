@@ -1820,6 +1820,21 @@ pub fn apply_feu_follet_recover_json(huppermage_state_json: &str) -> Result<Stri
 }
 
 #[wasm_bindgen]
+pub fn apply_turn_end_bq_json(
+    huppermage_state_json: &str,
+    resources_json: &str,
+) -> Result<String, JsValue> {
+    let huppermage_state: HuppermageState = serde_json::from_str(huppermage_state_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid Huppermage state JSON: {error}")))?;
+    let resources: ResourcePool = serde_json::from_str(resources_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid resources JSON: {error}")))?;
+
+    serde_json::to_string(&apply_turn_end_bq(huppermage_state, resources)).map_err(|error| {
+        JsValue::from_str(&format!("Failed to serialize turn-end BQ result: {error}"))
+    })
+}
+
+#[wasm_bindgen]
 pub fn evaluate_sustainability_json(
     required: bool,
     first_summary_json: &str,

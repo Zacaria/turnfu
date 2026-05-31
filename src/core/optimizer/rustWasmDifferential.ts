@@ -1,8 +1,11 @@
 import {
+  type GeneratedCandidate,
+  type GeneratedSpellProjection,
   createRustWasmDifferentialFixtures,
   normalizeViolation,
   type RustWasmDifferentialFixture,
 } from "./rustWasmDifferentialFixtures.ts";
+import { roundDamage, type ResourcePool } from "../simulation/index.ts";
 
 export type RustWasmDifferentialWasmExports = {
   validate_resource_cost_json: (
@@ -54,6 +57,10 @@ export type RustWasmDifferentialWasmExports = {
     required: boolean,
     firstSummaryJson: string,
     replaySummaryJson: string,
+  ) => string;
+  apply_turn_end_bq_json: (
+    huppermageStateJson: string,
+    resourcesJson: string,
   ) => string;
 };
 
@@ -200,11 +207,167 @@ function runRustFixture(wasm: RustWasmDifferentialWasmExports, fixture: RustWasm
     ));
   }
 
+  if (fixture.kind === "candidateBatch") {
+    return fixture.candidates.map((candidate) => evaluateGeneratedCandidateWithRustPrimitives(
+      wasm,
+      candidate,
+      fixture.resources,
+      fixture.stats,
+      fixture.initialHuppermage,
+      fixture.spellBook,
+    ));
+  }
+
   return JSON.parse(wasm.apply_initial_passive_effects_json(
     JSON.stringify(fixture.stats),
     JSON.stringify(fixture.resources),
     JSON.stringify(fixture.passives),
   ));
+}
+
+function evaluateGeneratedCandidateWithRustPrimitives(
+  wasm: RustWasmDifferentialWasmExports,
+  candidate: GeneratedCandidate,
+  baseResources: ResourcePool,
+  stats: Record<string, unknown>,
+  initialHuppermage: RustHuppermageStateForBatch,
+  spellBook: Record<string, GeneratedSpellProjection>,
+): Record<string, unknown> {
+  let resources = cloneJson(baseResources);
+  let huppermage: RustHuppermageStateForBatch = cloneJson(initialHuppermage);
+  let totalDamage = 0;
+
+  for (const [turnIndex, turn] of candidate.plan.turns.entries()) {
+    const castsBySpellId: Record<string, number> = {};
+    const targetCastsBySpellId: Record<string, number> = {};
+
+    for (const [actionIndex, action] of turn.actions.entries()) {
+      const spell = spellBook[action.spellId];
+      if (!spell) {
+        return createGeneratedRustResult(candidate.id, false, totalDamage, resources, huppermage, {
+          turnIndex,
+          violationType: "unknownSpell",
+          actionIndex,
+          spellId: action.spellId,
+        });
+      }
+
+      const spellViolation = normalizeRustViolation(JSON.parse(wasm.validate_spell_rules_json(
+        JSON.stringify(spell.rules),
+        actionIndex,
+        action.target ? JSON.stringify(action.target.kind) : undefined,
+        JSON.stringify(castsBySpellId),
+        JSON.stringify(targetCastsBySpellId),
+        JSON.stringify(huppermage),
+      )));
+      if (spellViolation) {
+        return createGeneratedRustResult(candidate.id, false, totalDamage, resources, huppermage, {
+          turnIndex,
+          ...spellViolation,
+        });
+      }
+
+      const resourceValidation = JSON.parse(wasm.validate_resource_cost_json(
+        JSON.stringify(resources),
+        JSON.stringify(spell.cost),
+        action.spellId,
+        actionIndex,
+      ));
+      const resourceViolation = normalizeRustViolation(resourceValidation.violation);
+      if (resourceViolation) {
+        return createGeneratedRustResult(candidate.id, false, totalDamage, resources, huppermage, {
+          turnIndex,
+          ...resourceViolation,
+        });
+      }
+      resources = resourceValidation.resourcesAfterCost;
+
+      for (const effect of spell.damageEffects) {
+        const formula = JSON.parse(wasm.compute_raw_damage_json(
+          JSON.stringify(stats),
+          JSON.stringify(effect),
+        ));
+        totalDamage = roundDamage(totalDamage + formula.result);
+      }
+
+      castsBySpellId[action.spellId] = (castsBySpellId[action.spellId] ?? 0) + 1;
+      if (action.target?.kind !== "emptyCell") {
+        targetCastsBySpellId[action.spellId] = (targetCastsBySpellId[action.spellId] ?? 0) + 1;
+      }
+      if (spell.rules.cooldownTurns !== undefined) {
+        huppermage.cooldownsBySpellId[action.spellId] = spell.rules.cooldownTurns;
+      }
+      if (spell.rules.isDeckTracked && !huppermage.usedSpellIds.includes(action.spellId)) {
+        huppermage.usedSpellIds.push(action.spellId);
+      }
+    }
+
+    const turnEnd = JSON.parse(wasm.apply_turn_end_bq_json(
+      JSON.stringify(huppermage),
+      JSON.stringify(resources),
+    ));
+      huppermage = turnEnd.state;
+    resources = turnEnd.resources;
+
+    if (turnIndex < candidate.plan.turns.length - 1) {
+      const carried = JSON.parse(wasm.create_next_turn_state_json(
+        JSON.stringify(baseResources),
+        JSON.stringify(resources),
+        JSON.stringify(huppermage),
+        JSON.stringify(castsBySpellId),
+      ));
+      huppermage = carried.huppermage;
+      resources = carried.resources;
+    }
+  }
+
+  return createGeneratedRustResult(candidate.id, true, totalDamage, resources, huppermage);
+}
+
+function createGeneratedRustResult(
+  candidateId: string,
+  valid: boolean,
+  totalDamage: number,
+  finalResources: ResourcePool,
+  finalHuppermage: RustHuppermageStateForBatch,
+  firstViolation?: Record<string, unknown>,
+): Record<string, unknown> {
+  return pruneUndefinedRecord({
+    candidateId,
+    valid,
+    totalDamage,
+    finalResources,
+    finalHuppermage,
+    firstViolation: firstViolation
+      ? normalizeGeneratedRustViolation(firstViolation)
+      : undefined,
+  });
+}
+
+function normalizeGeneratedRustViolation(violation: Record<string, unknown>): Record<string, unknown> | null {
+  const normalized = normalizeRustViolation({
+    violationType: violation.violationType,
+    actionIndex: violation.actionIndex,
+    spellId: violation.spellId,
+    resource: violation.resource,
+    required: violation.required,
+    available: violation.available,
+    scope: violation.scope,
+  });
+  return normalized ? { turnIndex: violation.turnIndex, ...normalized } : null;
+}
+
+function cloneJson<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+type RustHuppermageStateForBatch = Record<string, unknown> & {
+  cooldownsBySpellId: Record<string, number>;
+  usedSpellIds: string[];
+};
+
+function pruneUndefinedRecord<T extends Record<string, unknown>>(value: T): T {
+  return Object.fromEntries(Object.entries(value).filter(([, entryValue]) => entryValue !== undefined)) as T;
 }
 
 function normalizeRustViolation(violation: Record<string, unknown> | null): Record<string, unknown> | null {
