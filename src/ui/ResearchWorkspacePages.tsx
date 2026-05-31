@@ -1,13 +1,15 @@
-import { ArrowLeft, BarChart3, Boxes, Check, Pin, Plus, Save, Search, Wrench } from "lucide-react";
-import { useMemo, useState } from "react";
+import { ArrowLeft, BarChart3, Boxes, Check, Pin, Play, Plus, Save, Search, Wrench, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { CatalogEntry } from "../core/catalog/types.ts";
 import {
   createDefaultOptimizerControls,
   createOptimizerCandidateSpellIconRows,
   getPinnedCandidates,
-  groupOptimizerResultsByDuration,
   normalizeOptimizerControls,
+  runOptimizerForControlsLive,
+  summarizeOptimizerControls,
   togglePinnedCandidate,
+  type DurationGroupedResults,
   type OptimizerCandidateViewModel,
   type OptimizerWorkspaceControls,
 } from "./optimizerWorkspace.ts";
@@ -33,6 +35,46 @@ import {
   type SavedComboComparisonRow,
 } from "./savedComboComparison.ts";
 import { getHuppermageIconSrc } from "./icons.ts";
+
+export type OptimizerRunStatus = "idle" | "running" | "done" | "stopped" | "error";
+
+export type OptimizerRunProgressState = {
+  attempts: number;
+  bestScore?: number;
+  invalidCandidates: number;
+  label: string;
+  percent: number;
+  validCandidates: number;
+};
+
+export type OptimizerRunSnapshot = {
+  controls: OptimizerWorkspaceControls;
+  results: OptimizerCandidateViewModel[];
+};
+
+export type OptimizerWorkspaceSession = {
+  controls: OptimizerWorkspaceControls;
+  lastRun: OptimizerRunSnapshot | null;
+  pinnedIds: string[];
+  runError: string | null;
+  runProgress: OptimizerRunProgressState;
+  runStatus: OptimizerRunStatus;
+};
+
+function createOptimizerWorkspaceSession(session: OptimizerWorkspaceSession): OptimizerWorkspaceSession {
+  if (session.runStatus !== "running") {
+    return session;
+  }
+
+  return {
+    ...session,
+    runProgress: {
+      ...session.runProgress,
+      label: session.lastRun ? "Optimisation stoppée" : session.runProgress.label,
+    },
+    runStatus: session.lastRun ? "stopped" : "idle",
+  };
+}
 
 export function ResearchLibraryPage({
   classFilter,
@@ -412,41 +454,186 @@ export function SetupPage({
 export function OptimizerWorkspacePage({
   build,
   catalog,
+  initialSession,
   onBack,
   onOpenCandidate,
   onSaveCandidate,
   onSaveRun,
+  onSessionChange,
   savedCandidateIds,
   setup,
 }: {
   build: ResearchBuild;
   catalog: CatalogEntry[];
+  initialSession?: OptimizerWorkspaceSession;
   onBack: () => void;
   onOpenCandidate: (candidate: OptimizerCandidateViewModel) => void;
   onSaveCandidate: (candidate: OptimizerCandidateViewModel, controls: OptimizerWorkspaceControls) => void;
   onSaveRun: (controls: OptimizerWorkspaceControls) => void;
+  onSessionChange?: (session: OptimizerWorkspaceSession) => void;
   savedCandidateIds: string[];
   setup: SetupSnapshot;
 }) {
-  const [controls, setControls] = useState<OptimizerWorkspaceControls>(() => createDefaultOptimizerControls());
-  const [pinnedIds, setPinnedIds] = useState<string[]>([]);
+  const [controls, setControls] = useState<OptimizerWorkspaceControls>(() => initialSession?.controls ?? createDefaultOptimizerControls());
+  const [pinnedIds, setPinnedIds] = useState<string[]>(() => initialSession?.pinnedIds ?? []);
+  const [runStatus, setRunStatus] = useState<OptimizerRunStatus>(() => initialSession?.runStatus ?? "idle");
+  const [runProgress, setRunProgress] = useState<OptimizerRunProgressState>(() => initialSession?.runProgress ?? {
+    attempts: 0,
+    bestScore: undefined as number | undefined,
+    invalidCandidates: 0,
+    label: "",
+    percent: 0,
+    validCandidates: 0,
+  });
+  const [runError, setRunError] = useState<string | null>(() => initialSession?.runError ?? null);
+  const [lastRun, setLastRun] = useState<OptimizerRunSnapshot | null>(() => initialSession?.lastRun ?? null);
+  const runTimerRef = useRef<number | null>(null);
+  const runSequenceRef = useRef(0);
+  const runAbortRef = useRef<AbortController | null>(null);
+  const onSessionChangeRef = useRef(onSessionChange);
   const normalizedControls = normalizeOptimizerControls(controls);
   const savedCandidateIdSet = useMemo(() => new Set(savedCandidateIds), [savedCandidateIds]);
-  const groups = useMemo(
-    () => groupOptimizerResultsByDuration(setup, catalog, normalizedControls),
-    [catalog, normalizedControls, setup],
-  );
-  const pinnedCandidates = getPinnedCandidates(groups, pinnedIds);
+  const lastRunGroups: DurationGroupedResults = lastRun ? { [lastRun.controls.duration]: lastRun.results } : {};
+  const pinnedCandidates = getPinnedCandidates(lastRunGroups, pinnedIds);
+  const isRunning = runStatus === "running";
+  const controlsDirty = lastRun !== null && createOptimizerControlsKey(lastRun.controls) !== createOptimizerControlsKey(normalizedControls);
+
+  useEffect(() => () => {
+    if (runTimerRef.current !== null) {
+      window.clearTimeout(runTimerRef.current);
+    }
+    runAbortRef.current?.abort();
+  }, []);
+
+  useEffect(() => {
+    onSessionChangeRef.current = onSessionChange;
+  }, [onSessionChange]);
+
+  useEffect(() => {
+    onSessionChangeRef.current?.(createOptimizerWorkspaceSession({
+      controls,
+      lastRun,
+      pinnedIds,
+      runError,
+      runProgress,
+      runStatus,
+    }));
+  }, [controls, lastRun, pinnedIds, runError, runProgress, runStatus]);
 
   function updateControls(patch: Partial<OptimizerWorkspaceControls>) {
+    if (isRunning) {
+      return;
+    }
+
     setControls((current) => normalizeOptimizerControls({ ...current, ...patch }));
   }
 
-  function toggleDuration(duration: number) {
-    const durations = controls.durations.includes(duration)
-      ? controls.durations.filter((candidate) => candidate !== duration)
-      : [...controls.durations, duration];
-    updateControls({ durations });
+  async function launchOptimizerRun() {
+    if (isRunning) {
+      return;
+    }
+
+    const runControls = normalizeOptimizerControls(controls);
+    const runSequence = runSequenceRef.current + 1;
+    runSequenceRef.current = runSequence;
+    if (runTimerRef.current !== null) {
+      window.clearTimeout(runTimerRef.current);
+    }
+    runAbortRef.current?.abort();
+    const abortController = new AbortController();
+    runAbortRef.current = abortController;
+
+    setPinnedIds([]);
+    setRunError(null);
+    setRunStatus("running");
+    setLastRun({ controls: runControls, results: [] });
+    setRunProgress({
+      attempts: 0,
+      bestScore: undefined,
+      invalidCandidates: 0,
+      label: "Préparation du run",
+      percent: 1,
+      validCandidates: 0,
+    });
+
+    try {
+      let latestRunProgress = {
+        attempts: 0,
+        invalidCandidates: 0,
+        validCandidates: 0,
+      };
+      const results = await runOptimizerForControlsLive(setup, catalog, runControls, (progress) => {
+        if (runSequenceRef.current !== runSequence) {
+          return;
+        }
+
+        latestRunProgress = {
+          attempts: progress.attempts,
+          invalidCandidates: progress.invalidCandidates,
+          validCandidates: progress.validCandidates,
+        };
+        const percent = Math.min(99, Math.max(1, Math.round((progress.attempts / runControls.iterationBudget) * 100)));
+        setLastRun({ controls: runControls, results: progress.results });
+        setRunProgress({
+          attempts: progress.attempts,
+          bestScore: progress.bestScore,
+          invalidCandidates: progress.invalidCandidates,
+          label: `${runControls.searchMethod} · génération ${progress.batch}`,
+          percent,
+          validCandidates: progress.validCandidates,
+        });
+      }, abortController.signal);
+
+      if (runSequenceRef.current !== runSequence) {
+        return;
+      }
+
+      setLastRun({ controls: runControls, results });
+      if (abortController.signal.aborted) {
+        setRunProgress((current) => ({
+          ...current,
+          attempts: latestRunProgress.attempts,
+          bestScore: results[0]?.score,
+          invalidCandidates: latestRunProgress.invalidCandidates,
+          label: "Optimisation stoppée",
+          validCandidates: latestRunProgress.validCandidates,
+        }));
+        setRunStatus("stopped");
+        return;
+      }
+
+      setRunProgress({
+        attempts: runControls.iterationBudget,
+        bestScore: results[0]?.score,
+        invalidCandidates: latestRunProgress.invalidCandidates,
+        label: "Résultats prêts",
+        percent: 100,
+        validCandidates: latestRunProgress.validCandidates,
+      });
+      setRunStatus("done");
+    } catch (error) {
+      if (runSequenceRef.current !== runSequence) {
+        return;
+      }
+      setRunError(error instanceof Error ? error.message : "Erreur optimizer inconnue");
+      setRunProgress({
+        attempts: 0,
+        bestScore: undefined,
+        invalidCandidates: 0,
+        label: "Erreur",
+        percent: 0,
+        validCandidates: 0,
+      });
+      setRunStatus("error");
+    } finally {
+      if (runAbortRef.current === abortController) {
+        runAbortRef.current = null;
+      }
+    }
+  }
+
+  function stopOptimizerRun() {
+    runAbortRef.current?.abort();
   }
 
   return (
@@ -458,28 +645,39 @@ export function OptimizerWorkspacePage({
           <h1>Recherche de combos</h1>
         </div>
         <div className="header-actions">
-          <button className="secondary-button" type="button" onClick={() => onSaveRun(normalizedControls)}>
+          <button
+            className="secondary-button"
+            type="button"
+            onClick={() => lastRun ? onSaveRun(lastRun.controls) : undefined}
+            disabled={!lastRun || isRunning}
+          >
             <Save size={16} />
             Sauvegarder run
           </button>
-          <span className="status-pill status-ok">Max 3 tours</span>
+          <span className="status-pill status-ok">{lastRun ? `${lastRun.controls.duration}T` : "Prêt"}</span>
         </div>
       </section>
 
       <section className="optimizer-controls">
-        <fieldset>
-          <legend>Durée</legend>
+        <fieldset className="duration-segmented optimizer-duration-choice">
+          <legend>Objectif</legend>
           {[1, 2, 3].map((duration) => (
-            <label key={duration} className="inline-choice">
-              <input type="checkbox" checked={controls.durations.includes(duration)} onChange={() => toggleDuration(duration)} />
-              {duration}T
-            </label>
+            <button
+              className={controls.duration === duration ? "duration-segment active" : "duration-segment"}
+              disabled={isRunning}
+              key={duration}
+              type="button"
+              onClick={() => updateControls({ duration })}
+            >
+              {duration} tour{duration > 1 ? "s" : ""}
+            </button>
           ))}
         </fieldset>
         <label className="field">
           Scoring
           <select
             value={controls.scoreCriterion}
+            disabled={isRunning}
             onChange={(event) => updateControls({ scoreCriterion: event.target.value as OptimizerWorkspaceControls["scoreCriterion"] })}
           >
             <option value="totalDamage">Dégâts totaux</option>
@@ -490,7 +688,7 @@ export function OptimizerWorkspacePage({
           Élément
           <select
             value={controls.targetElement}
-            disabled={controls.scoreCriterion !== "elementDamage"}
+            disabled={isRunning || controls.scoreCriterion !== "elementDamage"}
             onChange={(event) => updateControls({ targetElement: event.target.value as OptimizerWorkspaceControls["targetElement"] })}
           >
             <option value="fire">Feu</option>
@@ -500,13 +698,30 @@ export function OptimizerWorkspacePage({
           </select>
         </label>
         <label className="field">
-          Largeur
+          Méthode
+          <select
+            value={controls.searchMethod}
+            disabled={isRunning}
+            onChange={(event) => updateControls({ searchMethod: event.target.value as OptimizerWorkspaceControls["searchMethod"] })}
+          >
+            <option value="hybrid">Hybride</option>
+            <option value="genetic">Génétique</option>
+            <option value="mcts">MCTS</option>
+            <option value="annealing">Recuit</option>
+            <option value="novelty">Novelty search</option>
+            <option value="random">Baseline aléatoire</option>
+          </select>
+        </label>
+        <label className="field">
+          Itérations
           <input
             type="number"
-            min={1}
-            max={200}
-            value={controls.beamWidth}
-            onChange={(event) => updateControls({ beamWidth: Number(event.target.value) })}
+            min={10}
+            max={1000000}
+            step={100}
+            value={controls.iterationBudget}
+            disabled={isRunning}
+            onChange={(event) => updateControls({ iterationBudget: Number(event.target.value) })}
           />
         </label>
         <label className="field">
@@ -516,6 +731,7 @@ export function OptimizerWorkspacePage({
             min={1}
             max={50}
             value={controls.maxResultsPerDuration}
+            disabled={isRunning}
             onChange={(event) => updateControls({ maxResultsPerDuration: Number(event.target.value) })}
           />
         </label>
@@ -523,30 +739,80 @@ export function OptimizerWorkspacePage({
           <input
             type="checkbox"
             checked={controls.requireSustainableCycle}
+            disabled={isRunning}
             onChange={(event) => updateControls({ requireSustainableCycle: event.target.checked })}
           />
           Cycle soutenable
         </label>
+        <button
+          className={isRunning ? "secondary-button optimizer-run-button optimizer-stop-button" : "primary-button optimizer-run-button"}
+          type="button"
+          onClick={isRunning ? stopOptimizerRun : launchOptimizerRun}
+        >
+          {isRunning ? <X size={16} /> : <Play size={16} />}
+          {isRunning ? "Stopper" : lastRun ? "Relancer" : "Lancer l'optimisation"}
+        </button>
       </section>
 
-      <section className="optimizer-results-grid">
-        {[1, 2, 3].map((duration) => (
-          <section className="workspace-section optimizer-result-group" key={duration}>
-            <h2>{duration} tour{duration > 1 ? "s" : ""}</h2>
-            {groups[duration]?.length ? groups[duration].map((candidate) => (
+      <section className="workspace-section optimizer-run-panel">
+        <div className="section-title-row">
+          <h2>{lastRun ? `Résultats ${lastRun.controls.duration}T` : "Résultats"}</h2>
+          <div className="header-actions">
+            {controlsDirty ? <span className="status-pill status-warn">Paramètres modifiés</span> : null}
+            {runStatus === "done" && lastRun ? <span className="status-pill status-ok">{lastRun.results.length} candidat{lastRun.results.length > 1 ? "s" : ""}</span> : null}
+            {runStatus === "stopped" && lastRun ? <span className="status-pill status-warn">Stoppé · {lastRun.results.length} candidat{lastRun.results.length > 1 ? "s" : ""}</span> : null}
+            {runStatus === "running" ? <span className="status-pill status-ok">Calcul</span> : null}
+            {runStatus === "error" ? <span className="status-pill status-error">Erreur</span> : null}
+          </div>
+        </div>
+
+        {runStatus === "running" ? (
+          <div className="optimizer-progress" role="status" aria-live="polite">
+            <div>
+              <b>{runProgress.label}</b>
+              <span>{runProgress.percent}% · {runProgress.attempts}/{normalizedControls.iterationBudget}</span>
+            </div>
+            <progress value={runProgress.percent} max={100}>{runProgress.percent}%</progress>
+            <div className="optimizer-progress-stats">
+              <span>Valides: {runProgress.validCandidates}</span>
+              <span>Invalides: {runProgress.invalidCandidates}</span>
+              <span>Meilleur: {runProgress.bestScore ?? "—"}</span>
+            </div>
+          </div>
+        ) : null}
+
+        {runError ? <EmptyState title="Optimisation interrompue" body={runError} /> : null}
+        {!lastRun && runStatus === "idle" ? <EmptyState title="Aucun run lancé" body="Choisis un objectif, puis lance l'optimisation." /> : null}
+
+        {lastRun ? (
+          <>
+            <p className="run-criteria-summary">{summarizeOptimizerControls(lastRun.controls)}</p>
+            <section className="optimizer-result-list">
+              {lastRun.results.length ? lastRun.results.map((candidate) => (
               <CandidateRow
                 candidate={candidate}
                 catalog={catalog}
                 key={candidate.id}
                 pinned={pinnedIds.includes(candidate.id)}
                 saved={savedCandidateIdSet.has(candidate.id)}
-                onOpen={() => onOpenCandidate(candidate)}
-                onSave={() => onSaveCandidate(candidate, normalizedControls)}
+                onOpen={() => {
+                  onSessionChange?.(createOptimizerWorkspaceSession({
+                    controls,
+                    lastRun,
+                    pinnedIds,
+                    runError,
+                    runProgress,
+                    runStatus,
+                  }));
+                  onOpenCandidate(candidate);
+                }}
+                onSave={() => onSaveCandidate(candidate, lastRun.controls)}
                 onTogglePin={() => setPinnedIds((current) => togglePinnedCandidate(current, candidate))}
               />
-            )) : <EmptyState title="Aucun candidat" body="Aucun combo valide pour cette durée et ces critères." />}
-          </section>
-        ))}
+              )) : <EmptyState title="Aucun candidat" body="Aucun combo valide pour cet objectif et ces critères." />}
+            </section>
+          </>
+        ) : null}
       </section>
 
       <section className="workspace-section comparison-section">
@@ -664,6 +930,11 @@ function CandidateRow({
   saved: boolean;
 }) {
   const spellRows = createOptimizerCandidateSpellIconRows(candidate.plan, catalog);
+  const catalogNamesById = new Map(catalog.map((entry) => [entry.id, entry.name]));
+  const passiveIcons = candidate.passiveIds.map((passiveId) => ({
+    label: catalogNamesById.get(passiveId) ?? passiveId,
+    passiveId,
+  }));
 
   return (
     <article className="candidate-row">
@@ -671,6 +942,16 @@ function CandidateRow({
         <b>{candidate.score}</b>
         <span>{candidate.totalDamage} total · {candidate.damagePerTurn}/tour · {candidate.damagePerAp}/PA</span>
         <small>{candidate.actionCount} actions · {candidate.finalResources.bq} BQ · {candidate.finalResources.wp} PW</small>
+        {passiveIcons.length > 0 ? (
+          <div className="candidate-spell-icon-rows candidate-passive-icons" aria-label="Passifs du candidat">
+            <small>Passifs</small>
+            <div className="candidate-spell-icon-row">
+              {passiveIcons.map((icon) => (
+                <PassiveMiniIcon key={icon.passiveId} label={icon.label} passiveId={icon.passiveId} />
+              ))}
+            </div>
+          </div>
+        ) : null}
         <div className="candidate-spell-icon-rows" aria-label="Sorts du candidat">
           {spellRows.map((row) => (
             <div className="candidate-spell-icon-row" aria-label={`Tour ${row.turn}`} key={row.turn}>
@@ -706,6 +987,16 @@ function CandidateRow({
 
 function SpellMiniIcon({ label, spellId }: { label: string; spellId: string }) {
   const iconSrc = getHuppermageIconSrc(spellId);
+
+  return iconSrc ? (
+    <img className="candidate-spell-icon" src={iconSrc} alt={label} title={label} draggable={false} />
+  ) : (
+    <span className="candidate-spell-icon candidate-spell-icon-fallback" title={label}>{label.slice(0, 1)}</span>
+  );
+}
+
+function PassiveMiniIcon({ label, passiveId }: { label: string; passiveId: string }) {
+  const iconSrc = getHuppermageIconSrc(passiveId);
 
   return iconSrc ? (
     <img className="candidate-spell-icon" src={iconSrc} alt={label} title={label} draggable={false} />
@@ -821,6 +1112,20 @@ function MetricTile({ label, value }: { label: string; value: number | string })
 
 function formatDateTime(value: string): string {
   return value.slice(0, 16).replace("T", " ");
+}
+
+function createOptimizerControlsKey(controls: OptimizerWorkspaceControls): string {
+  const normalized = normalizeOptimizerControls(controls);
+  return JSON.stringify({
+    beamWidth: normalized.beamWidth,
+    duration: normalized.duration,
+    iterationBudget: normalized.iterationBudget,
+    maxResultsPerDuration: normalized.maxResultsPerDuration,
+    requireSustainableCycle: normalized.requireSustainableCycle,
+    scoreCriterion: normalized.scoreCriterion,
+    searchMethod: normalized.searchMethod,
+    targetElement: normalized.targetElement,
+  });
 }
 
 function EmptyState({ body, title }: { body: string; title: string }) {

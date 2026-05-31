@@ -109,6 +109,12 @@ button:disabled {
   border: 1px solid #d59a8b;
 }
 
+.status-warn {
+  color: #6b4a00;
+  background: #fff0bd;
+  border: 1px solid #d9ad3d;
+}
+
 .workspace {
   display: grid;
   grid-template-columns: minmax(250px, 320px) minmax(420px, 1fr) minmax(300px, 380px);
@@ -262,9 +268,29 @@ button:disabled {
 }
 
 .stat-stepper-value {
+  display: inline-flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  min-width: 0;
   color: #18231f;
   font-size: 0.9rem;
   text-align: right;
+}
+
+.stat-stepper-value-input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  font: inherit;
+  font-weight: inherit;
+  text-align: right;
+}
+
+.stat-stepper-value-input:focus {
+  outline: none;
 }
 
 .stat-stepper-actions {
@@ -1103,6 +1129,12 @@ body {
   color: #fff0ec;
   background: #713126;
   border-color: #c96d5b;
+}
+
+.status-warn {
+  color: #1c1710;
+  background: #f1bf4f;
+  border-color: #ffe08a;
 }
 
 .resource-strip {
@@ -2195,6 +2227,11 @@ body {
   font-weight: 800;
 }
 
+.builder-back-button {
+  justify-self: start;
+  margin-bottom: 0;
+}
+
 .header-actions,
 .section-title-row,
 .setup-summary-actions,
@@ -2202,6 +2239,11 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.header-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .setup-summary-actions {
@@ -2324,6 +2366,86 @@ body {
   text-transform: uppercase;
 }
 
+.optimizer-duration-choice .duration-segment {
+  min-width: 92px;
+  min-height: 34px;
+}
+
+.optimizer-run-button {
+  min-height: 54px;
+  align-self: end;
+}
+
+.optimizer-stop-button {
+  border-color: #7a3a33;
+  color: #ffd8d2;
+}
+
+.optimizer-stop-button:hover,
+.optimizer-stop-button:focus-visible {
+  border-color: #d86e59;
+  color: #ffffff;
+}
+
+.optimizer-run-panel {
+  margin-top: 14px;
+}
+
+.optimizer-progress {
+  display: grid;
+  gap: 8px;
+  border: 1px solid #263337;
+  border-radius: 5px;
+  background: #0f1618;
+  padding: 10px;
+}
+
+.optimizer-progress > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: #d7e2dc;
+  font-size: 0.86rem;
+}
+
+.optimizer-progress .optimizer-progress-stats {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  color: #8fa39d;
+}
+
+.optimizer-progress progress {
+  width: 100%;
+  height: 10px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 999px;
+  background: #263337;
+}
+
+.optimizer-progress progress::-webkit-progress-bar {
+  background: #263337;
+}
+
+.optimizer-progress progress::-webkit-progress-value {
+  background: #55d5d8;
+}
+
+.optimizer-progress progress::-moz-progress-bar {
+  background: #55d5d8;
+}
+
+.run-criteria-summary {
+  margin: 0;
+  color: #8fa39d;
+  font-size: 0.86rem;
+}
+
+.optimizer-result-list {
+  display: grid;
+  gap: 10px;
+}
+
 .optimizer-results-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -2352,6 +2474,14 @@ body {
   display: grid;
   gap: 4px;
   margin-top: 6px;
+}
+
+.candidate-passive-icons {
+  margin-top: 4px;
+}
+
+.candidate-passive-icons small {
+  color: #9fb1b0;
 }
 
 .candidate-spell-icon-row {

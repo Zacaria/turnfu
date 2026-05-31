@@ -90,6 +90,24 @@ export function scoreComboSimulation(
   };
 }
 
+export function scoreSustainableComboSimulation(
+  simulation: ComboSimulationResult,
+  character: SimulatedCharacter,
+  criterion: ComboOptimizationCriterion = { type: "totalDamage" },
+): ComboScoreBreakdown {
+  const baseScore = scoreComboSimulation(simulation, criterion);
+  const finalResources = simulation.finalState.remainingResources;
+  const bqRatio = clampRatio(finalResources.bq / 1_000);
+  const initialWp = character.resources.wp;
+  const wpRatio = initialWp > 0 ? clampRatio(finalResources.wp / initialWp) : 0;
+  const multiplier = 1 + 0.08 * bqRatio + 0.04 * wpRatio;
+
+  return {
+    ...baseScore,
+    score: roundDamage(baseScore.score * multiplier),
+  };
+}
+
 export function optimizeCombo(options: ComboOptimizerOptions): ComboOptimizerResult[] {
   if (options.beamWidth && options.beamWidth > 0) {
     const ranked = optimizeComboWithBeamSearch(options);
@@ -129,7 +147,9 @@ export function optimizeCombo(options: ComboOptimizerOptions): ComboOptimizerRes
     results.push({
       plan,
       simulation,
-      score: scoreComboSimulation(simulation, options.criterion),
+      score: options.requireSustainableCycle
+        ? scoreSustainableComboSimulation(simulation, options.character, options.criterion)
+        : scoreComboSimulation(simulation, options.criterion),
       sustainability,
     });
   }
@@ -206,7 +226,7 @@ function generateCandidatePlans(options: ComboOptimizerOptions): ComboPlan[] {
   const minTurns = options.exactTurnCount ? clampInteger(options.exactTurnCount, 1, 3) : 1;
   const turnLimit = options.exactTurnCount ? minTurns : maxTurns;
   const maxActionsPerTurn = clampInteger(options.maxActionsPerTurn ?? 12, 1, 12);
-  const turnPlans = generateTurnPlans(getSearchSpellIds(options), maxActionsPerTurn);
+  const turnPlans = generateTurnPlans(getSearchActions(options), maxActionsPerTurn);
   const plans: ComboPlan[] = [];
 
   for (let turnCount = minTurns; turnCount <= turnLimit; turnCount += 1) {
@@ -228,12 +248,12 @@ function optimizeComboWithBeamSearch(options: ComboOptimizerOptions): ComboOptim
   const targetTurnCount = clampInteger(options.exactTurnCount ?? options.maxTurns, 1, 3);
   const maxActionsPerTurn = options.maxActionsPerTurn ? clampInteger(options.maxActionsPerTurn, 1, 12) : undefined;
   const beamWidth = clampInteger(options.beamWidth ?? 1, 1, 500);
-  const spellIds = getSearchSpellIds(options);
+  const searchActions = getSearchActions(options);
   const completed = new Map<string, ComboOptimizerResult>();
   let frontier: BeamSearchEntry[] = [];
 
-  for (const spellId of spellIds) {
-    const plan = { turns: [{ actions: [{ spellId }] }] };
+  for (const action of searchActions) {
+    const plan = { turns: [{ actions: [cloneAction(action)] }] };
     const entry = createBeamEntry(options, plan, new Set());
     if (!entry) {
       continue;
@@ -270,8 +290,8 @@ function optimizeComboWithBeamSearch(options: ComboOptimizerOptions): ComboOptim
         continue;
       }
 
-      for (const spellId of spellIds) {
-        const plan = appendActionToPlan(entry.plan, { spellId });
+      for (const action of searchActions) {
+        const plan = appendActionToPlan(entry.plan, cloneAction(action));
         const nextEntry = createBeamEntry(options, plan, entry.seenStateKeys);
         if (!nextEntry) {
           continue;
@@ -313,7 +333,9 @@ function createOptimizerResult(options: ComboOptimizerOptions, plan: ComboPlan):
   return {
     plan,
     simulation,
-    score: scoreComboSimulation(simulation, options.criterion),
+    score: options.requireSustainableCycle
+      ? scoreSustainableComboSimulation(simulation, options.character, options.criterion)
+      : scoreComboSimulation(simulation, options.criterion),
     sustainability,
   };
 }
@@ -417,7 +439,7 @@ function addCompletedCandidate(
 function appendActionToPlan(plan: ComboPlan, action: Action): ComboPlan {
   return {
     turns: plan.turns.map((turn, index) => index === plan.turns.length - 1
-      ? { actions: [...turn.actions.map((existingAction) => ({ ...existingAction })), action] }
+      ? { actions: [...turn.actions.map(cloneAction), cloneAction(action)] }
       : cloneTurnPlan(turn)),
   };
 }
@@ -471,11 +493,11 @@ function createLoopDetectionClassState(classState: ClassTurnState): ClassTurnSta
   };
 }
 
-function generateTurnPlans(spellIds: string[], maxActionsPerTurn: number): Array<{ actions: Action[] }> {
+function generateTurnPlans(searchActions: Action[], maxActionsPerTurn: number): Array<{ actions: Action[] }> {
   const plans: Array<{ actions: Action[] }> = [];
 
   for (let actionCount = 1; actionCount <= maxActionsPerTurn; actionCount += 1) {
-    for (const actions of combineActions(spellIds, actionCount)) {
+    for (const actions of combineActions(searchActions, actionCount)) {
       plans.push({ actions });
     }
   }
@@ -492,13 +514,13 @@ function combineTurnPlans(turnPlans: Array<{ actions: Action[] }>, turnCount: nu
   return turnPlans.flatMap((turnPlan) => tails.map((tail) => [cloneTurnPlan(turnPlan), ...tail.map(cloneTurnPlan)]));
 }
 
-function combineActions(spellIds: string[], actionCount: number): Action[][] {
+function combineActions(searchActions: Action[], actionCount: number): Action[][] {
   if (actionCount === 0) {
     return [[]];
   }
 
-  const tails = combineActions(spellIds, actionCount - 1);
-  return spellIds.flatMap((spellId) => tails.map((tail) => [{ spellId }, ...tail]));
+  const tails = combineActions(searchActions, actionCount - 1);
+  return searchActions.flatMap((action) => tails.map((tail) => [cloneAction(action), ...tail.map(cloneAction)]));
 }
 
 function getSearchSpellIds(options: ComboOptimizerOptions): string[] {
@@ -508,9 +530,29 @@ function getSearchSpellIds(options: ComboOptimizerOptions): string[] {
   return [...new Set(spellIds)].sort();
 }
 
+function getSearchActions(options: ComboOptimizerOptions): Action[] {
+  const entriesById = new Map(options.catalog.map((entry) => [entry.id, entry]));
+  return getSearchSpellIds(options).flatMap((spellId) => {
+    const actions: Action[] = [{ spellId }];
+    const entry = entriesById.get(spellId);
+    if (entry?.constraints.some((constraint) => constraint.type === "maxCastsPerTarget")) {
+      actions.push({ spellId, target: { kind: "emptyCell" } });
+    }
+    return actions;
+  });
+}
+
 function cloneTurnPlan(turnPlan: { actions: Action[] }): { actions: Action[] } {
   return {
-    actions: turnPlan.actions.map((action) => ({ ...action })),
+    actions: turnPlan.actions.map(cloneAction),
+  };
+}
+
+function cloneAction(action: Action): Action {
+  return {
+    ...action,
+    target: action.target ? { ...action.target } : undefined,
+    context: action.context ? { ...action.context } : undefined,
   };
 }
 
@@ -544,7 +586,11 @@ function computeActionResourceUse(action: ActionResult): number {
 }
 
 function serializePlan(plan: ComboPlan): string {
-  return plan.turns.map((turn) => turn.actions.map((action) => action.spellId).join(",")).join("|");
+  return plan.turns.map((turn) => turn.actions.map(serializeAction).join(",")).join("|");
+}
+
+function serializeAction(action: Action): string {
+  return action.target ? `${action.spellId}@${action.target.kind}` : action.spellId;
 }
 
 function clampInteger(value: number, min: number, max: number): number {
@@ -553,6 +599,13 @@ function clampInteger(value: number, min: number, max: number): number {
   }
 
   return Math.min(max, Math.max(min, Math.floor(value)));
+}
+
+function clampRatio(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.min(1, Math.max(0, value));
 }
 
 function createReplayCharacter(baseCharacter: SimulatedCharacter, previousFinalState: TurnState): SimulatedCharacter {
@@ -567,11 +620,12 @@ function createReplayCharacter(baseCharacter: SimulatedCharacter, previousFinalS
       bq: previousResources.bq,
     },
     stats: cloneStats(baseCharacter.stats),
-    classState: createReplayClassState(previousFinalState.classState),
+    classState: createReplayClassState(previousFinalState),
   };
 }
 
-function createReplayClassState(previousClassState: ClassTurnState): SimulatedCharacter["classState"] {
+function createReplayClassState(previousFinalState: TurnState): SimulatedCharacter["classState"] {
+  const previousClassState = previousFinalState.classState;
   if (!previousClassState.huppermage) {
     return undefined;
   }
@@ -599,10 +653,24 @@ function createReplayClassState(previousClassState: ClassTurnState): SimulatedCh
       bqMax: huppermage.bqMax,
       storedBq: huppermage.storedBq,
       haloChatoyantMarks: huppermage.haloChatoyantMarks,
+      cooldownsBySpellId: ageCooldowns(huppermage.cooldownsBySpellId, previousFinalState.castsBySpellId),
       deckSpellLimit: huppermage.deckSpellLimit,
       passiveLimit: huppermage.passiveLimit,
     },
   };
+}
+
+function ageCooldowns(cooldownsBySpellId: Record<string, number>, castsBySpellId: Record<string, number>): Record<string, number> {
+  const nextCooldowns: Record<string, number> = {};
+
+  for (const [spellId, cooldownRemaining] of Object.entries(cooldownsBySpellId)) {
+    const nextCooldown = castsBySpellId[spellId] ? cooldownRemaining : cooldownRemaining - 1;
+    if (nextCooldown > 0) {
+      nextCooldowns[spellId] = nextCooldown;
+    }
+  }
+
+  return nextCooldowns;
 }
 
 function cloneStats(stats: BaseStats): BaseStats {

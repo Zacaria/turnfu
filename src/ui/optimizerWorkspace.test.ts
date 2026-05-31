@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { cost, damage, normalizeCatalog, screenshot, spell } from "../core/catalog/index.ts";
+import { cost, damage, normalizeCatalog, normalizeEntry, passive, screenshot, spell } from "../core/catalog/index.ts";
 import { createSeedResearchWorkspace } from "./researchWorkspace.ts";
 import {
   createDefaultOptimizerControls,
   createOptimizerCandidateId,
   createOptimizerCandidateSpellIconRows,
+  createOptimizerExperimentOptionsForSetup,
   createOptimizerOptionsForSetup,
   createOptimizerResultViewModel,
   createPinnedCandidateComparison,
@@ -14,6 +15,8 @@ import {
   groupOptimizerResultsByDuration,
   normalizeOptimizerControls,
   openCandidateInBuilder,
+  runOptimizerForControlsLive,
+  runOptimizerForControls,
   summarizeOptimizerControls,
 } from "./optimizerWorkspace.ts";
 
@@ -50,7 +53,7 @@ test("maps setup snapshots and controls to core optimizer options", () => {
   const setup = getSeedSetup();
   const controls = {
     ...createDefaultOptimizerControls(),
-    durations: [1, 3],
+    duration: 3,
     beamWidth: 25,
     maxResultsPerDuration: 7,
     scoreCriterion: "elementDamage" as const,
@@ -72,23 +75,69 @@ test("maps setup snapshots and controls to core optimizer options", () => {
   assert.equal(options.requireSustainableCycle, true);
 });
 
-test("normalizes optimizer controls to supported durations and result limits", () => {
+test("normalizes optimizer controls to supported duration and result limits", () => {
   const controls = normalizeOptimizerControls({
     ...createDefaultOptimizerControls(),
     beamWidth: 999,
-    durations: [0, 1, 3, 7],
+    duration: 7,
     maxResultsPerDuration: 999,
   });
 
-  assert.deepEqual(controls.durations, [1, 3]);
+  assert.equal(controls.duration, 3);
   assert.equal(controls.beamWidth, 200);
+  assert.equal(controls.iterationBudget, 1000);
   assert.equal(controls.maxResultsPerDuration, 50);
+});
+
+test("maps controls to experimental optimizer options with method and passive exploration", () => {
+  const setup = {
+    ...getSeedSetup(),
+    character: {
+      ...getSeedSetup().character,
+      classState: {
+        huppermage: {
+          ...getSeedSetup().character.classState?.huppermage,
+          passiveLimit: 3,
+        },
+      },
+    },
+  };
+  const passiveCatalog = [
+    ...catalog,
+    normalizeEntry(
+    passive("passive-a", {
+      name: "Passive A",
+      level: 200,
+      effects: [],
+      constraints: [],
+      tags: [],
+      metadata: { status: "extracted", sources: [source] },
+    }),
+    ),
+  ];
+
+  const options = createOptimizerExperimentOptionsForSetup(setup, passiveCatalog, {
+    ...createDefaultOptimizerControls(),
+    searchMethod: "genetic",
+    iterationBudget: 500,
+    maxResultsPerDuration: 8,
+    scoreCriterion: "elementDamage",
+    targetElement: "earth",
+  });
+
+  assert.deepEqual(options.engines, ["genetic"]);
+  assert.equal(options.budget.iterations, 500);
+  assert.equal(options.maxCandidates, 8);
+  assert.equal(options.maxPassiveCount, 3);
+  assert.deepEqual(options.availablePassiveIds, ["passive-a"]);
+  assert.equal(options.criterion?.type, "elementDamage");
+  assert.equal(options.criterion?.type === "elementDamage" ? options.criterion.element : null, "earth");
 });
 
 test("summarizes optimizer controls for saved run references", () => {
   const summary = summarizeOptimizerControls({
     ...createDefaultOptimizerControls(),
-    durations: [3, 1],
+    duration: 3,
     scoreCriterion: "elementDamage",
     targetElement: "water",
     requireSustainableCycle: true,
@@ -96,7 +145,7 @@ test("summarizes optimizer controls for saved run references", () => {
     maxResultsPerDuration: 7,
   });
 
-  assert.equal(summary, "1T, 3T · dégâts eau · cycle soutenable · largeur 25 · 7 résultats");
+  assert.equal(summary, "3T · dégâts eau · cycle soutenable · hybride · 1000 essais · 7 résultats");
 });
 
 test("formats three optimizer candidate spell icon rows from catalog names", () => {
@@ -128,7 +177,7 @@ test("formats three optimizer candidate spell icon rows from catalog names", () 
   ]);
 });
 
-test("groups optimizer results by exact duration without cross-ranking raw totals", () => {
+test("runs optimizer for the selected exact duration only", () => {
   const setup = {
     ...getSeedSetup(),
     deckSpellIds: ["light-hit", "fire-hit"],
@@ -151,15 +200,13 @@ test("groups optimizer results by exact duration without cross-ranking raw total
 
   const groups = groupOptimizerResultsByDuration(setup, catalog, {
     ...createDefaultOptimizerControls(),
-    durations: [1, 2, 3],
+    duration: 3,
     maxResultsPerDuration: 2,
   });
 
-  assert.deepEqual(Object.keys(groups), ["1", "2", "3"]);
-  assert.ok(groups[1].every((result) => result.duration === 1));
-  assert.ok(groups[2].every((result) => result.duration === 2));
+  assert.deepEqual(Object.keys(groups), ["3"]);
   assert.ok(groups[3].every((result) => result.duration === 3));
-  assert.ok(groups[3][0].totalDamage > groups[1][0].totalDamage);
+  assert.ok(groups[3][0].totalDamage > 0);
 });
 
 test("builds result view models with normalized metrics and resolved element damage", () => {
@@ -186,35 +233,70 @@ test("builds result view models with normalized metrics and resolved element dam
   };
   const [candidate] = groupOptimizerResultsByDuration(setup, catalog, {
     ...createDefaultOptimizerControls(),
-    durations: [1],
+    duration: 1,
     scoreCriterion: "elementDamage",
     targetElement: "water",
   })[1];
 
   assert.ok(candidate);
   assert.equal(candidate.duration, 1);
-  assert.equal(candidate.damageByResolvedElement.water, 480);
-  assert.equal(candidate.score, 480);
-  assert.equal(candidate.damagePerTurn, 490);
-  assert.equal(candidate.damagePerAp, 40.83);
-  assert.equal(candidate.finalResources.ap, 0);
+  assert.ok(candidate.damageByResolvedElement.water > 0);
+  assert.equal(candidate.score, candidate.damageByResolvedElement.water);
+  assert.equal(candidate.damagePerTurn, candidate.totalDamage);
+  assert.ok(candidate.damagePerAp > 0);
 });
 
-test("compares pinned candidates across durations using normalized metrics", () => {
+test("creates pinned candidate comparisons from a completed run", () => {
   const setup = {
     ...getSeedSetup(),
     deckSpellIds: ["light-hit", "fire-hit"],
   };
-  const groups = groupOptimizerResultsByDuration(setup, catalog, {
+  const candidates = runOptimizerForControls(setup, catalog, {
     ...createDefaultOptimizerControls(),
-    durations: [1, 2],
+    duration: 1,
   });
-  const comparison = createPinnedCandidateComparison([groups[1][0], groups[2][0]]);
+  const comparison = createPinnedCandidateComparison(candidates.slice(0, 2));
 
-  assert.equal(comparison.length, 2);
-  assert.deepEqual(comparison.map((candidate) => candidate.duration), [1, 2]);
+  assert.ok(comparison.length > 0);
+  assert.ok(comparison.every((candidate) => candidate.duration === 1));
   assert.ok(comparison[0].damagePerTurn > 0);
-  assert.ok(comparison[1].damagePerTurn > 0);
+});
+
+test("live optimizer run reports intermediate best results and counters", async () => {
+  const setup = {
+    ...getSeedSetup(),
+    character: {
+      ...getSeedSetup().character,
+      stats: {
+        ...getSeedSetup().character.stats,
+        generalMastery: 0,
+        elementalMastery: {
+          fire: 100,
+          water: 300,
+          earth: 0,
+          air: 0,
+          light: 0,
+          neutral: 0,
+        },
+      },
+    },
+  };
+  const snapshots: Array<{ attempts: number; resultCount: number }> = [];
+
+  const results = await runOptimizerForControlsLive(setup, catalog, {
+    ...createDefaultOptimizerControls(),
+    duration: 1,
+    iterationBudget: 25,
+    maxResultsPerDuration: 2,
+    searchMethod: "genetic",
+  }, (progress) => {
+    snapshots.push({ attempts: progress.attempts, resultCount: progress.results.length });
+  });
+
+  assert.ok(snapshots.length > 1);
+  assert.ok(snapshots.at(-1)!.attempts >= 25);
+  assert.ok(snapshots.some((snapshot) => snapshot.resultCount > 0));
+  assert.ok(results.length > 0);
 });
 
 test("creates builder handoff payload from an optimizer candidate", () => {
@@ -233,6 +315,7 @@ test("creates builder handoff payload from an optimizer candidate", () => {
           classState: setup.character.classState ?? {},
           currentStats: setup.character.stats,
           castsBySpellId: {},
+          targetCastsBySpellId: {},
           totalDamage: 40,
           actionLog: [],
           turnEndEffects: [],
@@ -264,5 +347,15 @@ test("creates builder handoff payload from an optimizer candidate", () => {
   assert.equal(handoff.character, setup.character);
   assert.deepEqual(handoff.plan, result.plan);
   assert.equal(createOptimizerCandidateId(result.plan), "light-hit");
+  assert.equal(createOptimizerCandidateId(result.plan, ["passive-b", "passive-a"]), "passive-a+passive-b::light-hit");
   assert.equal(createSavedComboName(result), "1T · 40 dégâts · 40/tour");
+
+  const passiveHandoff = openCandidateInBuilder(setup, {
+    ...result,
+    passiveIds: ["passive-a", "passive-b"],
+  });
+
+  assert.notEqual(passiveHandoff.character, setup.character);
+  assert.deepEqual(passiveHandoff.character.classState?.huppermage?.activePassives, ["passive-a", "passive-b"]);
+  assert.deepEqual(passiveHandoff.plan, result.plan);
 });

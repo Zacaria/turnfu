@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import {
+  ArrowLeft,
   ClipboardPaste,
   Copy,
   Eye,
@@ -79,7 +80,8 @@ import {
   ResearchLibraryPage,
   SavedComboComparisonPage,
   SetupPage,
-} from "./ResearchWorkspacePages.tsx";
+  type OptimizerWorkspaceSession,
+} from "./ResearchWorkspacePages.tsx?v=optimizer-session-ref-v1";
 import {
   createBalancedElementSet,
   createBuild,
@@ -106,7 +108,7 @@ import {
   returnToBuild,
   returnToPrevious,
   type ResearchRoute,
-} from "./researchNavigation.ts";
+} from "./researchNavigation.ts?v=builder-return-v1";
 import {
   getAptitudeIconSrc,
   getElementMasteryIconSrc,
@@ -128,7 +130,7 @@ import {
   supportedLocales,
   t,
   type UiLocale,
-} from "./i18n.ts?v=state-tracker-v12";
+} from "./i18n.ts?v=optimizer-session-ref-v1";
 import { getRuneIconSrc } from "./spellAttributeIcons.ts";
 import { getStatStep } from "./statControls.ts";
 import {
@@ -187,6 +189,8 @@ export function App() {
       : restoreResearchWorkspace(window.localStorage)
   ));
   const [researchRoute, setResearchRoute] = useState<ResearchRoute>(() => createResearchRoute());
+  const optimizerSessionsRef = useRef<Record<string, OptimizerWorkspaceSession>>({});
+  const [optimizerSessions, setOptimizerSessions] = useState<Record<string, OptimizerWorkspaceSession>>({});
   const [buildClassFilter, setBuildClassFilter] = useState<WakfuClassId | "all">("all");
   const [characterConfig, setCharacterConfig] = useState<SimulatedCharacter>(() => createDefaultCharacter());
   const [equipmentCharacter, setEquipmentCharacter] = useState<SimulatedCharacter>(() => createDefaultEquipmentCharacter());
@@ -315,18 +319,38 @@ export function App() {
   }
 
   function openSetupInBuilder(setup: SetupSnapshot, candidate?: OptimizerCandidateViewModel) {
-    openSetupPlanInBuilder(setup, candidate?.plan);
+    if (!candidate) {
+      openSetupPlanInBuilder(setup);
+      return;
+    }
+
+    const handoff = openCandidateInBuilder(setup, candidate);
+    applySetupToBuilder({ ...setup, character: handoff.character }, handoff.plan);
+    setResearchRoute((route) => openBuilderFromSetup(route, setup.buildId, setup.id));
   }
 
   function openSetupPlanInBuilder(setup: SetupSnapshot, plan?: ComboPlan) {
     applySetupToBuilder(setup, plan);
-    setResearchRoute(openBuilderFromSetup(researchRoute, setup.buildId, setup.id));
+    setResearchRoute((route) => openBuilderFromSetup(route, setup.buildId, setup.id));
   }
 
   function openSavedComboInBuilder(combo: SavedComboReference) {
     const setup = researchWorkspace.setupSnapshots.find((candidate) => candidate.id === combo.setupSnapshotId);
     if (setup) {
-      openSetupPlanInBuilder(setup, combo.plan);
+      const character = combo.passiveIds?.length
+        ? {
+          ...setup.character,
+          classState: {
+            ...setup.character.classState,
+            huppermage: {
+              ...setup.character.classState?.huppermage,
+              activePassives: [...combo.passiveIds],
+            },
+          },
+        }
+        : setup.character;
+      applySetupToBuilder({ ...setup, character }, combo.plan);
+      setResearchRoute((route) => openBuilderFromSetup(route, setup.buildId, setup.id));
     }
   }
 
@@ -351,10 +375,20 @@ export function App() {
       setupSnapshotId: setup.id,
       name: createSavedComboName(candidate),
       plan: candidate.plan,
+      passiveIds: candidate.passiveIds,
       totalDamage: candidate.totalDamage,
       criteriaSummary: summarizeOptimizerControls(controls),
       now: new Date().toISOString(),
     }));
+  }
+
+  function storeOptimizerSession(setupId: string, session: OptimizerWorkspaceSession) {
+    const nextSessions = {
+      ...optimizerSessionsRef.current,
+      [setupId]: session,
+    };
+    optimizerSessionsRef.current = nextSessions;
+    setOptimizerSessions(nextSessions);
   }
 
   function applySetupToBuilder(setup: SetupSnapshot, plan?: ComboPlan) {
@@ -807,15 +841,17 @@ export function App() {
         <OptimizerWorkspacePage
           build={activeBuild}
           catalog={catalog}
+          initialSession={optimizerSessionsRef.current[activeSetup.id] ?? optimizerSessions[activeSetup.id]}
+          key={activeSetup.id}
           setup={activeSetup}
           savedCandidateIds={savedCandidateIds}
           onBack={() => setResearchRoute(returnToPrevious(researchRoute))}
           onOpenCandidate={(candidate) => {
-            openCandidateInBuilder(activeSetup, candidate);
             openSetupInBuilder(activeSetup, candidate);
           }}
           onSaveCandidate={(candidate, controls) => saveOptimizerCombo(activeSetup, candidate, controls)}
           onSaveRun={(controls) => saveOptimizerRun(activeSetup, controls)}
+          onSessionChange={(session) => storeOptimizerSession(activeSetup.id, session)}
         />
       </>
     );
@@ -826,6 +862,13 @@ export function App() {
       <AppHeader locale={locale} onChangeLocale={changeLocale} onOpenLibrary={() => setResearchRoute(returnToBuild(researchRoute))} />
 
       <main className="app-shell">
+        {researchRoute.page === "builder" && researchRoute.returnTo ? (
+          <button className="back-button builder-back-button" type="button" onClick={() => setResearchRoute(returnToPrevious(researchRoute))}>
+            <ArrowLeft size={16} />
+            {getBuilderBackLabel(researchRoute)}
+          </button>
+        ) : null}
+
         <section className="live-results" aria-label={t("app.liveResults")}>
           <div className="brand-block">
             <span>{t("app.className")}</span>
@@ -1319,6 +1362,25 @@ function getTimelineLaneBounds(turnStack: HTMLDivElement | null): DOMRect[] {
     .map((element) => element.getBoundingClientRect());
 }
 
+function getBuilderBackLabel(route: ResearchRoute): string {
+  switch (route.returnTo?.page) {
+    case "setup":
+      return "Retour au set";
+    case "optimizer":
+      return "Retour à l'optimizer";
+    case "optimizerRun":
+      return "Retour au run";
+    case "savedCombos":
+      return "Retour aux comparaisons";
+    case "build":
+      return "Retour au build";
+    case "library":
+      return "Retour aux builds";
+    default:
+      return "Retour";
+  }
+}
+
 function PanelHeader({ title, subtitle }: { title: string; subtitle?: string }) {
   return (
     <div className="panel-header">
@@ -1576,7 +1638,18 @@ function RuneStrip({
               last: isLast ? ` - ${t("runes.last")}` : "",
             })}
           >
-            <img className="huppermage-rune-aura-icon" alt="" src={getRuneIconSrc(rune)} />
+            <img
+              className="huppermage-rune-aura-icon"
+              alt=""
+              src={getRuneIconSrc(rune)}
+              style={{
+                height: "calc(var(--rune-aura-size) * 0.7)",
+                maxHeight: "100%",
+                maxWidth: "100%",
+                objectFit: "contain",
+                width: "calc(var(--rune-aura-size) * 0.7)",
+              }}
+            />
           </HuppermageRuneAura>
         );
       })}
@@ -2557,6 +2630,8 @@ function stepToPercent(step: number, max: number): number {
 
 function SnapshotInspector({ snapshot }: { snapshot: TimelineSnapshot }) {
   const huppermage = snapshot.classState.huppermage;
+  const huppermageRunes = huppermage?.runes;
+  const activePassives = huppermage?.activePassives ?? [];
   const summarizedStatIcons = [
     getStatIconSrc("level"),
     getStatIconSrc("hitPoints"),
@@ -2589,10 +2664,10 @@ function SnapshotInspector({ snapshot }: { snapshot: TimelineSnapshot }) {
         <h3>{t("inspector.huppermageState")}</h3>
         <dl className="state-list">
           <div><dt>{t("inspector.heart")}</dt><dd>{formatHeart(huppermage?.activeHeart)}</dd></div>
-          <div><dt>{t("inspector.lastRune")}</dt><dd>{huppermage?.runes.lastGeneratedRune ? formatRuneLabel(huppermage.runes.lastGeneratedRune) : t("value.nonePlural")}</dd></div>
+          <div><dt>{t("inspector.lastRune")}</dt><dd>{huppermageRunes?.lastGeneratedRune ? formatRuneLabel(huppermageRunes.lastGeneratedRune) : t("value.nonePlural")}</dd></div>
           <div><dt>{t("huppermage.feuFollets")}</dt><dd>{huppermage?.feuFolletsActive ?? 0}</dd></div>
-          <div><dt>{t("inspector.activeRunes")}</dt><dd>{runeOptions.filter((rune) => huppermage?.runes.active[rune]).map(formatRuneLabel).join(", ") || t("value.nonePlural")}</dd></div>
-          <div><dt>{t("inspector.passives")}</dt><dd>{huppermage?.activePassives.join(", ") || t("value.none")}</dd></div>
+          <div><dt>{t("inspector.activeRunes")}</dt><dd>{runeOptions.filter((rune) => huppermageRunes?.active[rune]).map(formatRuneLabel).join(", ") || t("value.nonePlural")}</dd></div>
+          <div><dt>{t("inspector.passives")}</dt><dd>{activePassives.join(", ") || t("value.none")}</dd></div>
         </dl>
       </section>
       <section>
@@ -2674,8 +2749,30 @@ function StatStepper({
   suffix?: string;
   value: number;
 }) {
+  const [draftValue, setDraftValue] = useState(() => formatNumber(value));
+  const [editing, setEditing] = useState(false);
+
+  useEffect(() => {
+    if (!editing) {
+      setDraftValue(formatNumber(value));
+    }
+  }, [editing, value]);
+
   function adjust(event: React.MouseEvent<HTMLButtonElement>, direction: -1 | 1) {
     onChange(direction * getStatStep(event));
+  }
+
+  function commitDraft(nextDraft: string) {
+    setDraftValue(nextDraft);
+    const parsed = Number(nextDraft.replace(",", "."));
+    if (Number.isFinite(parsed)) {
+      onChange(parsed - value);
+    }
+  }
+
+  function resetDraft() {
+    setEditing(false);
+    setDraftValue(formatNumber(value));
   }
 
   return (
@@ -2685,7 +2782,31 @@ function StatStepper({
         {element ? <ElementIcon element={element} /> : null}
       </span>
       <span className="stat-stepper-label">{label}</span>
-      <strong className="stat-stepper-value">{formatNumber(value)}{suffix}</strong>
+      <strong className="stat-stepper-value">
+        <input
+          aria-label={label}
+          className="stat-stepper-value-input"
+          inputMode="decimal"
+          value={editing ? draftValue : formatNumber(value)}
+          onBlur={resetDraft}
+          onChange={(event) => commitDraft(event.target.value)}
+          onFocus={(event) => {
+            setEditing(true);
+            setDraftValue(formatNumber(value));
+            event.currentTarget.select();
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.currentTarget.blur();
+            }
+            if (event.key === "Escape") {
+              resetDraft();
+              event.currentTarget.blur();
+            }
+          }}
+        />
+        {suffix ? <span>{suffix}</span> : null}
+      </strong>
       <span className="stat-stepper-actions">
         <button type="button" title={formatUiMessage("stat.decrementTitle", { label })} onClick={(event) => adjust(event, -1)}>-</button>
         <button type="button" title={formatUiMessage("stat.incrementTitle", { label })} onClick={(event) => adjust(event, 1)}>+</button>

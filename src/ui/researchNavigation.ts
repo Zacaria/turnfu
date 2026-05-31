@@ -107,10 +107,10 @@ export function openBuilderFromSetup(_route: ResearchRoute, buildId: string, set
     page: "builder",
     buildId,
     setupSnapshotId,
-    returnTo: {
+    returnTo: _route.page === "builder" ? {
       page: "build",
       buildId,
-    },
+    } : _route,
   };
 }
 

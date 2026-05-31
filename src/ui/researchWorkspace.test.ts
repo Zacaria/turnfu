@@ -21,7 +21,6 @@ import {
   openOptimizerRun,
   openSavedComboComparison,
   openSetup,
-  returnToBuild,
   returnToPrevious,
 } from "./researchNavigation.ts";
 
@@ -47,12 +46,18 @@ test("serializes setup snapshots with final stats, resources, equipment notes an
   assert.ok(setup);
   assert.equal(setup.classId, "huppermage");
   assert.equal(setup.character.resources.bq, 500);
-  assert.equal(setup.equipmentNotes, "Stats finales saisies manuellement; les items ne sont pas modelises.");
+  assert.equal(setup.equipmentNotes, "Set de référence avec 1200 maîtrise générale et 1200 maîtrise sur Feu/Eau/Terre/Air; les items ne sont pas modelises.");
   assert.ok(setup.passiveIds.includes("extension-des-sens"));
   assert.ok(setup.deckSpellIds.length > 0);
   assert.equal(setup.target.kind, "enemy");
   assert.equal(setup.defaultActionContext.rangeMode, "distance");
   assert.equal(setup.character.classState?.huppermage?.bqMax, 500);
+  assert.equal(setup.name, "Set 1200 maîtrise 4 éléments");
+  assert.equal(setup.character.stats.generalMastery, 1200);
+  assert.equal(setup.character.stats.elementalMastery.fire, 1200);
+  assert.equal(setup.character.stats.elementalMastery.water, 1200);
+  assert.equal(setup.character.stats.elementalMastery.earth, 1200);
+  assert.equal(setup.character.stats.elementalMastery.air, 1200);
 });
 
 test("saves and restores workspace data from local storage", () => {
@@ -116,6 +121,7 @@ test("creates optimizer run and saved combo references for a build setup", () =>
     setupSnapshotId: setup.id,
     name: "Combo 2T eau",
     plan: { turns: [{ actions: [{ spellId: "lueur-de-laube" }] }] },
+    passiveIds: ["carnage", "extension-des-sens"],
     totalDamage: 480,
     criteriaSummary: "2T · dégâts eau",
     now: "2026-05-26T10:06:00.000Z",
@@ -124,6 +130,7 @@ test("creates optimizer run and saved combo references for a build setup", () =>
   assert.ok(combo);
   assert.equal(combo.name, "Combo 2T eau");
   assert.equal(combo.totalDamage, 480);
+  assert.deepEqual(combo.passiveIds, ["carnage", "extension-des-sens"]);
   assert.equal(combo.criteriaSummary, "2T · dégâts eau");
   assert.deepEqual(withCombo.builds[0].savedComboIds, [combo.id]);
   assert.equal(withCombo.builds[0].updatedAt, "2026-05-26T10:06:00.000Z");
@@ -146,12 +153,12 @@ test("creates balanced element set variants without mutating the source set", ()
   assert.notEqual(balancedSet.id, sourceSetup.id);
   assert.equal(balancedSet.buildId, sourceSetup.buildId);
   assert.equal(balancedSet.name, "Set multi équilibré");
-  assert.equal(balancedSet.character.stats.elementalMastery.fire, 463);
-  assert.equal(balancedSet.character.stats.elementalMastery.water, 463);
-  assert.equal(balancedSet.character.stats.elementalMastery.earth, 463);
-  assert.equal(balancedSet.character.stats.elementalMastery.air, 463);
-  assert.equal(sourceSetup.character.stats.elementalMastery.fire, 400);
-  assert.equal(sourceSetup.character.stats.elementalMastery.water, 700);
+  assert.equal(balancedSet.character.stats.elementalMastery.fire, 1200);
+  assert.equal(balancedSet.character.stats.elementalMastery.water, 1200);
+  assert.equal(balancedSet.character.stats.elementalMastery.earth, 1200);
+  assert.equal(balancedSet.character.stats.elementalMastery.air, 1200);
+  assert.equal(sourceSetup.character.stats.elementalMastery.fire, 1200);
+  assert.equal(sourceSetup.character.stats.elementalMastery.water, 1200);
   assert.deepEqual(nextWorkspace.builds[0].setupSnapshotIds, [sourceSetup.id, balancedSet.id]);
   assert.equal(nextWorkspace.builds[0].updatedAt, "2026-05-26T11:00:00.000Z");
 });
@@ -177,13 +184,14 @@ test("preserves build and setup context across navigation", () => {
   const buildRoute = openBuild(route, setup.buildId);
   const setupRoute = openSetup(buildRoute, setup.buildId, setup.id);
   const builderRoute = openBuilderFromSetup(setupRoute, setup.buildId, setup.id);
-  const returnedRoute = returnToBuild(builderRoute);
+  const returnedRoute = returnToPrevious(builderRoute);
 
   assert.equal(builderRoute.page, "builder");
   assert.equal(builderRoute.buildId, setup.buildId);
   assert.equal(builderRoute.setupSnapshotId, setup.id);
-  assert.equal(returnedRoute.page, "build");
+  assert.equal(returnedRoute.page, "setup");
   assert.equal(returnedRoute.buildId, setup.buildId);
+  assert.equal(returnedRoute.setupSnapshotId, setup.id);
 });
 
 test("navigates to saved optimizer run and saved combo comparison pages", () => {

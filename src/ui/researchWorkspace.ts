@@ -79,6 +79,7 @@ export type SavedComboReference = {
   setupSnapshotId: string;
   name: string;
   plan: ComboPlan;
+  passiveIds?: string[];
   totalDamage?: number;
   criteriaSummary?: string;
   createdAt: string;
@@ -112,6 +113,7 @@ export type SaveOptimizerCandidateComboInput = {
   setupSnapshotId: string;
   name?: string;
   plan: ComboPlan;
+  passiveIds?: string[];
   totalDamage?: number;
   criteriaSummary?: string;
   now?: string;
@@ -155,10 +157,10 @@ export function createSeedResearchWorkspace({ now = new Date().toISOString() }: 
     id: setupId,
     buildId,
     version: 1,
-    name: "Set distance lumière v1",
+    name: "Set 1200 maîtrise 4 éléments",
     classId: "huppermage",
     character,
-    equipmentNotes: "Stats finales saisies manuellement; les items ne sont pas modelises.",
+    equipmentNotes: "Set de référence avec 1200 maîtrise générale et 1200 maîtrise sur Feu/Eau/Terre/Air; les items ne sont pas modelises.",
     deckSpellIds: ["lueur-de-laube", "coeur-de-lumiere", "rayon-crepusculaire", "cycle-elementaire"],
     passiveIds,
     target: defaultActionTarget,
@@ -172,10 +174,10 @@ export function createSeedResearchWorkspace({ now = new Date().toISOString() }: 
     builds: [
       {
         id: buildId,
-        name: "Huppermage lumière distance",
+        name: "Huppermage 1200 maîtrise 4 éléments",
         classId: "huppermage",
         gameplayLabel: "Cycle lumière / BQ",
-        notes: "Build de départ pour comparer les cycles lumière soutenables.",
+        notes: "Build de départ pour explorer les meilleurs combos T2 avec une base 1200 équilibrée.",
         setupSnapshotIds: [setupId],
         optimizerRunIds: [],
         savedComboIds: [],
@@ -211,10 +213,10 @@ export function createBuild(
     id: setupId,
     buildId,
     version: 1,
-    name: "Set v1",
+    name: "Set 1200 maîtrise 4 éléments",
     classId: input.classId,
     character,
-    equipmentNotes: "Stats finales saisies manuellement; les items ne sont pas modelises.",
+    equipmentNotes: "Set de référence avec 1200 maîtrise générale et 1200 maîtrise sur Feu/Eau/Terre/Air; les items ne sont pas modelises.",
     deckSpellIds: ["lueur-de-laube", "coeur-de-lumiere", "rayon-crepusculaire", "cycle-elementaire"],
     passiveIds,
     target: defaultActionTarget,
@@ -348,6 +350,7 @@ export function saveOptimizerCandidateCombo(
     setupSnapshotId: input.setupSnapshotId,
     name,
     plan: input.plan,
+    passiveIds: input.passiveIds?.length ? [...input.passiveIds].sort() : undefined,
     totalDamage: input.totalDamage,
     criteriaSummary: input.criteriaSummary?.trim() || undefined,
     createdAt: now,
@@ -440,10 +443,10 @@ function createSeedHuppermageCharacter(): SimulatedCharacter {
       ...character.stats,
       generalMastery: 1200,
       elementalMastery: {
-        fire: 400,
-        water: 700,
-        earth: 450,
-        air: 300,
+        fire: 1200,
+        water: 1200,
+        earth: 1200,
+        air: 1200,
         light: 0,
         neutral: 0,
       },

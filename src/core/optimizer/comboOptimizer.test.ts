@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { cost, damage, normalizeCatalog, screenshot, spell } from "../catalog/index.ts";
+import { cost, damage, maxCastsPerTarget, maxCastsPerTurn, normalizeCatalog, resourceDelta, screenshot, spell } from "../catalog/index.ts";
 import { createResources, simulateCombo } from "../simulation/index.ts";
-import { evaluateSustainableCycle, optimizeCombo, scoreComboSimulation } from "./comboOptimizer.ts";
+import { evaluateSustainableCycle, optimizeCombo, scoreComboSimulation, scoreSustainableComboSimulation } from "./comboOptimizer.ts";
 import type { CatalogEntry } from "../catalog/types.ts";
 import type { SimulatedCharacter } from "../simulation/types.ts";
 
@@ -66,6 +66,18 @@ const catalog = normalizeCatalog([
     cost: cost({}),
     effects: [],
     constraints: [],
+    metadata: { status: "extracted", sources: [source] },
+  }),
+  spell("target-limited-setup", {
+    name: "Target Limited Setup",
+    level: 200,
+    element: "fire",
+    cost: cost({ ap: 1 }),
+    effects: [
+      damage({ element: "fire", base: 10 }),
+      resourceDelta({ resource: "bq", amount: 25 }),
+    ],
+    constraints: [maxCastsPerTarget(1), maxCastsPerTurn(1)],
     metadata: { status: "extracted", sources: [source] },
   }),
 ]) as CatalogEntry[];
@@ -167,6 +179,28 @@ test("scores total combo damage", () => {
   assert.equal(score.damageByResolvedElement.fire, 20);
 });
 
+test("adds bounded BQ and PW value only to sustainable cycle scores", () => {
+  const simulation = simulateCombo({
+    catalog,
+    character: {
+      ...character,
+      resources: createResources({ ap: 6, mp: 3, wp: 1, bq: 1_000 }),
+    },
+    combo: {
+      turns: [
+        { actions: [{ spellId: "light-hit" }] },
+      ],
+    },
+  });
+
+  const damageScore = scoreComboSimulation(simulation, { type: "totalDamage" });
+  const cycleScore = scoreSustainableComboSimulation(simulation, character, { type: "totalDamage" });
+
+  assert.equal(damageScore.score, 40);
+  assert.equal(cycleScore.totalDamage, 40);
+  assert.equal(cycleScore.score, 44.8);
+});
+
 test("searches bounded combo plans up to three turns and ranks by score", () => {
   const results = optimizeCombo({
     catalog,
@@ -186,6 +220,25 @@ test("searches bounded combo plans up to three turns and ranks by score", () => 
     "light-hit",
   ]);
   assert.equal(results[0].score.score, 120);
+});
+
+test("generates empty-cell casts for target-limited spells", () => {
+  const results = optimizeCombo({
+    catalog,
+    character,
+    availableSpellIds: ["target-limited-setup"],
+    criterion: { type: "totalDamage" },
+    maxTurns: 1,
+    exactTurnCount: 1,
+    maxActionsPerTurn: 2,
+    beamWidth: 10,
+  });
+
+  assert.ok(results.some((result) =>
+    result.plan.turns.some((turn) =>
+      turn.actions.some((action) => action.target?.kind === "emptyCell")
+    )
+  ));
 });
 
 test("limits returned optimizer candidates deterministically", () => {
