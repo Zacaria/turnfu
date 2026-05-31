@@ -265,6 +265,10 @@ invalid candidates. Repair processing is also burst-capped to two consecutive
 repairs. After that, the loop must give queued elite neighbors or normal
 offspring a chance to run; this prevents repair cascades from starving
 exploration on long budgets.
+On very long T2 searches, the first restart immigrant is selected from a small
+set of random structural candidates by distance from the preserved elites. This
+adds diversity at restart time without spending extra simulations, and stays
+disabled for T3 where the same pressure proved noisier.
 
 Three-turn elite neighbors also include a small targeted relocate pass around
 Huppermage pivot spells such as `coeur-de-lumiere`, `runification`,

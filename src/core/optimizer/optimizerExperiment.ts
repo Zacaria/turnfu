@@ -749,7 +749,13 @@ function injectHybridImmigrants(
     if (context.options.signal?.aborted) {
       break;
     }
-    const input = context.rng.chance(0.35) && nextPopulation.length > 0
+    const shouldUseDiverseImmigrant = context.options.budget.iterations >= 1_000
+      && context.options.duration <= 2
+      && immigrantCount === 0
+      && nextPopulation.length > 0;
+    const input = shouldUseDiverseImmigrant
+      ? createHybridDiverseImmigrant(context, nextPopulation, accumulator)
+      : context.rng.chance(0.35) && nextPopulation.length > 0
       ? createHybridLocalRefinement(nextPopulation, context)
       : createHybridFreshCandidate(context, accumulator);
     const tracked = evaluateAndTrackImprovement(context, accumulator, input);
@@ -768,6 +774,47 @@ function injectHybridImmigrants(
     count: immigrantCount,
     improved,
   };
+}
+
+function createHybridDiverseImmigrant(
+  context: EngineContext,
+  population: Array<{ input: OptimizerExperimentCandidateInput; result: OptimizerExperimentCandidate }>,
+  accumulator: EngineAccumulator,
+): OptimizerExperimentCandidateInput {
+  const referenceDescriptors = population.map((entry) => createHybridInputDescriptor(entry.input));
+  let selected = context.sampler.random();
+  let selectedDistance = distanceToNearestHybridDescriptor(createHybridInputDescriptor(selected), referenceDescriptors);
+
+  for (let index = 1; index < 4; index += 1) {
+    const candidate = context.sampler.random();
+    const distance = distanceToNearestHybridDescriptor(createHybridInputDescriptor(candidate), referenceDescriptors);
+    if (distance > selectedDistance) {
+      selected = candidate;
+      selectedDistance = distance;
+    }
+  }
+
+  accumulator.metrics.hybridDiverseImmigrants = (accumulator.metrics.hybridDiverseImmigrants ?? 0) + 1;
+  return selected;
+}
+
+function createHybridInputDescriptor(input: OptimizerExperimentCandidateInput): string[] {
+  return [
+    `actions:${input.plan.turns.reduce((total, turn) => total + turn.actions.length, 0)}`,
+    `passives:${[...(input.passiveIds ?? [])].sort().join(",")}`,
+    ...input.plan.turns.flatMap((turn, turnIndex) => turn.actions.map((action) => `t${turnIndex}:${serializeAction(action)}`)),
+  ];
+}
+
+function distanceToNearestHybridDescriptor(descriptor: string[], references: string[][]): number {
+  if (references.length === 0) {
+    return 1;
+  }
+
+  return references.reduce(
+    (nearestDistance, reference) => Math.min(nearestDistance, descriptorDistance(descriptor, reference)),
+    1,
+  );
 }
 
 function createHybridOffspring(
