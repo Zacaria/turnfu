@@ -496,10 +496,13 @@ function runHybridSingleEngine(context: EngineContext): OptimizerExperimentEngin
   const immigrantBatchSize = Math.max(2, Math.ceil(populationSize * 0.25));
   const stagnationLimit = Math.max(8, Math.min(80, Math.floor(populationSize * 0.75)));
   const localRefinementInterval = Math.max(3, Math.floor(populationSize / 4));
+  // Keep repair cascades from starving elite-neighbor exploration on long searches.
+  const repairBurstLimit = 2;
   let population: Array<{ input: OptimizerExperimentCandidateInput; result: OptimizerExperimentCandidate }> = [];
   const eliteNeighborQueue: OptimizerExperimentCandidateInput[] = [];
   const repairQueue: OptimizerExperimentCandidateInput[] = [];
   let attemptsSinceImprovement = 0;
+  let consecutiveRepairAttempts = 0;
 
   while (accumulator.attempts < context.options.budget.iterations && population.length < populationSize) {
     if (context.options.signal?.aborted) {
@@ -527,6 +530,7 @@ function runHybridSingleEngine(context: EngineContext): OptimizerExperimentEngin
 
     if (population.length < 2) {
       const input = createHybridFreshCandidate(context, accumulator);
+      consecutiveRepairAttempts = 0;
       const { result, improved, repairCandidate } = evaluateAndTrackImprovement(context, accumulator, input);
       attemptsSinceImprovement = improved ? 0 : attemptsSinceImprovement + 1;
       if (result) {
@@ -545,12 +549,18 @@ function runHybridSingleEngine(context: EngineContext): OptimizerExperimentEngin
       const immigrants = injectHybridImmigrants(context, accumulator, population, eliteNeighborQueue, eliteCount, immigrantBatchSize, populationSize);
       population = immigrants.population;
       attemptsSinceImprovement = immigrants.improved ? 0 : Math.floor(stagnationLimit / 2);
+      consecutiveRepairAttempts = 0;
       accumulator.metrics.hybridRestarts = (accumulator.metrics.hybridRestarts ?? 0) + 1;
       accumulator.metrics.hybridImmigrants = (accumulator.metrics.hybridImmigrants ?? 0) + immigrants.count;
       continue;
     }
 
-    const repairNeighbor = repairQueue.shift();
+    const canProcessRepair = repairQueue.length > 0 && consecutiveRepairAttempts < repairBurstLimit;
+    if (repairQueue.length > 0 && !canProcessRepair) {
+      accumulator.metrics.hybridRepairDeferrals = (accumulator.metrics.hybridRepairDeferrals ?? 0) + 1;
+    }
+
+    const repairNeighbor = canProcessRepair ? repairQueue.shift() : undefined;
     const eliteNeighbor = repairNeighbor ? undefined : eliteNeighborQueue.shift();
     const shouldRefineLocally = !repairNeighbor && !eliteNeighbor && accumulator.attempts % localRefinementInterval === 0;
     const input = repairNeighbor
@@ -560,6 +570,9 @@ function runHybridSingleEngine(context: EngineContext): OptimizerExperimentEngin
         : createHybridOffspring(population, context, accumulator));
     if (repairNeighbor) {
       accumulator.metrics.hybridRepairCandidates = (accumulator.metrics.hybridRepairCandidates ?? 0) + 1;
+      consecutiveRepairAttempts += 1;
+    } else {
+      consecutiveRepairAttempts = 0;
     }
     if (eliteNeighbor) {
       accumulator.metrics.hybridEliteNeighborCandidates = (accumulator.metrics.hybridEliteNeighborCandidates ?? 0) + 1;
@@ -788,6 +801,7 @@ function enqueueHybridEliteNeighbors(
   const seen = new Set(queue.map((candidate) => serializeExperimentCandidate(normalizeCandidate(candidate))));
   let generated = 0;
   let pairReplacementGenerated = 0;
+  let relocateGenerated = 0;
 
   const addCandidate = (candidate: OptimizerExperimentCandidateInput, metric?: string): boolean => {
     if (queue.length >= maxQueueSize || generated >= maxGenerated) {
@@ -858,6 +872,26 @@ function enqueueHybridEliteNeighbors(
       actionsToSwap[actionIndex] = actionsToSwap[actionIndex + 1]!;
       actionsToSwap[actionIndex + 1] = left;
       addCandidate(candidate, "hybridOrderNeighborCandidates");
+    }
+
+    if (context.options.duration <= 2) {
+      for (let fromIndex = 0; fromIndex < turn.actions.length; fromIndex += 1) {
+        for (let toIndex = 0; toIndex < turn.actions.length; toIndex += 1) {
+          if (relocateGenerated >= 120) {
+            break;
+          }
+          if (fromIndex === toIndex || fromIndex + 1 === toIndex) {
+            continue;
+          }
+          const candidate = cloneCandidateInput(input);
+          const actionsToRelocate = candidate.plan.turns[turnIndex]!.actions;
+          const [action] = actionsToRelocate.splice(fromIndex, 1);
+          actionsToRelocate.splice(toIndex > fromIndex ? toIndex - 1 : toIndex, 0, action!);
+          if (addCandidate(candidate, "hybridRelocateNeighborCandidates")) {
+            relocateGenerated += 1;
+          }
+        }
+      }
     }
 
     for (let firstIndex = 0; firstIndex < turn.actions.length - 1; firstIndex += 1) {
@@ -1038,10 +1072,13 @@ async function runHybridSingleEngineProgressive(context: EngineContext): Promise
   const immigrantBatchSize = Math.max(2, Math.ceil(populationSize * 0.25));
   const stagnationLimit = Math.max(8, Math.min(80, Math.floor(populationSize * 0.75)));
   const localRefinementInterval = Math.max(3, Math.floor(populationSize / 4));
+  // Keep repair cascades from starving elite-neighbor exploration on long searches.
+  const repairBurstLimit = 2;
   let population: Array<{ input: OptimizerExperimentCandidateInput; result: OptimizerExperimentCandidate }> = [];
   const eliteNeighborQueue: OptimizerExperimentCandidateInput[] = [];
   const repairQueue: OptimizerExperimentCandidateInput[] = [];
   let attemptsSinceImprovement = 0;
+  let consecutiveRepairAttempts = 0;
 
   while (accumulator.attempts < context.options.budget.iterations && population.length < populationSize) {
     if (context.options.signal?.aborted) {
@@ -1070,6 +1107,7 @@ async function runHybridSingleEngineProgressive(context: EngineContext): Promise
 
     if (population.length < 2) {
       const input = createHybridFreshCandidate(context, accumulator);
+      consecutiveRepairAttempts = 0;
       const { result, improved, repairCandidate } = evaluateAndTrackImprovement(context, accumulator, input);
       attemptsSinceImprovement = improved ? 0 : attemptsSinceImprovement + 1;
       if (result) {
@@ -1089,13 +1127,19 @@ async function runHybridSingleEngineProgressive(context: EngineContext): Promise
       const immigrants = injectHybridImmigrants(context, accumulator, population, eliteNeighborQueue, eliteCount, immigrantBatchSize, populationSize);
       population = immigrants.population;
       attemptsSinceImprovement = immigrants.improved ? 0 : Math.floor(stagnationLimit / 2);
+      consecutiveRepairAttempts = 0;
       accumulator.metrics.hybridRestarts = (accumulator.metrics.hybridRestarts ?? 0) + 1;
       accumulator.metrics.hybridImmigrants = (accumulator.metrics.hybridImmigrants ?? 0) + immigrants.count;
       await yieldHybridProgress(context, accumulator, population.length, populationSize);
       continue;
     }
 
-    const repairNeighbor = repairQueue.shift();
+    const canProcessRepair = repairQueue.length > 0 && consecutiveRepairAttempts < repairBurstLimit;
+    if (repairQueue.length > 0 && !canProcessRepair) {
+      accumulator.metrics.hybridRepairDeferrals = (accumulator.metrics.hybridRepairDeferrals ?? 0) + 1;
+    }
+
+    const repairNeighbor = canProcessRepair ? repairQueue.shift() : undefined;
     const eliteNeighbor = repairNeighbor ? undefined : eliteNeighborQueue.shift();
     const shouldRefineLocally = !repairNeighbor && !eliteNeighbor && accumulator.attempts % localRefinementInterval === 0;
     const input = repairNeighbor
@@ -1105,6 +1149,9 @@ async function runHybridSingleEngineProgressive(context: EngineContext): Promise
         : createHybridOffspring(population, context, accumulator));
     if (repairNeighbor) {
       accumulator.metrics.hybridRepairCandidates = (accumulator.metrics.hybridRepairCandidates ?? 0) + 1;
+      consecutiveRepairAttempts += 1;
+    } else {
+      consecutiveRepairAttempts = 0;
     }
     if (eliteNeighbor) {
       accumulator.metrics.hybridEliteNeighborCandidates = (accumulator.metrics.hybridEliteNeighborCandidates ?? 0) + 1;
@@ -1322,11 +1369,12 @@ function createDomainWarmupCandidates(
   const candidates: OptimizerExperimentCandidateInput[] = [];
 
   for (const seed of seeds) {
-    if (seed.turns.length > options.duration || seed.passiveIds.length > options.maxPassiveCount) {
+    if (seed.turns.length > options.duration) {
       continue;
     }
 
-    if (!seed.passiveIds.every((passiveId) => availablePassiveIds.has(passiveId))) {
+    const passiveVariants = createDomainSeedPassiveVariants(seed.passiveIds, options, availablePassiveIds);
+    if (passiveVariants.length === 0) {
       continue;
     }
 
@@ -1344,12 +1392,14 @@ function createDomainWarmupCandidates(
       ...Array.from({ length: options.duration - seed.turns.length }, () => ({ actions: [] })),
     ];
 
-    candidates.push({
-      passiveIds: [...seed.passiveIds],
-      plan: {
-        turns: baseTurns.map(cloneTurn),
-      },
-    });
+    for (const passiveIds of passiveVariants) {
+      candidates.push({
+        passiveIds,
+        plan: {
+          turns: baseTurns.map(cloneTurn),
+        },
+      });
+    }
 
     if (seed.turns.length < options.duration) {
       for (const turn of baseTurns.slice(0, seed.turns.length)) {
@@ -1358,28 +1408,70 @@ function createDomainWarmupCandidates(
         }
         const extendedTurns = baseTurns.map(cloneTurn);
         extendedTurns[seed.turns.length] = cloneTurn(turn);
-        candidates.push({
-          passiveIds: [...seed.passiveIds],
-          plan: {
-            turns: extendedTurns,
-          },
-        });
+        for (const passiveIds of passiveVariants) {
+          candidates.push({
+            passiveIds,
+            plan: {
+              turns: extendedTurns,
+            },
+          });
+        }
       }
 
       for (const action of extensionActions) {
         const extendedTurns = baseTurns.map(cloneTurn);
         extendedTurns[seed.turns.length]!.actions.push(cloneAction(action));
-        candidates.push({
-          passiveIds: [...seed.passiveIds],
-          plan: {
-            turns: extendedTurns,
-          },
-        });
+        for (const passiveIds of passiveVariants) {
+          candidates.push({
+            passiveIds,
+            plan: {
+              turns: extendedTurns,
+            },
+          });
+        }
       }
     }
   }
 
   return candidates;
+}
+
+function createDomainSeedPassiveVariants(
+  passiveIds: string[],
+  options: NormalizedExperimentOptions,
+  availablePassiveIds: Set<string>,
+): string[][] {
+  const availableSeedPassives = passiveIds.filter((passiveId) => availablePassiveIds.has(passiveId));
+  const passiveLimit = Math.min(options.maxPassiveCount, availableSeedPassives.length);
+  if (passiveLimit === 0) {
+    return [[]];
+  }
+  if (availableSeedPassives.length <= options.maxPassiveCount) {
+    return [availableSeedPassives];
+  }
+
+  return combinePassiveVariants(availableSeedPassives, passiveLimit)
+    .sort((left, right) => scorePassiveVariant(right, options) - scorePassiveVariant(left, options))
+    .slice(0, 24);
+}
+
+function combinePassiveVariants(passiveIds: string[], size: number): string[][] {
+  if (size === 0) {
+    return [[]];
+  }
+  if (passiveIds.length < size) {
+    return [];
+  }
+
+  const [firstPassiveId, ...remainingPassiveIds] = passiveIds;
+  const withFirst = combinePassiveVariants(remainingPassiveIds, size - 1)
+    .map((variant) => [firstPassiveId!, ...variant].sort());
+  const withoutFirst = combinePassiveVariants(remainingPassiveIds, size);
+  return [...withFirst, ...withoutFirst];
+}
+
+function scorePassiveVariant(passiveIds: string[], options: NormalizedExperimentOptions): number {
+  return passiveIds.reduce((total, passiveId) => total + getPassiveSearchWeight(passiveId, options), 0);
 }
 
 function getHuppermageDomainSeedCandidates(): Array<{ passiveIds: string[]; turns: string[][] }> {
@@ -2270,7 +2362,16 @@ function compareCandidates(left: OptimizerExperimentCandidate, right: OptimizerE
     return passiveCountDifference;
   }
 
+  const actionCountDifference = countCandidateActions(left) - countCandidateActions(right);
+  if (actionCountDifference !== 0) {
+    return actionCountDifference;
+  }
+
   return left.id.localeCompare(right.id);
+}
+
+function countCandidateActions(candidate: OptimizerExperimentCandidate): number {
+  return candidate.plan.turns.reduce((total, turn) => total + turn.actions.length, 0);
 }
 
 function roundMetric(value: number): number {

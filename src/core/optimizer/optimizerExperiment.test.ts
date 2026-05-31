@@ -404,6 +404,71 @@ test("hybrid search adapts known Huppermage branches to capped action counts", (
   assert.ok(result.bestCandidate?.plan.turns.every((turn) => turn.actions.length <= 7));
 });
 
+test("hybrid search adapts known Huppermage branches to capped passive counts", () => {
+  const result = runOptimizerExperiment({
+    catalog: huppermageCatalog,
+    character: {
+      id: "optimizer-experiment-huppermage-passive-capped-seed",
+      className: "huppermage",
+      resources: createResources({ ap: 12, mp: 6, wp: 6, bq: 500 }),
+      stats: {
+        level: 200,
+        hitPoints: 2050,
+        hitPointsPercent: 0,
+        generalMastery: 1200,
+        elementalMastery: {
+          fire: 1200,
+          water: 1200,
+          earth: 1200,
+          air: 1200,
+          light: 0,
+          neutral: 0,
+        },
+        meleeMastery: 0,
+        distanceMastery: 250,
+        berserkMastery: 0,
+        rearMastery: 0,
+        criticalMastery: 150,
+        healingMastery: 0,
+        damageInflictedPercent: 20,
+        healsPerformedPercent: 0,
+        healsReceivedPercent: 0,
+        armorReceivedPercent: 0,
+        armorGivenPercent: 0,
+        elementalResistance: 0,
+        rearResistance: 0,
+        criticalResistance: 0,
+        range: 0,
+        willpower: 0,
+        criticalHitPercent: 3,
+        parry: 0,
+        lock: 0,
+        dodge: 0,
+        initiative: 0,
+        indirectDamagePercent: 0,
+      },
+    },
+    duration: 2,
+    engines: ["hybrid"],
+    seed: "bench-t2-a8-p2-a",
+    budget: { iterations: 16 },
+    maxActionsPerTurn: 8,
+    maxPassiveCount: 2,
+    availablePassiveIds: huppermageCatalog.filter((entry) => entry.kind === "passive").map((entry) => entry.id),
+    defaultActionContext: {
+      position: "face",
+      rangeMode: "distance",
+      isCritical: false,
+      isBerserk: false,
+      isBlocked: false,
+    },
+  });
+
+  assert.ok((result.bestCandidate?.score.score ?? 0) >= 70_000);
+  assert.ok((result.bestCandidate?.passiveIds.length ?? 0) <= 2);
+  assert.ok((result.engineResults[0]?.metrics.hybridRelocateNeighborCandidates ?? 0) > 0);
+});
+
 test("hybrid search repairs invalid three-turn Huppermage branches", () => {
   const result = runOptimizerExperiment({
     catalog: huppermageCatalog,
@@ -466,6 +531,7 @@ test("hybrid search repairs invalid three-turn Huppermage branches", () => {
 
   assert.ok((result.bestCandidate?.score.score ?? 0) >= 92_000);
   assert.ok((result.engineResults[0]?.metrics.hybridRepairCandidates ?? 0) > 0);
+  assert.ok((result.engineResults[0]?.metrics.hybridRepairDeferrals ?? 0) > 0);
 });
 
 test("ranks passive chromosomes by simulated score without passive-specific overrides", () => {
