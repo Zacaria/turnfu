@@ -336,7 +336,7 @@ test("hybrid search can reuse and extend known Huppermage branches as longer-dur
     },
   });
 
-  assert.ok((result.bestCandidate?.score.score ?? 0) >= 80_000);
+  assert.ok((result.bestCandidate?.score.score ?? 0) >= 100_000);
   assert.equal(result.bestCandidate?.plan.turns.length, 3);
 });
 

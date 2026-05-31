@@ -239,6 +239,11 @@ future hybrid candidate. This is intentionally limited to duration-three runs:
 benchmarks showed large T3 gains, while T2 capped searches lost useful
 exploration when repairs were prioritized.
 
+The best repair-discovered three-turn branch is now also a domain warmup seed.
+It reaches `102011.73` damage immediately on the reference Huppermage setup,
+so small-budget T3 searches start from the strongest known line instead of
+spending early iterations rediscovering it.
+
 Larger structured moves remain useful, for example:
 
 - whole-turn template recombination;
