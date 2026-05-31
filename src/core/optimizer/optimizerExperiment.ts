@@ -2199,6 +2199,22 @@ function mutateCandidate(candidate: OptimizerExperimentCandidateInput, context: 
     return createRandomCandidate(context.options, actions, context.rng);
   }
 
+  if (context.options.duration >= 3 && context.options.budget.iterations >= 1_000) {
+    const targetFlipSpellIds = new Set(actions
+      .filter((action) => action.target?.kind === "emptyCell")
+      .map((action) => action.spellId));
+    const flippableIndexes = turn.actions
+      .map((action, index) => ({ action, index }))
+      .filter(({ action }) => targetFlipSpellIds.has(action.spellId));
+    if (flippableIndexes.length > 0) {
+      const { action, index } = context.rng.pick(flippableIndexes);
+      turn.actions[index] = action.target?.kind === "emptyCell"
+        ? { spellId: action.spellId }
+        : { spellId: action.spellId, target: { kind: "emptyCell" } };
+      return next;
+    }
+  }
+
   if (context.rng.chance(0.25) && turn.actions.length < context.options.maxActionsPerTurn) {
     turn.actions.push(cloneAction(context.rng.pick(actions)));
     return next;
