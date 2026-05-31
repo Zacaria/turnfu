@@ -807,6 +807,8 @@ function enqueueHybridEliteNeighbors(
   let generated = 0;
   let pairReplacementGenerated = 0;
   let relocateGenerated = 0;
+  let targetFlipGenerated = 0;
+  let pivotInsertionGenerated = 0;
 
   const addCandidate = (candidate: OptimizerExperimentCandidateInput, metric?: string): boolean => {
     if (queue.length >= maxQueueSize || generated >= maxGenerated) {
@@ -898,16 +900,22 @@ function enqueueHybridEliteNeighbors(
         }
       }
     } else if (context.options.duration === 3) {
+      const useBroadT3Neighbors = context.options.maxPassiveCount > 3;
       const pivotIndexes = turn.actions
         .map((action, index) => ({
           index,
           isPivot: action.spellId === "coeur-de-lumiere"
             || action.spellId === "runification"
             || action.spellId === "fleche-de-lumiere"
-            || action.spellId === "epee-de-lumiere",
+            || action.spellId === "epee-de-lumiere"
+            || (useBroadT3Neighbors && (
+              action.spellId === "halo-chatoyant"
+              || action.spellId === "debacle"
+              || action.spellId === "orbes-luisants"
+            )),
         }))
         .filter((entry) => entry.isPivot)
-        .slice(0, 4);
+        .slice(0, useBroadT3Neighbors ? 6 : 4);
 
       for (const { index: pivotIndex } of pivotIndexes) {
         for (const fromIndex of [pivotIndex - 2, pivotIndex - 1, pivotIndex + 1, pivotIndex + 2]) {
@@ -930,6 +938,51 @@ function enqueueHybridEliteNeighbors(
             actionsToRelocate.splice(toIndex > fromIndex ? toIndex - 1 : toIndex, 0, action!);
             if (addCandidate(candidate, "hybridRelocateNeighborCandidates")) {
               relocateGenerated += 1;
+            }
+          }
+        }
+      }
+
+      if (useBroadT3Neighbors) {
+        const targetFlipSpellIds = new Set(actions
+          .filter((action) => action.target?.kind === "emptyCell")
+          .map((action) => action.spellId));
+        for (let actionIndex = 0; actionIndex < turn.actions.length; actionIndex += 1) {
+          if (targetFlipGenerated >= 64) {
+            break;
+          }
+          const action = turn.actions[actionIndex]!;
+          if (!targetFlipSpellIds.has(action.spellId)) {
+            continue;
+          }
+          const candidate = cloneCandidateInput(input);
+          candidate.plan.turns[turnIndex]!.actions[actionIndex] = action.target?.kind === "emptyCell"
+            ? { spellId: action.spellId }
+            : { spellId: action.spellId, target: { kind: "emptyCell" } };
+          if (addCandidate(candidate, "hybridTargetFlipNeighborCandidates")) {
+            targetFlipGenerated += 1;
+          }
+        }
+      }
+
+      if (useBroadT3Neighbors && turn.actions.length < context.options.maxActionsPerTurn) {
+        for (const { index: pivotIndex } of pivotIndexes) {
+          for (const insertIndex of [pivotIndex, pivotIndex + 1]) {
+            if (pivotInsertionGenerated >= 64) {
+              break;
+            }
+            if (insertIndex < 0 || insertIndex > turn.actions.length) {
+              continue;
+            }
+            for (const action of actions.slice(0, 4)) {
+              if (pivotInsertionGenerated >= 64) {
+                break;
+              }
+              const candidate = cloneCandidateInput(input);
+              candidate.plan.turns[turnIndex]!.actions.splice(insertIndex, 0, cloneAction(action));
+              if (addCandidate(candidate, "hybridPivotInsertionNeighborCandidates")) {
+                pivotInsertionGenerated += 1;
+              }
             }
           }
         }
