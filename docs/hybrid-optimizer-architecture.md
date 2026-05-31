@@ -222,8 +222,16 @@ now seeds two small structured neighborhoods from improved elites: adjacent
 action-order swaps around burst windows and passive-set variants around known
 spell skeletons. Known domain branches can also be reused as longer-duration
 prefixes; for example, a strong two-turn Huppermage seed can initialize a
-three-turn search and leave later turns open for extension. Larger structured
-moves remain useful, for example:
+three-turn search and leave later turns open for extension. The seed adapter
+now respects action-count caps by truncating known turns instead of discarding
+the whole branch; this keeps capped searches anchored to useful Huppermage
+openers. When extending a shorter seed, the warmup also tries known prior turns
+as full next-turn templates before falling back to single weighted actions.
+
+The elite-neighbor queue is intentionally bounded by bucket: expensive
+two-action replacement neighbors cannot consume the whole generated queue before
+deletions, appends, and single-action replacements are considered. Larger
+structured moves remain useful, for example:
 
 - whole-turn template recombination;
 - validity-repair guided by simulator violation types.

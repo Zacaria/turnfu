@@ -717,16 +717,17 @@ function enqueueHybridEliteNeighbors(
   const pairReplacementActions = getHybridPairReplacementActions(context.options);
   const seen = new Set(queue.map((candidate) => serializeExperimentCandidate(normalizeCandidate(candidate))));
   let generated = 0;
+  let pairReplacementGenerated = 0;
 
-  const addCandidate = (candidate: OptimizerExperimentCandidateInput, metric?: string) => {
+  const addCandidate = (candidate: OptimizerExperimentCandidateInput, metric?: string): boolean => {
     if (queue.length >= maxQueueSize || generated >= maxGenerated) {
-      return;
+      return false;
     }
 
     const normalized = normalizeCandidate(candidate);
     const key = serializeExperimentCandidate(normalized);
     if (seen.has(key)) {
-      return;
+      return false;
     }
 
     seen.add(key);
@@ -735,6 +736,7 @@ function enqueueHybridEliteNeighbors(
     if (metric) {
       accumulator.metrics[metric] = (accumulator.metrics[metric] ?? 0) + 1;
     }
+    return true;
   };
 
   const availablePassiveIds = getAvailablePassiveIds(context.options)
@@ -791,17 +793,25 @@ function enqueueHybridEliteNeighbors(
     for (let firstIndex = 0; firstIndex < turn.actions.length - 1; firstIndex += 1) {
       for (let secondIndex = firstIndex + 1; secondIndex < turn.actions.length; secondIndex += 1) {
         for (const firstAction of pairReplacementActions) {
+          if (pairReplacementGenerated >= 160) {
+            break;
+          }
           if (serializeAction(turn.actions[firstIndex]!) === serializeAction(firstAction)) {
             continue;
           }
           for (const secondAction of pairReplacementActions) {
+            if (pairReplacementGenerated >= 160) {
+              break;
+            }
             if (serializeAction(turn.actions[secondIndex]!) === serializeAction(secondAction)) {
               continue;
             }
             const candidate = cloneCandidateInput(input);
             candidate.plan.turns[turnIndex]!.actions[firstIndex] = cloneAction(firstAction);
             candidate.plan.turns[turnIndex]!.actions[secondIndex] = cloneAction(secondAction);
-            addCandidate(candidate);
+            if (addCandidate(candidate)) {
+              pairReplacementGenerated += 1;
+            }
           }
         }
       }
@@ -1230,11 +1240,9 @@ function createDomainWarmupCandidates(
       continue;
     }
 
-    if (seed.turns.some((turn) => turn.length > options.maxActionsPerTurn)) {
-      continue;
-    }
-
-    const turns = seed.turns.map((turn) => turn.map((actionKey) => actionByKey.get(actionKey)));
+    const turns = seed.turns.map((turn) => (
+      turn.slice(0, options.maxActionsPerTurn).map((actionKey) => actionByKey.get(actionKey))
+    ));
     if (turns.some((turn) => turn.some((action) => !action))) {
       continue;
     }
@@ -1254,6 +1262,20 @@ function createDomainWarmupCandidates(
     });
 
     if (seed.turns.length < options.duration) {
+      for (const turn of baseTurns.slice(0, seed.turns.length)) {
+        if (turn.actions.length === 0) {
+          continue;
+        }
+        const extendedTurns = baseTurns.map(cloneTurn);
+        extendedTurns[seed.turns.length] = cloneTurn(turn);
+        candidates.push({
+          passiveIds: [...seed.passiveIds],
+          plan: {
+            turns: extendedTurns,
+          },
+        });
+      }
+
       for (const action of extensionActions) {
         const extendedTurns = baseTurns.map(cloneTurn);
         extendedTurns[seed.turns.length]!.actions.push(cloneAction(action));
@@ -1984,12 +2006,12 @@ function mutatePassiveIds(
   const canRemove = next.size > 0;
 
   if (canAdd && (!canRemove || rng.chance(0.45))) {
-    next.add(rng.pick(missing));
+    next.add(pickWeightedPassiveId(missing, options, rng));
   } else if (canRemove && (!canAdd || rng.chance(0.35))) {
     next.delete(rng.pick([...next]));
   } else if (canAdd && canRemove) {
     next.delete(rng.pick([...next]));
-    next.add(rng.pick(missing));
+    next.add(pickWeightedPassiveId(missing, options, rng));
   }
 
   return [...next].sort();
