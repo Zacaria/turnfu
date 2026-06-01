@@ -61,6 +61,10 @@ export type RustWasmDifferentialWasmExports = {
     candidateJson: string,
     candidateId: string,
   ) => string;
+  evaluate_candidate_batch_json: (
+    requestJson: string,
+    candidatesJson: string,
+  ) => string;
   apply_turn_end_bq_json: (
     huppermageStateJson: string,
     resourcesJson: string,
@@ -308,11 +312,10 @@ function runRustFixture(wasm: RustWasmDifferentialWasmExports, fixture: RustWasm
 
   if (fixture.kind === "candidateBatch") {
     const requestJson = JSON.stringify(fixture.request);
-    return fixture.candidates.map((candidate) => JSON.parse(wasm.evaluate_candidate_json(
+    return JSON.parse(wasm.evaluate_candidate_batch_json(
       requestJson,
-      JSON.stringify(candidate),
-      candidate.id,
-    )));
+      JSON.stringify(fixture.candidates),
+    ));
   }
 
   return JSON.parse(wasm.apply_initial_passive_effects_json(

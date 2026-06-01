@@ -523,6 +523,15 @@ pub struct CandidateEvaluationResult {
     pub first_violation: Option<CandidateEvaluationViolation>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CandidateEvaluationInput {
+    pub id: String,
+    #[serde(default)]
+    pub passive_ids: Vec<String>,
+    pub plan: CandidatePlan,
+}
+
 #[derive(Debug, Default, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct BackendMetrics {
@@ -4182,6 +4191,25 @@ pub fn evaluate_candidate(
     ))
 }
 
+pub fn evaluate_candidate_batch(
+    request: &OptimizerRequest,
+    candidates: &[CandidateEvaluationInput],
+) -> Result<Vec<CandidateEvaluationResult>, String> {
+    candidates
+        .iter()
+        .map(|candidate| {
+            evaluate_candidate(
+                request,
+                &OptimizerCandidateInput {
+                    passive_ids: candidate.passive_ids.clone(),
+                    plan: candidate.plan.clone(),
+                },
+                &candidate.id,
+            )
+        })
+        .collect()
+}
+
 fn create_candidate_evaluation_result(
     candidate_id: &str,
     valid: bool,
@@ -4268,6 +4296,24 @@ pub fn evaluate_candidate_json(
     serde_json::to_string(&result).map_err(|error| {
         JsValue::from_str(&format!(
             "Failed to serialize Rust candidate evaluation: {error}"
+        ))
+    })
+}
+
+#[wasm_bindgen]
+pub fn evaluate_candidate_batch_json(
+    request_json: &str,
+    candidates_json: &str,
+) -> Result<String, JsValue> {
+    let request = parse_optimizer_request(request_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid optimizer request JSON: {error}")))?;
+    let candidates: Vec<CandidateEvaluationInput> = serde_json::from_str(candidates_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid candidate batch JSON: {error}")))?;
+    let result = evaluate_candidate_batch(&request, &candidates)
+        .map_err(|error| JsValue::from_str(&error))?;
+    serde_json::to_string(&result).map_err(|error| {
+        JsValue::from_str(&format!(
+            "Failed to serialize Rust candidate batch evaluation: {error}"
         ))
     })
 }
@@ -4559,6 +4605,41 @@ mod tests {
         assert_eq!(evaluation.final_resources.ap, 5);
         assert_eq!(evaluation.final_resources.bq, 300);
         assert!(evaluation.first_violation.is_none());
+    }
+
+    #[test]
+    fn evaluates_candidate_batches_in_one_call() {
+        let request = transformation_request();
+        let candidates = vec![
+            CandidateEvaluationInput {
+                id: "valid".to_string(),
+                passive_ids: vec![],
+                plan: candidate_from_actions(vec!["hit"], vec![]).plan,
+            },
+            CandidateEvaluationInput {
+                id: "invalid".to_string(),
+                passive_ids: vec![],
+                plan: CandidatePlan {
+                    turns: vec![CandidateTurn {
+                        actions: vec![action("missing")],
+                    }],
+                },
+            },
+        ];
+
+        let batch = evaluate_candidate_batch(&request, &candidates)
+            .expect("candidate batch should evaluate");
+
+        assert_eq!(batch.len(), 2);
+        assert!(batch[0].valid);
+        assert!(!batch[1].valid);
+        assert_eq!(
+            batch[1]
+                .first_violation
+                .as_ref()
+                .map(|violation| violation.violation_type.as_str()),
+            Some("unknownSpell")
+        );
     }
 
     #[test]
