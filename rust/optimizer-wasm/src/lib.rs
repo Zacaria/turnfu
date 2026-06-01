@@ -2300,6 +2300,7 @@ fn resolve_search_effective_cost(
     spell: &SearchCatalogEntry,
     state: &HuppermageState,
     action: &CandidateAction,
+    casts_by_spell_id: &BTreeMap<String, u32>,
 ) -> SpellCost {
     let mut cost = spell.cost;
 
@@ -2326,6 +2327,25 @@ fn resolve_search_effective_cost(
             cost.bq += amount * get_active_rune_count(state) as i32;
         }
     }
+
+    for value in collect_search_tag_values(
+        &spell.effects,
+        "increasingBqCostPerUseThisTurn",
+        state,
+        action,
+    ) {
+        let amount = value
+            .as_i64()
+            .map(|value| value as i32)
+            .or_else(|| value.as_f64().map(|value| value.round() as i32))
+            .unwrap_or(0);
+        cost.bq += amount * casts_by_spell_id.get(&spell.id).copied().unwrap_or(0) as i32;
+    }
+
+    cost.ap = cost.ap.max(0);
+    cost.mp = cost.mp.max(0);
+    cost.wp = cost.wp.max(0);
+    cost.bq = cost.bq.max(0);
 
     cost
 }
@@ -3328,6 +3348,7 @@ pub fn apply_turn_end_bq(
 ) -> TurnEndBqResult {
     let before = resources.bq;
     let stored_before = state.stored_bq;
+    let active_rune_count = get_active_rune_count(&state);
     let amount = if state.active_heart.is_some() {
         state.stored_bq += 75;
         0
@@ -3337,6 +3358,10 @@ pub fn apply_turn_end_bq(
         state.stored_bq = 0;
         gain
     };
+
+    if has_passive(&state, "universalite") && active_rune_count > 0 {
+        resources.bq -= (active_rune_count as i32) * 50;
+    }
 
     let stored_after = state.stored_bq;
     TurnEndBqResult {
@@ -4608,7 +4633,8 @@ pub fn evaluate_candidate(
                 ));
             }
 
-            let effective_cost = resolve_search_effective_cost(spell, &huppermage, action);
+            let effective_cost =
+                resolve_search_effective_cost(spell, &huppermage, action, &casts_by_spell_id);
             let resource_validation = validate_resource_cost(
                 resources,
                 effective_cost,
@@ -5692,6 +5718,59 @@ mod tests {
 
         assert!(evaluation.valid);
         assert_eq!(evaluation.final_resources.ap, 0);
+    }
+
+    #[test]
+    fn candidate_evaluation_applies_increasing_bq_cost_per_use_this_turn() {
+        let request = parse_optimizer_request(
+            r#"{
+              "schemaVersion":1,
+              "engine":"hybrid",
+              "seed":"ramping-bq-cost",
+              "duration":1,
+              "iterations":10,
+              "maxActionsPerTurn":2,
+              "maxPassiveCount":0,
+              "availableSpellIds":["ramping-spell"],
+              "availablePassiveIds":[],
+              "catalog":[
+                {
+                  "kind":"spell",
+                  "id":"ramping-spell",
+                  "cost":{},
+                  "effects":[
+                    {"type":"tag","tag":"increasingBqCostPerUseThisTurn","value":50}
+                  ],
+                  "constraints":[],
+                  "tags":[]
+                }
+              ],
+              "character":{"id":"test","resources":{"ap":6,"mp":3,"wp":2,"bq":40}}
+            }"#,
+        )
+        .expect("request should parse");
+        let candidate = OptimizerCandidateInput {
+            passive_ids: vec![],
+            plan: CandidatePlan {
+                turns: vec![CandidateTurn {
+                    actions: vec![action("ramping-spell"), action("ramping-spell")],
+                }],
+            },
+        };
+
+        let evaluation = evaluate_candidate(&request, &candidate, "candidate:ramping-bq-cost")
+            .expect("candidate should evaluate");
+
+        assert!(!evaluation.valid);
+        assert_eq!(
+            evaluation.first_violation.as_ref().map(|violation| (
+                violation.action_index,
+                violation.resource.as_deref(),
+                violation.required,
+                violation.available,
+            )),
+            Some((1, Some("bq"), Some(50), Some(40)))
+        );
     }
 
     #[test]
@@ -6875,6 +6954,38 @@ mod tests {
 
         assert_eq!(turn_end.amount, 160);
         assert_eq!(turn_end.resources.bq, 260);
+    }
+
+    #[test]
+    fn applies_universalite_turn_end_bq_cost_per_active_rune() {
+        let mut state = create_huppermage_state(
+            ResourcePool {
+                ap: 12,
+                mp: 6,
+                wp: 6,
+                bq: 500,
+            },
+            vec!["universalite".to_string()],
+        );
+        state.runes.active = RuneTracker {
+            incandescent: true,
+            aquatic: false,
+            telluric: true,
+            aerial: false,
+        };
+
+        let turn_end = apply_turn_end_bq(
+            state,
+            ResourcePool {
+                ap: 0,
+                mp: 0,
+                wp: 6,
+                bq: 20,
+            },
+        );
+
+        assert_eq!(turn_end.amount, 100);
+        assert_eq!(turn_end.resources.bq, 20);
     }
 
     #[test]
