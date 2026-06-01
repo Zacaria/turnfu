@@ -27,6 +27,15 @@ const catalog = normalizeCatalog([
     constraints: [],
     metadata: { status: "extracted", sources: [source] },
   }),
+  spell("water-trigger", {
+    name: "Water Trigger",
+    level: 200,
+    element: "water",
+    cost: cost({ ap: 1 }),
+    effects: [],
+    constraints: [],
+    metadata: { status: "extracted", sources: [source] },
+  }),
   spell("resource-spend", {
     name: "Resource Spend",
     level: 200,
@@ -99,7 +108,7 @@ test("carries unused AP from supported sublimations into the next turn", () => {
     character: {
       ...character,
       sublimations: {
-        selections: [{ sublimationId: "report-pa" }],
+        selections: [{ sublimationId: "sauvegarde-6" }],
         hpAssumption: "normal",
       },
     },
@@ -114,6 +123,30 @@ test("carries unused AP from supported sublimations into the next turn", () => {
   assert.equal(result.valid, true);
   assert.equal(result.turns[0].result.finalState.resourceCarryover.ap, 2);
   assert.equal(result.turns[1].initialCharacter.resources.ap, 8);
+});
+
+test("carries secondary elemental sublimation damage into the next turn", () => {
+  const result = simulateCombo({
+    catalog,
+    character: {
+      ...character,
+      sublimations: {
+        selections: [{ sublimationId: "brulure-secondaire-4" }],
+        hpAssumption: "normal",
+      },
+    },
+    combo: {
+      turns: [
+        { actions: [{ spellId: "water-trigger" }] },
+        { actions: [{ spellId: "fire-rune" }] },
+      ],
+    },
+  });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.turns[0].result.finalState.sublimationElementalCarryover.fire, 8);
+  assert.equal(result.turns[1].initialCharacter.sublimationElementalCarryover?.fire, 8);
+  assert.equal(result.turns[1].result.breakdown[0].damage, 10.8);
 });
 
 test("carries persistent Huppermage state and expires active Heart between turns", () => {

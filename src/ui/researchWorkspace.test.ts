@@ -126,7 +126,12 @@ test("serializes setup snapshots with final stats, resources, equipment notes an
   assert.equal(setup.target.kind, "enemy");
   assert.equal(setup.defaultActionContext.rangeMode, "distance");
   assert.equal(setup.defaultActionContext.criticalMode, "expected");
-  assert.deepEqual(setup.sublimations, { selections: [], hpAssumption: "normal" });
+  assert.deepEqual(setup.sublimations, {
+    selections: [],
+    hpAssumption: "normal",
+    nearbyAlliesAssumption: "unspecified",
+    contactEnemiesAssumption: "unspecified",
+  });
   assert.equal(setup.hpAssumption, "normal");
   assert.equal(setup.character.classState?.huppermage?.bqMax, 500);
   assert.equal(setup.name, "Set 1200 maîtrise 4 éléments");
@@ -147,10 +152,12 @@ test("creates a versioned setup snapshot when sublimations change", () => {
     sourceSetupSnapshotId: setup.id,
     sublimations: {
       selections: [
-        { sublimationId: "appret-3" },
-        { sublimationId: "report-pa" },
+        { sublimationId: "influence-6" },
+        { sublimationId: "sauvegarde-6" },
       ],
-      hpAssumption: "normal",
+      hpAssumption: "healthy90",
+      nearbyAlliesAssumption: "twoPlus",
+      contactEnemiesAssumption: "one",
     },
     now: "2026-05-26T10:20:00.000Z",
   });
@@ -160,9 +167,13 @@ test("creates a versioned setup snapshot when sublimations change", () => {
   assert.notEqual(nextSetup.id, setup.id);
   assert.equal(nextSetup.version, setup.version + 1);
   assert.deepEqual(nextSetup.sublimations.selections, [
-    { sublimationId: "appret-3" },
-    { sublimationId: "report-pa" },
+    { sublimationId: "influence-6" },
+    { sublimationId: "sauvegarde-6" },
   ]);
+  assert.equal(nextSetup.hpAssumption, "healthy90");
+  assert.equal(nextSetup.character.sublimations.hpAssumption, "healthy90");
+  assert.equal(nextSetup.character.sublimations.nearbyAlliesAssumption, "twoPlus");
+  assert.equal(nextSetup.character.sublimations.contactEnemiesAssumption, "one");
   assert.deepEqual(nextSetup.character.sublimations, nextSetup.sublimations);
   assert.ok(nextWorkspace.builds[0].setupSnapshotIds.includes(nextSetup.id));
 });
@@ -229,6 +240,12 @@ test("creates optimizer run and saved combo references for a build setup", () =>
     name: "Combo 2T eau",
     plan: { turns: [{ actions: [{ spellId: "lueur-de-laube" }] }] },
     passiveIds: ["carnage", "extension-des-sens"],
+    sublimations: {
+      selections: [{ sublimationId: "sauvegarde-6" }],
+      hpAssumption: "normal",
+      nearbyAlliesAssumption: "twoPlus",
+      contactEnemiesAssumption: "one",
+    },
     totalDamage: 480,
     criteriaSummary: "2T · dégâts eau",
     now: "2026-05-26T10:06:00.000Z",
@@ -238,6 +255,9 @@ test("creates optimizer run and saved combo references for a build setup", () =>
   assert.equal(combo.name, "Combo 2T eau");
   assert.equal(combo.totalDamage, 480);
   assert.deepEqual(combo.passiveIds, ["carnage", "extension-des-sens"]);
+  assert.deepEqual(combo.sublimations?.selections, [{ sublimationId: "sauvegarde-6" }]);
+  assert.equal(combo.sublimations?.nearbyAlliesAssumption, "twoPlus");
+  assert.equal(combo.sublimations?.contactEnemiesAssumption, "one");
   assert.equal(combo.criteriaSummary, "2T · dégâts eau");
   assert.deepEqual(withCombo.builds[0].savedComboIds, [combo.id]);
   assert.equal(withCombo.builds[0].updatedAt, "2026-05-26T10:06:00.000Z");

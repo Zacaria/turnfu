@@ -42,6 +42,13 @@ export type RangeMode = "melee" | "distance";
 
 export type CriticalEvaluationMode = "expected" | "forcedCritical" | "forcedNonCritical";
 
+export type ElementalCarryoverState = Partial<Record<Exclude<Element, "light" | "neutral">, number>>;
+
+export type SpellCountCarryoverState = Record<string, {
+  qualifiedCasts: number;
+  pendingDamageInflictedPercent: number;
+}>;
+
 export type ActionContext = {
   position: AttackPosition;
   rangeMode?: RangeMode;
@@ -91,6 +98,10 @@ export type SimulatedCharacter = {
   stats: BaseStats;
   resources: ResourcePool;
   sublimations?: SublimationBuild;
+  sublimationElementalCarryover?: ElementalCarryoverState;
+  sublimationSpellCountCarryover?: SpellCountCarryoverState;
+  sublimationAlternancePreviousElement?: Element | null;
+  sublimationSpentResourcesThisTurn?: Partial<ResourcePool>;
   classState?: {
     huppermage?: {
       runes?: Partial<Record<Rune, boolean>>;
@@ -306,6 +317,11 @@ export type TurnState = {
   actionLog: ActionResult[];
   turnEndEffects: AppliedEffect[];
   resourceCarryover: Partial<ResourcePool>;
+  sublimationElementalCarryover: ElementalCarryoverState;
+  sublimationDamageElementsThisTurn: Element[];
+  sublimationAlternancePreviousElement: Element | null;
+  sublimationSpellCountCarryover: SpellCountCarryoverState;
+  sublimationSpentResourcesThisTurn: Partial<ResourcePool>;
 };
 
 export type SimulationResult = {

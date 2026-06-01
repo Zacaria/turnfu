@@ -1,8 +1,13 @@
 import { ArrowLeft, BarChart3, Boxes, Check, Pencil, Pin, Play, Plus, Save, ScrollText, Search, Swords, Trash2, Wrench, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CatalogEntry } from "../core/catalog/types.ts";
-import type { SublimationBuild, SublimationCatalogEntry, SublimationCategory } from "../core/sublimations/types.ts";
-import { sublimationCatalog, validateSublimationBuild } from "../core/sublimations/index.ts";
+import type {
+  SublimationBuild,
+  SublimationContactEnemiesAssumption,
+  SublimationHpAssumption,
+  SublimationNearbyAlliesAssumption,
+} from "../core/sublimations/types.ts";
+import { validateSublimationBuild } from "../core/sublimations/index.ts";
 import {
   createDefaultOptimizerControls,
   createOptimizerCandidateSpellIconRows,
@@ -14,7 +19,7 @@ import {
   type DurationGroupedResults,
   type OptimizerCandidateViewModel,
   type OptimizerWorkspaceControls,
-} from "./optimizerWorkspace.ts";
+} from "./optimizerWorkspace.ts?v=optimizer-sublimations-v14";
 import {
   filterBuildsByClass,
   formatWakfuClassLabel,
@@ -37,7 +42,7 @@ import {
   type SavedComboComparisonRow,
 } from "./savedComboComparison.ts";
 import { getHuppermageIconSrc } from "./icons.ts";
-import { createSublimationPreviewItems, type SublimationPreviewItem } from "./sublimationPreview.ts";
+import { createSublimationPreviewItems, type SublimationPreviewItem } from "./sublimationPreview.ts?v=optimizer-sublimations-v14";
 
 export type OptimizerRunStatus = "idle" | "running" | "done" | "stopped" | "error";
 
@@ -290,12 +295,20 @@ export function BuildPage({
             ) : null}
           </div>
           {savedCombos.length === 0 ? <EmptyState title="Aucun combo" body="Épingle ou sauvegarde des candidats depuis l'optimizer." /> : null}
-          {savedCombos.map((combo) => (
-            <div className="thin-row" key={combo.id}>
-              <b>{combo.name}</b>
-              <span>{combo.totalDamage ?? 0} dégâts</span>
-            </div>
-          ))}
+          {savedCombos.map((combo) => {
+            const sublimationItems = createSublimationPreviewItems(combo.sublimations);
+            return (
+              <div className="thin-row saved-combo-row" key={combo.id}>
+                <b>{combo.name}</b>
+                <span>{combo.totalDamage ?? 0} dégâts</span>
+                {sublimationItems.length > 0 ? (
+                  <div className="candidate-sublimation-row saved-combo-sublimations" aria-label="Sublimations sauvegardées">
+                    {sublimationItems.map((item) => <SublimationMiniCard item={item} key={item.id} />)}
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
         </section>
       </section>
     </main>
@@ -568,31 +581,30 @@ export function SetupPage({
   }));
   const setupSublimationItems = createSublimationPreviewItems(setup.sublimations);
   const sublimationValidation = validateSublimationBuild(setup.sublimations);
-  const selectedSublimationCounts = countSelectedSublimations(setup.sublimations);
-  const selectedEntries = setup.sublimations.selections
-    .map((selection) => sublimationCatalog.find((entry) => entry.id === selection.sublimationId))
-    .filter((entry): entry is SublimationCatalogEntry => Boolean(entry));
-  const selectedCategoryCounts = countSelectedSublimationCategories(selectedEntries);
-  const selectedFamilyRawLevels = countSelectedSublimationFamilyLevels(selectedEntries);
 
-  function addSublimation(sublimation: SublimationCatalogEntry) {
+  function changeHpAssumption(hpAssumption: SublimationHpAssumption) {
     onChangeSublimations({
       ...setup.sublimations,
-      hpAssumption: setup.sublimations.hpAssumption ?? setup.hpAssumption,
-      selections: [...setup.sublimations.selections, { sublimationId: sublimation.id }],
+      hpAssumption,
+      selections: [...setup.sublimations.selections],
     });
   }
 
-  function removeSublimation(sublimationId: string) {
-    const removalIndex = setup.sublimations.selections.findIndex((selection) => selection.sublimationId === sublimationId);
-    if (removalIndex < 0) {
-      return;
-    }
-
+  function changeNearbyAlliesAssumption(nearbyAlliesAssumption: SublimationNearbyAlliesAssumption) {
     onChangeSublimations({
       ...setup.sublimations,
       hpAssumption: setup.sublimations.hpAssumption ?? setup.hpAssumption,
-      selections: setup.sublimations.selections.filter((_, index) => index !== removalIndex),
+      nearbyAlliesAssumption,
+      selections: [...setup.sublimations.selections],
+    });
+  }
+
+  function changeContactEnemiesAssumption(contactEnemiesAssumption: SublimationContactEnemiesAssumption) {
+    onChangeSublimations({
+      ...setup.sublimations,
+      hpAssumption: setup.sublimations.hpAssumption ?? setup.hpAssumption,
+      contactEnemiesAssumption,
+      selections: [...setup.sublimations.selections],
     });
   }
 
@@ -667,56 +679,78 @@ export function SetupPage({
         </div>
         <p>Cible: {setup.target.kind}</p>
         <p>Hypothèse PV: {formatHpAssumption(setup.hpAssumption)}</p>
+        <p>Alliés proches: {formatNearbyAlliesAssumption(setup.sublimations.nearbyAlliesAssumption)}</p>
+        <p>Ennemis au contact: {formatContactEnemiesAssumption(setup.sublimations.contactEnemiesAssumption)}</p>
       </section>
       <section className="workspace-section">
         <h2>Sublimations</h2>
+        <div className="sublimation-assumption-grid">
+          <fieldset className="sublimation-assumption-control hp-assumption-control">
+            <legend>Hypothèse PV</legend>
+            <div className="sublimation-assumption-options">
+              {hpAssumptionChoices.map((choice) => {
+                const selected = (setup.sublimations.hpAssumption ?? setup.hpAssumption) === choice.value;
+                return (
+                  <button
+                    aria-pressed={selected}
+                    className={selected ? "sublimation-assumption-choice selected" : "sublimation-assumption-choice"}
+                    key={choice.value}
+                    type="button"
+                    onClick={() => changeHpAssumption(choice.value)}
+                  >
+                    {selected ? <Check size={14} /> : null}
+                    <span>{choice.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </fieldset>
+          <fieldset className="sublimation-assumption-control">
+            <legend>Alliés proches</legend>
+            <div className="sublimation-assumption-options">
+              {nearbyAlliesAssumptionChoices.map((choice) => {
+                const selected = (setup.sublimations.nearbyAlliesAssumption ?? "unspecified") === choice.value;
+                return (
+                  <button
+                    aria-pressed={selected}
+                    className={selected ? "sublimation-assumption-choice selected" : "sublimation-assumption-choice"}
+                    key={choice.value}
+                    type="button"
+                    onClick={() => changeNearbyAlliesAssumption(choice.value)}
+                  >
+                    {selected ? <Check size={14} /> : null}
+                    <span>{choice.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </fieldset>
+          <fieldset className="sublimation-assumption-control">
+            <legend>Ennemis au contact</legend>
+            <div className="sublimation-assumption-options">
+              {contactEnemiesAssumptionChoices.map((choice) => {
+                const selected = (setup.sublimations.contactEnemiesAssumption ?? "unspecified") === choice.value;
+                return (
+                  <button
+                    aria-pressed={selected}
+                    className={selected ? "sublimation-assumption-choice selected" : "sublimation-assumption-choice"}
+                    key={choice.value}
+                    type="button"
+                    onClick={() => changeContactEnemiesAssumption(choice.value)}
+                  >
+                    {selected ? <Check size={14} /> : null}
+                    <span>{choice.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </fieldset>
+        </div>
         {sublimationValidation.violations.length > 0 ? (
           <ul className="compact-effect-list">
             {sublimationValidation.violations.map((violation, index) => <li key={`${violation.type}-${index}`}>{violation.message}</li>)}
           </ul>
         ) : null}
-        <div className="sublimation-catalog-grid">
-          {sublimationCatalog.map((sublimation) => {
-            const selectedCount = selectedSublimationCounts.get(sublimation.id) ?? 0;
-            const selectedRawLevel = selectedFamilyRawLevels.get(sublimation.familyId) ?? 0;
-            const disabledReason = getSublimationDisabledReason(sublimation.supportStatus, sublimation.supportReason);
-            const slotLimitReached = selectedCategoryCounts[sublimation.category] >= sublimationSlotLimits[sublimation.category];
-            const stackLimitReached = selectedRawLevel >= sublimation.cumulativeMax;
-            const canAdd = !disabledReason && !slotLimitReached && !stackLimitReached;
-            return (
-              <div
-                aria-label={`${sublimation.name}, ${selectedCount} selection`}
-                className={selectedCount > 0 ? "sublimation-chip selected" : "sublimation-chip"}
-                key={sublimation.id}
-                title={disabledReason ?? `${sublimation.name} (${sublimation.category})`}
-              >
-                <div className="sublimation-chip-main">
-                  <span>{sublimation.name}</span>
-                  <small>{disabledReason ?? formatSublimationChipHint(sublimation, selectedRawLevel, slotLimitReached, stackLimitReached)}</small>
-                </div>
-                <div className="sublimation-chip-controls">
-                  <button
-                    aria-label={`Retirer ${sublimation.name}`}
-                    disabled={selectedCount === 0}
-                    type="button"
-                    onClick={() => removeSublimation(sublimation.id)}
-                  >
-                    -
-                  </button>
-                  <b>{selectedCount}</b>
-                  <button
-                    aria-label={`Ajouter ${sublimation.name}`}
-                    disabled={!canAdd}
-                    type="button"
-                    onClick={() => addSublimation(sublimation)}
-                  >
-                    +
-                  </button>
-                </div>
-              </div>
-            );
-          })}
-        </div>
         {sublimationValidation.effectiveStacks.length > 0 ? (
           <ul className="compact-effect-list">
             {sublimationValidation.effectiveStacks.map((stack) => (
@@ -842,6 +876,11 @@ export function OptimizerWorkspacePage({
     });
 
     try {
+      await waitForUiFrame();
+      if (runSequenceRef.current !== runSequence || abortController.signal.aborted) {
+        return;
+      }
+
       let latestRunProgress = {
         attempts: 0,
         invalidCandidates: 0,
@@ -1080,7 +1119,7 @@ export function OptimizerWorkspacePage({
                 key={candidate.id}
                 pinned={pinnedIds.includes(candidate.id)}
                 saved={savedCandidateIdSet.has(candidate.id)}
-                sublimations={setup.sublimations}
+                sublimations={candidate.sublimations}
                 onOpen={() => {
                   onSessionChange?.(createOptimizerWorkspaceSession({
                     controls,
@@ -1129,6 +1168,16 @@ export function OptimizerWorkspacePage({
       </section>
     </main>
   );
+}
+
+function waitForUiFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(() => resolve());
+      return;
+    }
+    setTimeout(resolve, 0);
+  });
 }
 
 function PageBackButton({ label, onBack }: { label: string; onBack: () => void }) {
@@ -1334,36 +1383,54 @@ function CandidateRow({
 
 function SublimationMiniCard({ item }: { item: SublimationPreviewItem }) {
   return (
-    <div className="sublimation-preview-card" tabIndex={0}>
-      <span className="sublimation-preview-icon" aria-hidden="true">
-        <ScrollText size={15} />
-      </span>
-      <span className="sublimation-preview-name">{item.name}</span>
-      <div className="sublimation-preview-tooltip" role="tooltip">
-        <div className="sublimation-tooltip-title">
-          <span className="sublimation-tooltip-icon" aria-hidden="true">
-            <ScrollText size={22} />
-          </span>
-          <strong>{item.name}</strong>
-        </div>
-        <ul>
-          {item.effectLines.length > 0 ? item.effectLines.map((line) => (
-            <li key={line}>
-              <Swords size={13} />
-              <span>{line}</span>
-            </li>
-          )) : (
-            <li>
-              <Swords size={13} />
-              <span>Effet prévu plus tard</span>
-            </li>
-          )}
-        </ul>
-        {item.rawLevel !== item.effectiveLevel ? (
-          <small>Niveau effectif {item.effectiveLevel}/{item.cumulativeMax} · brut {item.rawLevel}</small>
-        ) : null}
-      </div>
+    <div className={`sublimation-preview-card sublimation-preview-${item.category} sublimation-preview-tone-${item.tone}`} tabIndex={0}>
+      {item.iconSrc ? (
+        <img className="sublimation-preview-icon" src={item.iconSrc} alt="" draggable={false} />
+      ) : (
+        <span className="sublimation-preview-icon sublimation-preview-icon-fallback" aria-hidden="true">{item.name.slice(0, 1)}</span>
+      )}
+      <span className={`sublimation-preview-name sublimation-title-${item.tone}`}>{item.name}</span>
+      <SublimationInfoTooltip item={item} />
     </div>
+  );
+}
+
+function SublimationInfoTooltip({ item }: { item: SublimationPreviewItem }) {
+  const effectLines = item.effectLines.length > 0 ? item.effectLines : item.sourceDescription ? [item.sourceDescription] : [];
+
+  return (
+    <aside className="spell-info-tooltip sublimation-info-tooltip" role="tooltip">
+      <div className="spell-info-header sublimation-info-header">
+        <div>
+          <span>Sublimation{item.displayLevel ? ` · niv. ${item.displayLevel}` : ""}</span>
+          <strong className={`sublimation-title-${item.tone}`}>{item.name}</strong>
+        </div>
+      </div>
+      <section className="spell-info-section">
+        <h3>Effets</h3>
+        <ul className="catalog-info-list">
+          {effectLines.length > 0 ? effectLines.map((line) => (
+            <li key={line}>{line}</li>
+          )) : <li>Effet non renseigné dans Wakfu.Guide.</li>}
+        </ul>
+      </section>
+      {item.supportReason ? (
+        <section className="spell-info-section">
+          <h3>Non supporté</h3>
+          <ul className="catalog-info-list">
+            <li>{item.supportReason}</li>
+          </ul>
+        </section>
+      ) : null}
+      {item.rawLevel !== item.effectiveLevel ? (
+        <section className="spell-info-section">
+          <h3>Cumul</h3>
+          <ul className="catalog-info-list">
+            <li>Niveau effectif {item.effectiveLevel}/{item.cumulativeMax} · brut {item.rawLevel}</li>
+          </ul>
+        </section>
+      ) : null}
+    </aside>
   );
 }
 
@@ -1510,51 +1577,27 @@ function formatDateTime(value: string): string {
   return value.slice(0, 16).replace("T", " ");
 }
 
-const sublimationSlotLimits: Record<SublimationCategory, number> = {
-  normal: 10,
-  epic: 1,
-  relic: 1,
-};
+const hpAssumptionChoices: Array<{ value: SublimationHpAssumption; label: string }> = [
+  { value: "normal", label: "Normal" },
+  { value: "healthy90", label: "90%+" },
+  { value: "berserk50", label: "Berserk 50%-" },
+  { value: "berserk20", label: "Berserk 20%-" },
+];
 
-function countSelectedSublimations(build: SublimationBuild): Map<string, number> {
-  const counts = new Map<string, number>();
-  for (const selection of build.selections) {
-    counts.set(selection.sublimationId, (counts.get(selection.sublimationId) ?? 0) + 1);
-  }
-  return counts;
-}
+const nearbyAlliesAssumptionChoices: Array<{ value: SublimationNearbyAlliesAssumption; label: string }> = [
+  { value: "unspecified", label: "Non fixé" },
+  { value: "none", label: "0" },
+  { value: "one", label: "1" },
+  { value: "twoPlus", label: "2+" },
+];
 
-function countSelectedSublimationCategories(entries: SublimationCatalogEntry[]): Record<SublimationCategory, number> {
-  return entries.reduce<Record<SublimationCategory, number>>((counts, entry) => ({
-    ...counts,
-    [entry.category]: counts[entry.category] + 1,
-  }), { normal: 0, epic: 0, relic: 0 });
-}
-
-function countSelectedSublimationFamilyLevels(entries: SublimationCatalogEntry[]): Map<string, number> {
-  const levels = new Map<string, number>();
-  for (const entry of entries) {
-    levels.set(entry.familyId, (levels.get(entry.familyId) ?? 0) + entry.level);
-  }
-  return levels;
-}
-
-function formatSublimationChipHint(
-  sublimation: SublimationCatalogEntry,
-  selectedRawLevel: number,
-  slotLimitReached: boolean,
-  stackLimitReached: boolean,
-): string {
-  if (stackLimitReached) {
-    return `cumul max ${sublimation.cumulativeMax}`;
-  }
-
-  if (slotLimitReached) {
-    return `slots ${sublimation.category} pleins`;
-  }
-
-  return `cumul ${Math.min(selectedRawLevel, sublimation.cumulativeMax)}/${sublimation.cumulativeMax}`;
-}
+const contactEnemiesAssumptionChoices: Array<{ value: SublimationContactEnemiesAssumption; label: string }> = [
+  { value: "unspecified", label: "Non fixé" },
+  { value: "none", label: "0" },
+  { value: "one", label: "1" },
+  { value: "two", label: "2" },
+  { value: "threePlus", label: "3+" },
+];
 
 function formatHpAssumption(assumption: SetupSnapshot["hpAssumption"]): string {
   if (assumption === "healthy90") {
@@ -1572,12 +1615,40 @@ function formatHpAssumption(assumption: SetupSnapshot["hpAssumption"]): string {
   return "Normal";
 }
 
-function getSublimationDisabledReason(status: string, reason: string | undefined): string | null {
-  if (status === "supported") {
-    return null;
+function formatNearbyAlliesAssumption(assumption: SublimationNearbyAlliesAssumption | undefined): string {
+  if (assumption === "none") {
+    return "0";
   }
 
-  return reason ?? (status === "ignored" ? "Ignorée" : "Prévue plus tard");
+  if (assumption === "one") {
+    return "1";
+  }
+
+  if (assumption === "twoPlus") {
+    return "2+";
+  }
+
+  return "Non fixé";
+}
+
+function formatContactEnemiesAssumption(assumption: SublimationContactEnemiesAssumption | undefined): string {
+  if (assumption === "none") {
+    return "0";
+  }
+
+  if (assumption === "one") {
+    return "1";
+  }
+
+  if (assumption === "two") {
+    return "2";
+  }
+
+  if (assumption === "threePlus") {
+    return "3+";
+  }
+
+  return "Non fixé";
 }
 
 function createOptimizerControlsKey(controls: OptimizerWorkspaceControls): string {

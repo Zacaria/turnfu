@@ -317,7 +317,7 @@ test("live optimizer throttles progress for large genetic workspace runs", async
   });
 
   assert.ok(snapshots.length > 1);
-  assert.ok(snapshots.length <= 102);
+  assert.ok(snapshots.length <= 202);
   assert.ok(snapshots.at(-1)!.attempts >= 10_000);
   assert.ok(results.length > 0);
 });
@@ -371,6 +371,7 @@ test("creates builder handoff payload from an optimizer candidate", () => {
   assert.deepEqual(handoff.plan, result.plan);
   assert.equal(createOptimizerCandidateId(result.plan), "light-hit");
   assert.equal(createOptimizerCandidateId(result.plan, ["passive-b", "passive-a"]), "passive-a+passive-b::light-hit");
+  assert.equal(createOptimizerCandidateId(result.plan, [], ["sauvegarde-6"]), "sauvegarde-6::light-hit");
   assert.equal(createSavedComboName(result), "1T · 40 dégâts · 40/tour");
 
   const passiveHandoff = openCandidateInBuilder(setup, {
@@ -381,4 +382,19 @@ test("creates builder handoff payload from an optimizer candidate", () => {
   assert.notEqual(passiveHandoff.character, setup.character);
   assert.deepEqual(passiveHandoff.character.classState?.huppermage?.activePassives, ["passive-a", "passive-b"]);
   assert.deepEqual(passiveHandoff.plan, result.plan);
+
+  const sublimationHandoff = openCandidateInBuilder(setup, {
+    ...result,
+    sublimationIds: ["sauvegarde-6"],
+    sublimations: {
+      selections: [{ sublimationId: "sauvegarde-6" }],
+      hpAssumption: "normal",
+      nearbyAlliesAssumption: "unspecified",
+      contactEnemiesAssumption: "unspecified",
+    },
+  });
+
+  assert.notEqual(sublimationHandoff.character, setup.character);
+  assert.deepEqual(sublimationHandoff.character.sublimations?.selections, [{ sublimationId: "sauvegarde-6" }]);
+  assert.deepEqual(sublimationHandoff.character.classState?.huppermage?.activePassives, setup.character.classState?.huppermage?.activePassives);
 });

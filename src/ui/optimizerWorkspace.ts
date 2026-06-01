@@ -9,6 +9,8 @@ import {
   runOptimizerExperiment,
 } from "../core/optimizer/index.ts";
 import type { ComboPlan, ResourcePool, SimulatedCharacter } from "../core/simulation/types.ts";
+import { sublimationCatalog } from "../core/sublimations/index.ts";
+import type { SublimationBuild } from "../core/sublimations/types.ts";
 import type { SetupSnapshot } from "./researchWorkspace.ts";
 
 export type OptimizerScoreCriterionId = "totalDamage" | "elementDamage";
@@ -26,6 +28,8 @@ export type OptimizerWorkspaceControls = {
 
 export type OptimizerCandidateSource = Pick<ComboOptimizerResult, "plan" | "simulation" | "score" | "sustainability"> & {
   passiveIds?: string[];
+  sublimationIds?: string[];
+  sublimations?: SublimationBuild;
 };
 
 export type OptimizerCandidateViewModel = {
@@ -39,6 +43,8 @@ export type OptimizerCandidateViewModel = {
   actionCount: number;
   apSpent: number;
   passiveIds: string[];
+  sublimationIds: string[];
+  sublimations: SublimationBuild;
   finalResources: ResourcePool;
   damageByResolvedElement: Record<Element, number>;
   sustainable: boolean;
@@ -138,6 +144,10 @@ export function createOptimizerExperimentOptionsForSetup(
     maxCandidates: normalizedControls.maxResultsPerDuration,
     maxPassiveCount: getSetupPassiveLimit(setup),
     availablePassiveIds: catalog.filter((entry) => entry.kind === "passive").map((entry) => entry.id),
+    maxSublimationCount: 12,
+    availableSublimationIds: sublimationCatalog
+      .filter((entry) => entry.supportStatus === "supported")
+      .map((entry) => entry.id),
     maxActionsPerTurn: 12,
     criterion,
     requireSustainableCycle: normalizedControls.requireSustainableCycle,
@@ -254,7 +264,7 @@ async function runGeneticOptimizerForControlsLive(
   const normalizedControls = normalizeOptimizerControls(controls);
   const candidates = new Map<string, OptimizerCandidateViewModel>();
   let latestResults: OptimizerCandidateViewModel[] = [];
-  const uiProgressInterval = Math.max(10, Math.floor(normalizedControls.iterationBudget / 100));
+  const uiProgressInterval = Math.max(1, Math.floor(normalizedControls.iterationBudget / 200));
   let nextUiProgressAttempt = 0;
   let reportedUiProgress = false;
 
@@ -326,7 +336,7 @@ export function createOptimizerResultViewModel({
   const damagePerAp = roundMetric(totalDamage / Math.max(1, apSpent));
 
   return {
-    id: createOptimizerCandidateId(result.plan, result.passiveIds ?? []),
+    id: createOptimizerCandidateId(result.plan, result.passiveIds ?? [], result.sublimationIds ?? []),
     duration,
     plan: result.plan,
     score: result.score.score,
@@ -336,6 +346,8 @@ export function createOptimizerResultViewModel({
     actionCount,
     apSpent,
     passiveIds: result.passiveIds ?? [],
+    sublimationIds: result.sublimationIds ?? [],
+    sublimations: result.sublimations ?? createCandidateSublimationBuild(result.sublimationIds ?? []),
     finalResources: result.simulation.finalState.remainingResources,
     damageByResolvedElement: result.score.damageByResolvedElement,
     sustainable: result.sustainability.sustainable,
@@ -344,9 +356,11 @@ export function createOptimizerResultViewModel({
   };
 }
 
-export function createOptimizerCandidateId(plan: ComboPlan, passiveIds: string[] = []): string {
+export function createOptimizerCandidateId(plan: ComboPlan, passiveIds: string[] = [], sublimationIds: string[] = []): string {
   const passiveKey = [...passiveIds].sort().join("+");
-  return passiveKey ? `${passiveKey}::${serializePlan(plan)}` : serializePlan(plan);
+  const sublimationKey = [...sublimationIds].sort().join("+");
+  const setupKey = [passiveKey, sublimationKey].filter(Boolean).join("::");
+  return setupKey ? `${setupKey}::${serializePlan(plan)}` : serializePlan(plan);
 }
 
 export function summarizeOptimizerControls(controls: OptimizerWorkspaceControls): string {
@@ -407,19 +421,31 @@ export function getPinnedCandidates(
 export function openCandidateInBuilder(setup: SetupSnapshot, candidate: OptimizerCandidateViewModel): BuilderHandoff {
   return {
     setupSnapshotId: setup.id,
-    character: candidate.passiveIds.length > 0
+    character: candidate.passiveIds.length > 0 || candidate.sublimationIds.length > 0
       ? {
         ...setup.character,
+        sublimations: candidate.sublimations,
         classState: {
           ...setup.character.classState,
           huppermage: {
             ...setup.character.classState?.huppermage,
-            activePassives: [...candidate.passiveIds],
+            activePassives: candidate.passiveIds.length > 0
+              ? [...candidate.passiveIds]
+              : [...(setup.character.classState?.huppermage?.activePassives ?? [])],
           },
         },
       }
       : setup.character,
     plan: candidate.plan,
+  };
+}
+
+function createCandidateSublimationBuild(sublimationIds: string[]): SublimationBuild {
+  return {
+    selections: sublimationIds.map((sublimationId) => ({ sublimationId })),
+    hpAssumption: "normal",
+    nearbyAlliesAssumption: "unspecified",
+    contactEnemiesAssumption: "unspecified",
   };
 }
 

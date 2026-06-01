@@ -632,3 +632,89 @@ test("prefers fewer passive chromosomes when simulated scores tie", () => {
   assert.deepEqual(result.bestCandidate?.passiveIds, []);
   assert.deepEqual(result.engineResults[0]?.topCandidates.map((candidate) => candidate.passiveIds), [[], ["neutral-passive"]]);
 });
+
+test("ranks sublimation chromosomes by simulated score", () => {
+  const result = runOptimizerExperiment({
+    catalog,
+    character: {
+      ...character,
+      stats: {
+        ...character.stats,
+        criticalHitPercent: 0,
+        criticalMastery: 100,
+      },
+    },
+    duration: 1,
+    availableSpellIds: ["hit"],
+    availableSublimationIds: ["influence-6"],
+    engines: ["genetic"],
+    seed: "sublimation-chromosome-ranking",
+    budget: { iterations: 20 },
+    maxActionsPerTurn: 1,
+    maxSublimationCount: 1,
+    maxCandidates: 2,
+    defaultActionContext: { criticalMode: "expected" },
+  });
+
+  assert.deepEqual(result.bestCandidate?.sublimationIds, ["influence-6"]);
+  assert.ok((result.bestCandidate?.score.score ?? 0) > 20);
+});
+
+test("evaluates sustainable cycles with candidate sublimations", () => {
+  const sustainableCatalog = [
+    ...catalog,
+    normalizeEntry(spell("two-ap-hit", {
+      name: "Two AP Hit",
+      level: 200,
+      cost: cost({ ap: 2 }),
+      effects: [damage({ element: "fire", base: 20 })],
+      constraints: [],
+      metadata: { status: "extracted", sources: [source] },
+    })),
+  ] as CatalogEntry[];
+  const evaluator = createOptimizerExperimentEvaluator({
+    catalog: sustainableCatalog,
+    character,
+    duration: 1,
+    requireSustainableCycle: true,
+  });
+
+  const result = evaluator.evaluate({
+    sublimationIds: ["vivacite-2"],
+    plan: {
+      turns: [{ actions: [{ spellId: "two-ap-hit" }] }],
+    },
+  });
+
+  assert.ok(result);
+  assert.deepEqual(result.sublimationIds, ["vivacite-2"]);
+  assert.equal(result.sustainability.sustainable, true);
+  assert.equal(result.sustainability.replay?.turns[0]?.result.breakdown[0]?.resourceBefore.ap, 2);
+});
+
+test("hybrid search explores sublimation neighbors before spending the short-run budget", () => {
+  const result = runOptimizerExperiment({
+    catalog,
+    character: {
+      ...character,
+      stats: {
+        ...character.stats,
+        criticalHitPercent: 0,
+        criticalMastery: 100,
+      },
+    },
+    duration: 1,
+    availableSpellIds: ["hit"],
+    availableSublimationIds: ["influence-6"],
+    engines: ["hybrid"],
+    seed: "hybrid-sublimation-neighbor-ranking",
+    budget: { iterations: 20 },
+    maxActionsPerTurn: 1,
+    maxSublimationCount: 1,
+    maxCandidates: 2,
+    defaultActionContext: { criticalMode: "expected" },
+  });
+
+  assert.deepEqual(result.bestCandidate?.sublimationIds, ["influence-6"]);
+  assert.ok((result.engineResults[0]?.metrics.hybridSublimationNeighborCandidates ?? 0) > 0);
+});

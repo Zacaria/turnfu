@@ -1,6 +1,8 @@
 import type { CatalogEntry, Resource, SpellCost } from "../catalog/types.ts";
 import { simulateCombo } from "../simulation/comboSimulator.ts";
 import type { Action, ComboPlan, ComboSimulationOptions, SimulatedCharacter, TurnPlan } from "../simulation/types.ts";
+import { findSublimation } from "../sublimations/catalog.ts";
+import type { SublimationBuild } from "../sublimations/types.ts";
 import {
   evaluateSustainableCycle,
   scoreComboSimulation,
@@ -18,12 +20,15 @@ export type OptimizerExperimentBudget = {
 
 export type OptimizerExperimentCandidateInput = {
   passiveIds?: string[];
+  sublimationIds?: string[];
   plan: ComboPlan;
 };
 
 export type OptimizerExperimentCandidate = {
   id: string;
   passiveIds: string[];
+  sublimationIds: string[];
+  sublimations: SublimationBuild;
   plan: ComboPlan;
   score: ComboScoreBreakdown;
   simulation: ReturnType<typeof simulateCombo>;
@@ -69,7 +74,9 @@ export type OptimizerExperimentOptions = {
   seed?: string;
   availableSpellIds?: string[];
   availablePassiveIds?: string[];
+  availableSublimationIds?: string[];
   maxPassiveCount?: number;
+  maxSublimationCount?: number;
   maxActionsPerTurn?: number;
   criterion?: ComboOptimizationCriterion;
   requireSustainableCycle?: boolean;
@@ -120,7 +127,8 @@ type EngineContext = {
 type NormalizedExperimentOptions = Required<Pick<
   OptimizerExperimentOptions,
   "duration" | "engines" | "budget" | "seed" | "maxPassiveCount" | "maxActionsPerTurn" | "progressInterval"
->> & Omit<OptimizerExperimentOptions, "duration" | "engines" | "budget" | "seed" | "maxPassiveCount" | "maxActionsPerTurn" | "progressInterval">;
+  | "maxSublimationCount"
+>> & Omit<OptimizerExperimentOptions, "duration" | "engines" | "budget" | "seed" | "maxPassiveCount" | "maxActionsPerTurn" | "progressInterval" | "maxSublimationCount">;
 
 type EngineAccumulator = {
   engine: OptimizerExperimentEngineKind;
@@ -245,7 +253,7 @@ export function createOptimizerExperimentEvaluator(
 
     stats.cacheMisses += 1;
     const normalizedCandidate = normalizeCandidate(candidate);
-    const character = createCandidateCharacter(options.character, normalizedCandidate.passiveIds);
+    const character = createCandidateCharacter(options.character, normalizedCandidate.passiveIds, normalizedCandidate.sublimationIds);
     const simulation = simulateCombo({
       catalog: options.catalog,
       character,
@@ -280,6 +288,8 @@ export function createOptimizerExperimentEvaluator(
     const result = {
       id: serializeExperimentCandidate(normalizedCandidate),
       passiveIds: normalizedCandidate.passiveIds,
+      sublimationIds: normalizedCandidate.sublimationIds,
+      sublimations: createCandidateSublimationBuild(options.character.sublimations, normalizedCandidate.sublimationIds),
       plan: normalizedCandidate.plan,
       simulation,
       score: options.requireSustainableCycle
@@ -875,6 +885,7 @@ function createHybridInputDescriptor(input: OptimizerExperimentCandidateInput): 
   return [
     `actions:${input.plan.turns.reduce((total, turn) => total + turn.actions.length, 0)}`,
     `passives:${[...(input.passiveIds ?? [])].sort().join(",")}`,
+    `sublimations:${[...(input.sublimationIds ?? [])].sort().join(",")}`,
     ...input.plan.turns.flatMap((turn, turnIndex) => turn.actions.map((action) => `t${turnIndex}:${serializeAction(action)}`)),
   ];
 }
@@ -956,6 +967,38 @@ function enqueueHybridEliteNeighbors(
     }
     return true;
   };
+
+  const availableSublimationIds = getAvailableSublimationIds(context.options);
+  const activeSublimationIds = [...new Set(input.sublimationIds ?? [])]
+    .filter((sublimationId) => availableSublimationIds.includes(sublimationId))
+    .sort();
+  const missingSublimationIds = availableSublimationIds.filter((sublimationId) => !activeSublimationIds.includes(sublimationId));
+  const sublimationLimit = Math.min(context.options.maxSublimationCount, availableSublimationIds.length);
+
+  for (const sublimationId of activeSublimationIds) {
+    const candidate = cloneCandidateInput(input);
+    candidate.sublimationIds = activeSublimationIds.filter((activeSublimationId) => activeSublimationId !== sublimationId);
+    addCandidate(candidate, "hybridSublimationNeighborCandidates");
+  }
+
+  if (activeSublimationIds.length < sublimationLimit) {
+    for (const sublimationId of missingSublimationIds.slice(0, 12)) {
+      const candidate = cloneCandidateInput(input);
+      candidate.sublimationIds = [...activeSublimationIds, sublimationId].sort();
+      addCandidate(candidate, "hybridSublimationNeighborCandidates");
+    }
+  }
+
+  for (const sublimationId of activeSublimationIds) {
+    for (const replacementSublimationId of missingSublimationIds.slice(0, 8)) {
+      const candidate = cloneCandidateInput(input);
+      candidate.sublimationIds = activeSublimationIds
+        .filter((activeSublimationId) => activeSublimationId !== sublimationId)
+        .concat(replacementSublimationId)
+        .sort();
+      addCandidate(candidate, "hybridSublimationNeighborCandidates");
+    }
+  }
 
   const availablePassiveIds = getAvailablePassiveIds(context.options)
     .sort((left, right) => getPassiveSearchWeight(right, context.options) - getPassiveSearchWeight(left, context.options));
@@ -1346,7 +1389,7 @@ async function runHybridEngineProgressive(context: EngineContext): Promise<Optim
     const islandOptions: NormalizedExperimentOptions = {
       ...context.options,
       budget: { iterations },
-      progressInterval: Math.max(1, Math.floor(iterations / 10)),
+      progressInterval: Math.min(context.options.progressInterval, Math.max(1, Math.floor(iterations / 10))),
       onProgress: (progress) => {
         context.options.onProgress?.({
           ...progress,
@@ -2237,14 +2280,17 @@ function createWarmupCandidates(
   }
 
   const passiveSelections = createPassiveSelections(options);
+  const sublimationSelections = createSublimationSelections(options);
   const plans = combineSingleActionTurns(actions, options.duration, limit);
   const candidates: OptimizerExperimentCandidateInput[] = [];
 
   for (const passiveIds of passiveSelections) {
-    for (const plan of plans) {
-      candidates.push({ passiveIds, plan });
-      if (candidates.length >= limit) {
-        return candidates;
+    for (const sublimationIds of sublimationSelections) {
+      for (const plan of plans) {
+        candidates.push({ passiveIds, sublimationIds, plan });
+        if (candidates.length >= limit) {
+          return candidates;
+        }
       }
     }
   }
@@ -2279,6 +2325,7 @@ function createRandomCandidate(
 ): OptimizerExperimentCandidateInput {
   return {
     passiveIds: pickRandomPassives(options, rng),
+    sublimationIds: pickRandomSublimations(options, rng),
     plan: {
       turns: Array.from({ length: options.duration }, () => ({
         actions: Array.from({ length: rng.integer(1, options.maxActionsPerTurn) }, () => cloneAction(rng.pick(actions))),
@@ -2341,6 +2388,7 @@ function createResourceAwareCandidate(
 
   return {
     passiveIds: pickRandomPassives(options, rng),
+    sublimationIds: pickRandomSublimations(options, rng),
     plan: { turns },
   };
 }
@@ -2457,6 +2505,7 @@ function countsAsSoftTargetCast(action: Action): boolean {
 function createMctsCandidate(context: EngineContext, statsByPositionAction: Map<string, ActionStat>): OptimizerExperimentCandidateInput {
   const actions = getSearchActions(context.options);
   const passiveIds = pickRandomPassives(context.options, context.rng);
+  const sublimationIds = pickRandomSublimations(context.options, context.rng);
   const turns = [];
 
   for (let turnIndex = 0; turnIndex < context.options.duration; turnIndex += 1) {
@@ -2468,7 +2517,7 @@ function createMctsCandidate(context: EngineContext, statsByPositionAction: Map<
     turns.push({ actions: turnActions });
   }
 
-  return { passiveIds, plan: { turns } };
+  return { passiveIds, sublimationIds, plan: { turns } };
 }
 
 function selectMctsAction(
@@ -2514,6 +2563,9 @@ function mutateCandidate(candidate: OptimizerExperimentCandidateInput, context: 
   const next = cloneCandidateInput(candidate);
   if (context.rng.chance(0.35)) {
     next.passiveIds = mutatePassiveIds(next.passiveIds ?? [], context.options, context.rng);
+  }
+  if (context.rng.chance(0.35)) {
+    next.sublimationIds = mutateSublimationIds(next.sublimationIds ?? [], context.options, context.rng);
   }
 
   const turnIndex = selectMutationTurnIndex(next, context);
@@ -2592,7 +2644,8 @@ function crossoverCandidates(
     ? cloneTurn(turn)
     : cloneTurn(parentB.plan.turns[index] ?? turn));
   const passiveIds = crossoverPassiveIds(parentA.passiveIds ?? [], parentB.passiveIds ?? [], options, rng);
-  return { passiveIds, plan: { turns } };
+  const sublimationIds = crossoverSublimationIds(parentA.sublimationIds ?? [], parentB.sublimationIds ?? [], options, rng);
+  return { passiveIds, sublimationIds, plan: { turns } };
 }
 
 function tournamentSelect(
@@ -2684,6 +2737,7 @@ function createNoveltyDescriptor(candidate: OptimizerExperimentCandidate): strin
     `wp:${candidate.simulation.finalState.remainingResources.wp}`,
     `actions:${candidate.plan.turns.reduce((total, turn) => total + turn.actions.length, 0)}`,
     `passives:${candidate.passiveIds.join(",")}`,
+    `sublimations:${candidate.sublimationIds.join(",")}`,
     ...candidate.plan.turns.flatMap((turn, turnIndex) => turn.actions.map((action) => `t${turnIndex}:${serializeAction(action)}`)),
   ];
 }
@@ -2796,6 +2850,7 @@ function normalizeExperimentOptions(options: OptimizerExperimentOptions): Normal
     budget: { iterations: clampInteger(options.budget.iterations, 1, 1_000_000) },
     seed: options.seed ?? "optimizer-experiment",
     maxPassiveCount: clampInteger(options.maxPassiveCount ?? 0, 0, 6),
+    maxSublimationCount: clampInteger(options.maxSublimationCount ?? 0, 0, 12),
     maxActionsPerTurn: clampInteger(options.maxActionsPerTurn ?? 3, 1, 12),
     progressInterval: clampInteger(options.progressInterval ?? Math.max(1, Math.floor(options.budget.iterations / 10)), 1, 1_000_000),
   };
@@ -2838,6 +2893,23 @@ function createPassiveSelections(options: NormalizedExperimentOptions): string[]
   return selections;
 }
 
+function createSublimationSelections(options: NormalizedExperimentOptions): string[][] {
+  const sublimationIds = getAvailableSublimationIds(options);
+  if (sublimationIds.length === 0 || options.maxSublimationCount === 0) {
+    return [[]];
+  }
+
+  const selections: string[][] = [[]];
+  for (const sublimationId of sublimationIds) {
+    for (const selection of [...selections]) {
+      if (selection.length < options.maxSublimationCount) {
+        selections.push([...selection, sublimationId].sort());
+      }
+    }
+  }
+  return selections;
+}
+
 function pickRandomPassives(options: NormalizedExperimentOptions, rng: SeededRandom): string[] {
   const passiveIds = getAvailablePassiveIds(options);
   if (passiveIds.length === 0 || options.maxPassiveCount === 0) {
@@ -2855,6 +2927,28 @@ function pickRandomPassives(options: NormalizedExperimentOptions, rng: SeededRan
     const passiveId = pickWeightedPassiveId(remaining, options, rng);
     selected.push(passiveId);
     remaining.splice(remaining.indexOf(passiveId), 1);
+  }
+
+  return selected.sort();
+}
+
+function pickRandomSublimations(options: NormalizedExperimentOptions, rng: SeededRandom): string[] {
+  const sublimationIds = getAvailableSublimationIds(options);
+  if (sublimationIds.length === 0 || options.maxSublimationCount === 0) {
+    return [];
+  }
+
+  const sublimationLimit = Math.min(options.maxSublimationCount, sublimationIds.length);
+  const targetCount = rng.chance(0.8)
+    ? rng.integer(Math.min(1, sublimationLimit), sublimationLimit)
+    : rng.integer(0, sublimationLimit);
+  const selected: string[] = [];
+  const remaining = [...sublimationIds];
+
+  while (selected.length < targetCount && remaining.length > 0) {
+    const sublimationId = rng.pick(remaining);
+    selected.push(sublimationId);
+    remaining.splice(remaining.indexOf(sublimationId), 1);
   }
 
   return selected.sort();
@@ -2928,6 +3022,34 @@ function mutatePassiveIds(
   return [...next].sort();
 }
 
+function mutateSublimationIds(
+  currentSublimationIds: string[],
+  options: NormalizedExperimentOptions,
+  rng: SeededRandom,
+): string[] {
+  const availableSublimationIds = getAvailableSublimationIds(options);
+  if (availableSublimationIds.length === 0 || options.maxSublimationCount === 0) {
+    return [];
+  }
+
+  const available = new Set(availableSublimationIds);
+  const next = new Set(currentSublimationIds.filter((sublimationId) => available.has(sublimationId)));
+  const missing = availableSublimationIds.filter((sublimationId) => !next.has(sublimationId));
+  const canAdd = next.size < Math.min(options.maxSublimationCount, availableSublimationIds.length) && missing.length > 0;
+  const canRemove = next.size > 0;
+
+  if (canAdd && (!canRemove || rng.chance(0.45))) {
+    next.add(rng.pick(missing));
+  } else if (canRemove && (!canAdd || rng.chance(0.35))) {
+    next.delete(rng.pick([...next]));
+  } else if (canAdd && canRemove) {
+    next.delete(rng.pick([...next]));
+    next.add(rng.pick(missing));
+  }
+
+  return [...next].sort();
+}
+
 function crossoverPassiveIds(
   parentAPassiveIds: string[],
   parentBPassiveIds: string[],
@@ -2954,15 +3076,107 @@ function crossoverPassiveIds(
   return selected.sort();
 }
 
+function crossoverSublimationIds(
+  parentASublimationIds: string[],
+  parentBSublimationIds: string[],
+  options: NormalizedExperimentOptions,
+  rng: SeededRandom,
+): string[] {
+  const available = new Set(getAvailableSublimationIds(options));
+  const inherited = [...new Set([...parentASublimationIds, ...parentBSublimationIds])]
+    .filter((sublimationId) => available.has(sublimationId))
+    .sort();
+  const selected: string[] = [];
+
+  for (const sublimationId of inherited) {
+    if (selected.length >= options.maxSublimationCount) {
+      break;
+    }
+    const inParentA = parentASublimationIds.includes(sublimationId);
+    const inParentB = parentBSublimationIds.includes(sublimationId);
+    if ((inParentA && inParentB) || rng.chance(0.5)) {
+      selected.push(sublimationId);
+    }
+  }
+
+  return selected.sort();
+}
+
+const availablePassiveIdsCache = new WeakMap<NormalizedExperimentOptions, string[]>();
+const availableSublimationIdsCache = new WeakMap<NormalizedExperimentOptions, string[]>();
+
 function getAvailablePassiveIds(options: NormalizedExperimentOptions): string[] {
+  const cached = availablePassiveIdsCache.get(options);
+  if (cached) {
+    return cached;
+  }
+
   const currentPassives = options.character.classState?.huppermage?.activePassives ?? [];
   const passiveIds = options.availablePassiveIds ?? currentPassives;
   const catalogPassiveIds = new Set(options.catalog.filter((entry) => entry.kind === "passive").map((entry) => entry.id));
-  return [...new Set(passiveIds)].filter((passiveId) => catalogPassiveIds.has(passiveId)).sort();
+  const available = [...new Set(passiveIds)].filter((passiveId) => catalogPassiveIds.has(passiveId)).sort();
+  availablePassiveIdsCache.set(options, available);
+  return available;
 }
 
-function createCandidateCharacter(character: SimulatedCharacter, passiveIds: string[]): SimulatedCharacter {
+function getAvailableSublimationIds(options: NormalizedExperimentOptions): string[] {
+  const cached = availableSublimationIdsCache.get(options);
+  if (cached) {
+    return cached;
+  }
+
+  const currentSublimations = options.character.sublimations?.selections.map((selection) => selection.sublimationId) ?? [];
+  const sublimationIds = options.availableSublimationIds ?? currentSublimations;
+  const available = [...new Set(sublimationIds)]
+    .filter((sublimationId) => findSublimation(sublimationId)?.supportStatus === "supported")
+    .sort((left, right) => getSublimationSearchWeight(right) - getSublimationSearchWeight(left) || left.localeCompare(right));
+  availableSublimationIdsCache.set(options, available);
+  return available;
+}
+
+function getSublimationSearchWeight(sublimationId: string): number {
+  const sublimation = findSublimation(sublimationId);
+  if (!sublimation) {
+    return 1;
+  }
+
+  let weight = 1;
+  for (const effect of sublimation.effects) {
+    if (effect.type === "statModifier" && effect.amount > 0) {
+      if (effect.stat === "damageInflictedPercent") {
+        weight += effect.amount / 3;
+      } else if (effect.stat.toLowerCase().includes("mastery")) {
+        weight += effect.amount / 50;
+      } else if (effect.stat === "criticalHitPercent") {
+        weight += effect.amount / 2;
+      } else {
+        weight += effect.amount / 100;
+      }
+    }
+
+    if (effect.type === "resourceDelta" && effect.amount > 0) {
+      weight += effect.resource === "ap" ? effect.amount * 6 : effect.amount * 2;
+    }
+
+    if (effect.type === "actionDamageInflictedPercent" && effect.amount > 0) {
+      weight += effect.amount / 2;
+    }
+
+    if (effect.type === "carryoverResource") {
+      weight += effect.resource === "ap" ? 4 : 2;
+    }
+  }
+
+  return weight;
+}
+
+function createCandidateCharacter(
+  character: SimulatedCharacter,
+  passiveIds: string[],
+  sublimationIds: string[],
+): SimulatedCharacter {
   const huppermage = character.classState?.huppermage;
+  const sublimations = createCandidateSublimationBuild(character.sublimations, sublimationIds);
   return {
     ...character,
     resources: { ...character.resources },
@@ -2977,15 +3191,24 @@ function createCandidateCharacter(character: SimulatedCharacter, passiveIds: str
         activePassives: [...passiveIds],
       },
     },
+    sublimations,
   };
 }
 
 function normalizeCandidate(candidate: OptimizerExperimentCandidateInput): Required<OptimizerExperimentCandidateInput> {
   return {
     passiveIds: [...(candidate.passiveIds ?? [])].sort(),
+    sublimationIds: [...(candidate.sublimationIds ?? [])].sort(),
     plan: {
       turns: candidate.plan.turns.map(cloneTurn),
     },
+  };
+}
+
+function createCandidateSublimationBuild(base: SublimationBuild | undefined, sublimationIds: string[]): SublimationBuild {
+  return {
+    ...base,
+    selections: sublimationIds.map((sublimationId) => ({ sublimationId })),
   };
 }
 
@@ -3007,12 +3230,13 @@ function createCandidateCacheKey(
 }
 
 function serializeExperimentCandidate(candidate: Required<OptimizerExperimentCandidateInput>): string {
-  return `${candidate.passiveIds.join("+")}::${candidate.plan.turns.map((turn) => turn.actions.map(serializeAction).join(",")).join("|")}`;
+  return `${candidate.passiveIds.join("+")}::${candidate.sublimationIds.join("+")}::${candidate.plan.turns.map((turn) => turn.actions.map(serializeAction).join(",")).join("|")}`;
 }
 
 function serializeCandidateInput(candidate: OptimizerExperimentCandidateInput): string {
   const passiveKey = [...(candidate.passiveIds ?? [])].sort().join("+");
-  return `${passiveKey}::${candidate.plan.turns.map((turn) => turn.actions.map(serializeAction).join(",")).join("|")}`;
+  const sublimationKey = [...(candidate.sublimationIds ?? [])].sort().join("+");
+  return `${passiveKey}::${sublimationKey}::${candidate.plan.turns.map((turn) => turn.actions.map(serializeAction).join(",")).join("|")}`;
 }
 
 function serializeAction(action: Action): string {
@@ -3022,6 +3246,7 @@ function serializeAction(action: Action): string {
 function cloneCandidateInput(candidate: OptimizerExperimentCandidateInput): OptimizerExperimentCandidateInput {
   return {
     passiveIds: [...(candidate.passiveIds ?? [])],
+    sublimationIds: [...(candidate.sublimationIds ?? [])],
     plan: {
       turns: candidate.plan.turns.map(cloneTurn),
     },
@@ -3056,6 +3281,11 @@ function compareCandidates(left: OptimizerExperimentCandidate, right: OptimizerE
   const passiveCountDifference = left.passiveIds.length - right.passiveIds.length;
   if (passiveCountDifference !== 0) {
     return passiveCountDifference;
+  }
+
+  const sublimationCountDifference = left.sublimationIds.length - right.sublimationIds.length;
+  if (sublimationCountDifference !== 0) {
+    return sublimationCountDifference;
   }
 
   const actionCountDifference = countCandidateActions(left) - countCandidateActions(right);

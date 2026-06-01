@@ -80,6 +80,10 @@ function createNextTurnCharacter(baseCharacter: SimulatedCharacter, previousFina
     ...baseCharacter,
     resources,
     stats: cloneStats(baseCharacter.stats),
+    sublimationElementalCarryover: { ...previousFinalState.sublimationElementalCarryover },
+    sublimationSpellCountCarryover: cloneSpellCountCarryover(previousFinalState.sublimationSpellCountCarryover),
+    sublimationAlternancePreviousElement: previousFinalState.sublimationAlternancePreviousElement,
+    sublimationSpentResourcesThisTurn: {},
     classState: createNextClassState(previousFinalState),
   };
 }
@@ -145,6 +149,16 @@ function cloneCharacter(character: SimulatedCharacter): SimulatedCharacter {
         selections: character.sublimations.selections.map((selection) => ({ ...selection })),
       }
       : undefined,
+    sublimationElementalCarryover: character.sublimationElementalCarryover
+      ? { ...character.sublimationElementalCarryover }
+      : undefined,
+    sublimationSpellCountCarryover: character.sublimationSpellCountCarryover
+      ? cloneSpellCountCarryover(character.sublimationSpellCountCarryover)
+      : undefined,
+    sublimationAlternancePreviousElement: character.sublimationAlternancePreviousElement ?? undefined,
+    sublimationSpentResourcesThisTurn: character.sublimationSpentResourcesThisTurn
+      ? { ...character.sublimationSpentResourcesThisTurn }
+      : undefined,
     classState: huppermage
       ? {
         huppermage: {
@@ -160,6 +174,14 @@ function cloneCharacter(character: SimulatedCharacter): SimulatedCharacter {
       }
       : character.classState,
   };
+}
+
+function cloneSpellCountCarryover(
+  carryover: NonNullable<SimulatedCharacter["sublimationSpellCountCarryover"]>,
+): NonNullable<SimulatedCharacter["sublimationSpellCountCarryover"]> {
+  return Object.fromEntries(
+    Object.entries(carryover).map(([familyId, state]) => [familyId, { ...state }]),
+  );
 }
 
 function cloneStats(stats: BaseStats): BaseStats {

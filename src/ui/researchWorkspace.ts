@@ -84,6 +84,7 @@ export type SavedComboReference = {
   name: string;
   plan: ComboPlan;
   passiveIds?: string[];
+  sublimations?: SublimationBuild;
   totalDamage?: number;
   criteriaSummary?: string;
   createdAt: string;
@@ -118,6 +119,7 @@ export type SaveOptimizerCandidateComboInput = {
   name?: string;
   plan: ComboPlan;
   passiveIds?: string[];
+  sublimations?: SublimationBuild;
   totalDamage?: number;
   criteriaSummary?: string;
   now?: string;
@@ -189,12 +191,19 @@ export function isWakfuClassSelectable(classId: WakfuClassId): boolean {
   return wakfuClassOptions.find((option) => option.id === classId)?.selectable ?? false;
 }
 
+const defaultSublimationBuild: SublimationBuild = {
+  selections: [],
+  hpAssumption: "normal",
+  nearbyAlliesAssumption: "unspecified",
+  contactEnemiesAssumption: "unspecified",
+};
+
 export function createSeedResearchWorkspace({ now = new Date().toISOString() }: { now?: string } = {}): ResearchWorkspaceData {
   const buildId = "build-hupper-lumiere-distance";
   const setupId = "setup-hupper-lumiere-distance-v1";
   const character = createSeedHuppermageCharacter();
   const passiveIds = character.classState?.huppermage?.activePassives ?? [];
-  const sublimations = character.sublimations ?? { selections: [], hpAssumption: "normal" as const };
+  const sublimations = normalizeSublimationBuild(character.sublimations);
   const setup: SetupSnapshot = {
     id: setupId,
     buildId,
@@ -253,7 +262,7 @@ export function createBuild(
   const setupId = `${buildId}-setup-v1`;
   const character = createSeedHuppermageCharacter();
   const passiveIds = character.classState?.huppermage?.activePassives ?? [];
-  const sublimations = character.sublimations ?? { selections: [], hpAssumption: "normal" as const };
+  const sublimations = normalizeSublimationBuild(character.sublimations);
   const setup: SetupSnapshot = {
     id: setupId,
     buildId,
@@ -356,7 +365,7 @@ export function saveSetupVersion(
 
   const character = cloneCharacter(input.character);
   const passiveIds = character.classState?.huppermage?.activePassives ?? sourceSetup.passiveIds;
-  const sublimations = character.sublimations ?? sourceSetup.sublimations;
+  const sublimations = normalizeSublimationBuild(character.sublimations, sourceSetup.sublimations);
   const candidateSetup: SetupSnapshot = {
     ...sourceSetup,
     character: {
@@ -467,6 +476,7 @@ export function saveOptimizerCandidateCombo(
     name,
     plan: input.plan,
     passiveIds: input.passiveIds?.length ? [...input.passiveIds].sort() : undefined,
+    sublimations: input.sublimations ? normalizeSublimationBuild(input.sublimations) : undefined,
     totalDamage: input.totalDamage,
     criteriaSummary: input.criteriaSummary?.trim() || undefined,
     createdAt: now,
@@ -695,7 +705,7 @@ export function restoreResearchWorkspace(storage: WorkspaceStorage): ResearchWor
 }
 
 function normalizeSetupSnapshot(setup: SetupSnapshot): SetupSnapshot {
-  const sublimations = setup.sublimations ?? setup.character.sublimations ?? { selections: [], hpAssumption: "normal" as const };
+  const sublimations = normalizeSublimationBuild(setup.sublimations ?? setup.character.sublimations);
   return {
     ...setup,
     character: {
@@ -704,6 +714,16 @@ function normalizeSetupSnapshot(setup: SetupSnapshot): SetupSnapshot {
     },
     sublimations,
     hpAssumption: setup.hpAssumption ?? sublimations.hpAssumption ?? "normal",
+  };
+}
+
+function normalizeSublimationBuild(build: SublimationBuild | undefined, fallback?: SublimationBuild): SublimationBuild {
+  const source = build ?? fallback ?? defaultSublimationBuild;
+  return {
+    selections: source.selections.map((selection) => ({ ...selection })),
+    hpAssumption: source.hpAssumption ?? fallback?.hpAssumption ?? defaultSublimationBuild.hpAssumption,
+    nearbyAlliesAssumption: source.nearbyAlliesAssumption ?? fallback?.nearbyAlliesAssumption ?? defaultSublimationBuild.nearbyAlliesAssumption,
+    contactEnemiesAssumption: source.contactEnemiesAssumption ?? fallback?.contactEnemiesAssumption ?? defaultSublimationBuild.contactEnemiesAssumption,
   };
 }
 

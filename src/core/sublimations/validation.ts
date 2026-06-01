@@ -4,6 +4,7 @@ import type {
   SublimationBuild,
   SublimationCatalogEntry,
   SublimationCategory,
+  SublimationHpAssumption,
   SublimationValidationResult,
   SublimationValidationViolation,
 } from "./types.ts";
@@ -50,7 +51,6 @@ export function validateSublimationBuild(
   }
 
   violations.push(...validateSlotLimits(selectedEntries));
-  violations.push(...validateHpCompatibility(selectedEntries));
 
   return {
     valid: violations.length === 0,
@@ -102,25 +102,32 @@ function validateSlotLimits(entries: SublimationCatalogEntry[]): SublimationVali
   return violations;
 }
 
-function validateHpCompatibility(entries: SublimationCatalogEntry[]): SublimationValidationViolation[] {
-  const hpRequirements = entries.filter((entry) => entry.hpRequirement);
-  const violations: SublimationValidationViolation[] = [];
-
-  for (let index = 0; index < hpRequirements.length; index += 1) {
-    for (let nextIndex = index + 1; nextIndex < hpRequirements.length; nextIndex += 1) {
-      const left = hpRequirements[index]!;
-      const right = hpRequirements[nextIndex]!;
-      if (!rangesOverlap(left.hpRequirement!, right.hpRequirement!)) {
-        violations.push({
-          type: "hpConditionConflict",
-          sublimationId: `${left.id},${right.id}`,
-          message: `HP conditions for '${left.name}' and '${right.name}' cannot be true together.`,
-        });
-      }
-    }
+export function isSublimationHpRequirementSatisfied(
+  entry: SublimationCatalogEntry,
+  assumption: SublimationHpAssumption,
+): boolean {
+  if (!entry.hpRequirement) {
+    return true;
   }
 
-  return violations;
+  const assumptionRange = getHpAssumptionRange(assumption);
+  return rangesOverlap(entry.hpRequirement, assumptionRange);
+}
+
+function getHpAssumptionRange(assumption: SublimationHpAssumption): NonNullable<SublimationCatalogEntry["hpRequirement"]> {
+  if (assumption === "healthy90") {
+    return { minPercent: 90 };
+  }
+
+  if (assumption === "berserk20") {
+    return { maxPercent: 20 };
+  }
+
+  if (assumption === "berserk50") {
+    return { maxPercent: 50 };
+  }
+
+  return { minPercent: 21, maxPercent: 89 };
 }
 
 function rangesOverlap(

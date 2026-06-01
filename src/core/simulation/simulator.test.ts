@@ -47,6 +47,60 @@ const testCatalog = normalizeCatalog([
     constraints: [],
     metadata: { status: "extracted", sources: [source] },
   }),
+  spell("water-damage-test", {
+    name: "Water Damage Test",
+    level: 200,
+    element: "water",
+    cost: cost({ ap: 1 }),
+    effects: [damage({ element: "water", base: 10 })],
+    constraints: [],
+    metadata: { status: "extracted", sources: [source] },
+  }),
+  spell("water-trigger-test", {
+    name: "Water Trigger Test",
+    level: 200,
+    element: "water",
+    cost: cost({ ap: 1 }),
+    effects: [],
+    constraints: [],
+    metadata: { status: "extracted", sources: [source] },
+  }),
+  spell("earth-trigger-test", {
+    name: "Earth Trigger Test",
+    level: 200,
+    element: "earth",
+    cost: cost({ ap: 1 }),
+    effects: [],
+    constraints: [],
+    metadata: { status: "extracted", sources: [source] },
+  }),
+  spell("air-trigger-test", {
+    name: "Air Trigger Test",
+    level: 200,
+    element: "air",
+    cost: cost({ ap: 1 }),
+    effects: [],
+    constraints: [],
+    metadata: { status: "extracted", sources: [source] },
+  }),
+  spell("earth-damage-test", {
+    name: "Earth Damage Test",
+    level: 200,
+    element: "earth",
+    cost: cost({ ap: 1 }),
+    effects: [damage({ element: "earth", base: 10 })],
+    constraints: [],
+    metadata: { status: "extracted", sources: [source] },
+  }),
+  spell("air-damage-test", {
+    name: "Air Damage Test",
+    level: 200,
+    element: "air",
+    cost: cost({ ap: 1 }),
+    effects: [damage({ element: "air", base: 10 })],
+    constraints: [],
+    metadata: { status: "extracted", sources: [source] },
+  }),
   spell("cost-10-test", {
     name: "Cost 10 Test",
     level: 200,
@@ -1809,6 +1863,34 @@ test("defaults Huppermage BQ max to 500 plus PW variations", () => {
   assert.equal(boostedResult.finalState.classState.huppermage?.bqMax, 650);
 });
 
+test("applies puissance brute WP penalty before initial BQ conversion", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      resources: createResources({ ap: 6, mp: 3, wp: 4, bq: 0 }),
+      classState: {
+        huppermage: {
+          convertWpToBq: true,
+        },
+      },
+      sublimations: {
+        selections: [
+          { sublimationId: "puissance-brute-i" },
+          { sublimationId: "puissance-brute-i" },
+        ],
+        hpAssumption: "normal",
+      },
+    },
+    sequence: { actions: [] },
+  });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.finalState.remainingResources.wp, 2);
+  assert.equal(result.finalState.remainingResources.bq, 150);
+  assert.equal(result.finalState.classState.huppermage?.bqMax, 150);
+});
+
 test("applies turn-end natural BQ regeneration and stored BQ", () => {
   const result = simulateTurn({
     catalog: testCatalog,
@@ -2194,8 +2276,8 @@ test("applies supported sublimation flat stats and action conditions", () => {
       },
       sublimations: {
         selections: [
-          { sublimationId: "critique-maitrise-1" },
-          { sublimationId: "distance-1" },
+          { sublimationId: "influence-6" },
+          { sublimationId: "longueur-6" },
         ],
         hpAssumption: "normal",
       },
@@ -2204,9 +2286,328 @@ test("applies supported sublimation flat stats and action conditions", () => {
   });
 
   assert.equal(result.valid, true);
-  assert.equal(result.breakdown[0].statsBefore.criticalMastery, 20);
-  assert.equal(result.breakdown[0].damage, 10.2);
+  assert.equal(result.breakdown[0].statsBefore.criticalHitPercent, 18);
+  assert.equal(result.breakdown[0].damage, 11.2);
   assert.equal(result.breakdown[0].appliedEffects.some((effect) => effect.type === "sublimationEffect" && effect.status === "applied"), true);
+});
+
+test("keeps HP-threshold sublimations valid but inactive when the assumption does not match", () => {
+  const normalResult = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      stats: {
+        ...character.stats,
+        generalMastery: 0,
+        elementalMastery: { fire: 0 },
+        damageInflictedPercent: 0,
+      },
+      sublimations: {
+        selections: [{ sublimationId: "carnage-6" }],
+        hpAssumption: "normal",
+      },
+    },
+    sequence: { actions: [{ spellId: "distance-damage-test" }] },
+  });
+  const healthyResult = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      stats: {
+        ...character.stats,
+        generalMastery: 0,
+        elementalMastery: { fire: 0 },
+        damageInflictedPercent: 0,
+      },
+      sublimations: {
+        selections: [{ sublimationId: "carnage-6" }],
+        hpAssumption: "healthy90",
+      },
+    },
+    sequence: { actions: [{ spellId: "distance-damage-test" }] },
+  });
+
+  assert.equal(normalResult.valid, true);
+  assert.equal(normalResult.breakdown[0].statsBefore.generalMastery, 0);
+  assert.equal(normalResult.breakdown[0].damage, 10);
+  assert.equal(healthyResult.valid, true);
+  assert.equal(healthyResult.breakdown[0].statsBefore.generalMastery, 540);
+  assert.equal(healthyResult.breakdown[0].damage, 64);
+});
+
+test("applies elemental damage sublimations only to matching non-light spells", () => {
+  const fireResult = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      stats: {
+        ...character.stats,
+        generalMastery: 0,
+        elementalMastery: { fire: 0, light: 0 },
+        damageInflictedPercent: 0,
+      },
+      sublimations: {
+        selections: [{ sublimationId: "brulure-4" }],
+        hpAssumption: "normal",
+      },
+    },
+    sequence: { actions: [{ spellId: "distance-damage-test" }] },
+  });
+  const lightResult = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      stats: {
+        ...character.stats,
+        generalMastery: 0,
+        elementalMastery: { fire: 900, light: 0 },
+        damageInflictedPercent: 0,
+      },
+      sublimations: {
+        selections: [{ sublimationId: "brulure-4" }],
+        hpAssumption: "normal",
+      },
+    },
+    sequence: { actions: [{ spellId: "lueur-test" }] },
+  });
+
+  assert.equal(fireResult.valid, true);
+  assert.equal(fireResult.breakdown[0].damage, 11.6);
+  assert.equal(lightResult.valid, true);
+  assert.equal(lightResult.breakdown[0].damage, 300);
+  assert.equal(lightResult.breakdown[0].appliedEffects.some((effect) => effect.type === "sublimationEffect" && effect.status === "applied"), false);
+});
+
+test("stores secondary elemental sublimation damage for the next matching non-light spell", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      resources: createResources({ ap: 12, mp: 3, wp: 1, bq: 0 }),
+      stats: {
+        ...character.stats,
+        generalMastery: 0,
+        elementalMastery: { fire: 0, water: 0, earth: 0, air: 0, light: 0 },
+        damageInflictedPercent: 0,
+      },
+      sublimations: {
+        selections: [{ sublimationId: "brulure-secondaire-4" }],
+        hpAssumption: "normal",
+      },
+    },
+    sequence: {
+      actions: [
+        { spellId: "water-trigger-test" },
+        { spellId: "earth-trigger-test" },
+        { spellId: "lueur-test" },
+        { spellId: "air-trigger-test" },
+        { spellId: "water-trigger-test" },
+        { spellId: "earth-trigger-test" },
+        { spellId: "air-trigger-test" },
+        { spellId: "distance-damage-test" },
+      ],
+    },
+  });
+
+  assert.equal(result.valid, true);
+  assert.deepEqual(result.breakdown.map((action) => action.damage), [0, 0, 30, 0, 0, 0, 0, 13]);
+  assert.equal(result.finalState.sublimationElementalCarryover.fire, 0);
+  assert.equal(result.breakdown[2].appliedEffects.some((effect) => effect.type === "sublimationEffect" && effect.status === "applied"), false);
+  assert.equal(
+    result.breakdown[7].appliedEffects.some((effect) =>
+      effect.type === "sublimationEffect"
+      && effect.status === "applied"
+      && effect.sublimationId === "brulure-secondaire-4"
+      && effect.amount === 30
+      && effect.reason === "fireCarryoverConsumed"
+    ),
+    true,
+  );
+});
+
+test("applies alternance relic sublimations from previous damage elements", () => {
+  const alternanceResult = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      resources: createResources({ ap: 6, mp: 3, wp: 1, bq: 0 }),
+      stats: {
+        ...character.stats,
+        generalMastery: 0,
+        elementalMastery: { fire: 0, water: 0, earth: 0 },
+        damageInflictedPercent: 0,
+      },
+      sublimations: {
+        selections: [{ sublimationId: "alternance" }],
+        hpAssumption: "normal",
+      },
+    },
+    sequence: {
+      actions: [
+        { spellId: "distance-damage-test" },
+        { spellId: "water-damage-test" },
+        { spellId: "earth-damage-test" },
+      ],
+    },
+  });
+  const alternanceTwoResult = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      resources: createResources({ ap: 3, mp: 3, wp: 1, bq: 0 }),
+      stats: {
+        ...character.stats,
+        generalMastery: 0,
+        elementalMastery: { fire: 0, water: 0 },
+        damageInflictedPercent: 0,
+      },
+      sublimations: {
+        selections: [{ sublimationId: "alternance-ii" }],
+        hpAssumption: "normal",
+      },
+    },
+    sequence: {
+      actions: [
+        { spellId: "distance-damage-test" },
+        { spellId: "water-damage-test" },
+      ],
+    },
+  });
+
+  assert.equal(alternanceResult.valid, true);
+  assert.deepEqual(alternanceResult.breakdown.map((action) => action.damage), [10, 12, 10]);
+  assert.equal(alternanceTwoResult.valid, true);
+  assert.deepEqual(alternanceTwoResult.breakdown.map((action) => action.damage), [10, 11.5]);
+});
+
+test("applies concentration elementaire initial damage and weakest elemental mastery penalty", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      stats: {
+        ...character.stats,
+        generalMastery: 0,
+        elementalMastery: { fire: 1000, water: 300, earth: 200, air: 100 },
+        damageInflictedPercent: 0,
+      },
+      sublimations: {
+        selections: [{ sublimationId: "concentration-elementaire" }],
+        hpAssumption: "normal",
+      },
+    },
+    sequence: { actions: [{ spellId: "distance-damage-test" }] },
+  });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.breakdown[0].statsBefore.damageInflictedPercent, 20);
+  assert.deepEqual(result.breakdown[0].statsBefore.elementalMastery, {
+    fire: 1000,
+    water: 210,
+    earth: 140,
+    air: 70,
+  });
+  assert.equal(result.breakdown[0].damage, 132);
+});
+
+test("applies exces relic sublimation counters to the next spell", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      resources: createResources({ ap: 7, mp: 3, wp: 1, bq: 0 }),
+      stats: {
+        ...character.stats,
+        generalMastery: 0,
+        elementalMastery: { fire: 0 },
+        damageInflictedPercent: 0,
+      },
+      sublimations: {
+        selections: [{ sublimationId: "exces-ii" }],
+        hpAssumption: "normal",
+      },
+    },
+    sequence: {
+      actions: [
+        { spellId: "neutral-no-bq-test" },
+        { spellId: "neutral-no-bq-test" },
+        { spellId: "neutral-no-bq-test" },
+        { spellId: "neutral-no-bq-test" },
+        { spellId: "neutral-no-bq-test" },
+        { spellId: "distance-damage-test" },
+      ],
+    },
+  });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.breakdown[5].damage, 14);
+});
+
+test("applies puissance brute from WP and BQ spent during the turn", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      resources: createResources({ ap: 6, mp: 3, wp: 6, bq: 0 }),
+      stats: {
+        ...character.stats,
+        generalMastery: 0,
+        elementalMastery: { water: 0, fire: 0 },
+        damageInflictedPercent: 0,
+      },
+      sublimations: {
+        selections: [
+          { sublimationId: "puissance-brute-ii" },
+          { sublimationId: "puissance-brute-ii" },
+        ],
+        hpAssumption: "normal",
+      },
+    },
+    sequence: {
+      actions: [
+        { spellId: "wp-test" },
+        { spellId: "wp-test" },
+        { spellId: "distance-damage-test" },
+      ],
+    },
+  });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.breakdown[0].resourceBefore.wp, 2);
+  assert.deepEqual(result.breakdown.map((action) => action.damage), [10.8, 13.6, 11.6]);
+});
+
+test("counts any BQ spend as a puissance brute trigger", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      resources: createResources({ ap: 8, mp: 3, wp: 6, bq: 40 }),
+      stats: {
+        ...character.stats,
+        generalMastery: 0,
+        elementalMastery: { light: 0 },
+        damageInflictedPercent: 0,
+      },
+      sublimations: {
+        selections: [
+          { sublimationId: "puissance-brute-ii" },
+          { sublimationId: "puissance-brute-ii" },
+        ],
+        hpAssumption: "normal",
+      },
+    },
+    sequence: {
+      actions: [
+        { spellId: "orbe-test" },
+        { spellId: "orbe-test" },
+      ],
+    },
+  });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.breakdown[0].resourceBefore.wp, 2);
+  assert.deepEqual(result.breakdown.map((action) => action.damage), [86.4, 92.8]);
 });
 
 test("rejects unsupported sublimations before simulation", () => {
@@ -2215,7 +2616,7 @@ test("rejects unsupported sublimations before simulation", () => {
     character: {
       ...character,
       sublimations: {
-        selections: [{ sublimationId: "premier-critique" }],
+        selections: [{ sublimationId: "absolution" }],
         hpAssumption: "normal",
       },
     },

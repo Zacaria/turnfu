@@ -5,6 +5,7 @@ import {
   Copy,
   Eye,
   EyeOff,
+  Minus,
   Plus,
   Trash2,
   X,
@@ -13,6 +14,7 @@ import {
   getHuppermagePassives,
   getHuppermageSpells,
 } from "../core/catalog/index.ts";
+import { findSublimation, sublimationCatalog, validateSublimationBuild } from "../core/sublimations/index.ts";
 import type { CatalogEntry, Effect, Element, Resource, Rune } from "../core/catalog/types.ts";
 import {
   createResources,
@@ -63,7 +65,7 @@ import {
 import { createDefaultCharacter, defaultActionContext, defaultActionTarget } from "./defaults.ts";
 import { resolveDetailTarget } from "./detailSelection.ts";
 import { describeEffect, describeViolation, formatHeart, formatNumber, summarizeStats } from "./format.ts";
-import { HuppermageRuneAura } from "./HuppermageRuneAura.tsx?v=demo-frame-v1";
+import { HuppermageRuneAura } from "./HuppermageRuneAura.tsx";
 import { getHuppermageIconSrc } from "./icons.ts";
 import {
   createOptimizerCandidateId,
@@ -104,7 +106,7 @@ import {
   type SetupSnapshot,
   type WakfuClassId,
 } from "./researchWorkspace.ts";
-import type { SublimationBuild } from "../core/sublimations/types.ts";
+import type { SublimationBuild, SublimationCatalogEntry, SublimationCategory } from "../core/sublimations/types.ts";
 import {
   createResearchRoute,
   openBuilderFromSetup,
@@ -117,14 +119,14 @@ import {
   returnToBuild,
   returnToPrevious,
   type ResearchRoute,
-} from "./researchNavigation.ts?v=builder-return-v1";
+} from "./researchNavigation.ts";
 import {
   getAptitudeIconSrc,
   getElementMasteryIconSrc,
   getResourceIconSrc,
   getStatIconSrc,
   type StatIconKey,
-} from "./statIcons.ts?v=module-stat-icons-v1";
+} from "./statIcons.ts";
 import {
   formatElementLabel,
   formatAptitudeFamilyLabel,
@@ -139,7 +141,7 @@ import {
   supportedLocales,
   t,
   type UiLocale,
-} from "./i18n.ts?v=optimizer-session-ref-v1";
+} from "./i18n.ts";
 import { getRuneIconSrc } from "./spellAttributeIcons.ts";
 import {
   createHuppermageBuildResources,
@@ -156,6 +158,13 @@ import {
 import { createTimelineCursorMarks } from "./timelineCursor.ts";
 import { createComboTimelineSnapshots } from "./timelineSnapshots.ts";
 import { createTurnRows } from "./turnRows.ts";
+import { getWakfuliSublimationIconSrc } from "./sublimationIcons.ts";
+import {
+  createSublimationPreviewItems,
+  createSublimationStateItems,
+  getSublimationPreviewTone,
+  type SublimationPreviewItem,
+} from "./sublimationPreview.ts";
 
 type TimelineAction = Action & {
   uid: string;
@@ -205,6 +214,7 @@ export function App() {
   const [researchRoute, setResearchRoute] = useState<ResearchRoute>(() => createResearchRoute());
   const optimizerSessionsRef = useRef<Record<string, OptimizerWorkspaceSession>>({});
   const builderBaselineRef = useRef<{ assumptionKey: string; setupSnapshotId: string } | null>(null);
+  const optimizerSessionFlushRef = useRef<number | null>(null);
   const [optimizerSessions, setOptimizerSessions] = useState<Record<string, OptimizerWorkspaceSession>>({});
   const [buildClassFilter, setBuildClassFilter] = useState<WakfuClassId | "all">("all");
   const [characterConfig, setCharacterConfig] = useState<SimulatedCharacter>(() => createDefaultCharacter());
@@ -298,6 +308,12 @@ export function App() {
       saveResearchWorkspace(window.localStorage, researchWorkspace);
     }
   }, [researchWorkspace]);
+
+  useEffect(() => () => {
+    if (optimizerSessionFlushRef.current !== null) {
+      window.cancelAnimationFrame(optimizerSessionFlushRef.current);
+    }
+  }, []);
 
   useEffect(() => {
     setUiLocale(locale);
@@ -397,14 +413,15 @@ export function App() {
   function openSavedComboInBuilder(combo: SavedComboReference) {
     const setup = researchWorkspace.setupSnapshots.find((candidate) => candidate.id === combo.setupSnapshotId);
     if (setup) {
-      const character = combo.passiveIds?.length
+      const character = combo.passiveIds?.length || combo.sublimations
         ? {
           ...setup.character,
+          sublimations: combo.sublimations ?? setup.character.sublimations,
           classState: {
             ...setup.character.classState,
             huppermage: {
               ...setup.character.classState?.huppermage,
-              activePassives: [...combo.passiveIds],
+              activePassives: [...(combo.passiveIds ?? setup.character.classState?.huppermage?.activePassives ?? [])],
             },
           },
         }
@@ -436,6 +453,7 @@ export function App() {
       name: createSavedComboName(candidate),
       plan: candidate.plan,
       passiveIds: candidate.passiveIds,
+      sublimations: candidate.sublimations,
       totalDamage: candidate.totalDamage,
       criteriaSummary: summarizeOptimizerControls(controls),
       now: new Date().toISOString(),
@@ -456,7 +474,19 @@ export function App() {
       [setupId]: session,
     };
     optimizerSessionsRef.current = nextSessions;
-    setOptimizerSessions(nextSessions);
+    if (typeof window === "undefined") {
+      setOptimizerSessions(nextSessions);
+      return;
+    }
+
+    if (optimizerSessionFlushRef.current !== null) {
+      return;
+    }
+
+    optimizerSessionFlushRef.current = window.requestAnimationFrame(() => {
+      optimizerSessionFlushRef.current = null;
+      setOptimizerSessions(optimizerSessionsRef.current);
+    });
   }
 
   function applySetupToBuilder(setup: SetupSnapshot, plan?: ComboPlan) {
@@ -747,6 +777,69 @@ export function App() {
     });
   }
 
+  function changeBuilderSublimations(sublimations: SublimationBuild) {
+    const nextSublimations = {
+      ...sublimations,
+      selections: sublimations.selections.map((selection) => ({ ...selection })),
+    };
+
+    setCharacterConfig((current) => ({
+      ...current,
+      sublimations: nextSublimations,
+    }));
+    persistBuilderSetupSublimations(nextSublimations);
+  }
+
+  function returnFromBuilder() {
+    if (
+      researchRoute.page === "builder"
+      && researchRoute.returnTo?.page === "setup"
+      && activeSetup
+      && character.sublimations
+      && !areSublimationBuildsEqual(character.sublimations, activeSetup.sublimations)
+    ) {
+      updateSetupSublimations(activeSetup, character.sublimations);
+      return;
+    }
+
+    setResearchRoute(returnToPrevious(researchRoute));
+  }
+
+  function persistBuilderSetupSublimations(sublimations: SublimationBuild) {
+    if (
+      researchRoute.page !== "builder"
+      || researchRoute.returnTo?.page !== "setup"
+      || !activeSetup
+      || areSublimationBuildsEqual(sublimations, activeSetup.sublimations)
+    ) {
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const nextWorkspace = createSetupSnapshotWithSublimations(researchWorkspace, {
+      buildId: activeSetup.buildId,
+      sourceSetupSnapshotId: activeSetup.id,
+      sublimations,
+      now,
+    });
+    const createdSetupId = nextWorkspace.setupSnapshots.at(-1)?.id ?? activeSetup.id;
+    setResearchWorkspace(nextWorkspace);
+    setResearchRoute({
+      page: "builder",
+      buildId: activeSetup.buildId,
+      setupSnapshotId: createdSetupId,
+      returnTo: {
+        page: "setup",
+        buildId: activeSetup.buildId,
+        setupSnapshotId: createdSetupId,
+        returnTo: {
+          page: "build",
+          buildId: activeSetup.buildId,
+        },
+      },
+    });
+  }
+
   function startSpellDrag(event: React.DragEvent, spellId: string) {
     const payload: DragPayload = { type: "spell", spellId };
     activeDragPayloadRef.current = payload;
@@ -994,7 +1087,11 @@ export function App() {
         <section className={`workspace ${centerTab !== "combos" ? "workspace-center-only" : ""}`}>
           <aside className="panel setup-panel" aria-label={t("panel.stateTracker")}>
             <PanelHeader title={t("panel.stateTracker")} />
-            <HuppermageStateTracker resources={currentSnapshot?.resources ?? character.resources} snapshot={currentSnapshot} />
+            <HuppermageStateTracker
+              activeSublimations={character.sublimations}
+              resources={currentSnapshot?.resources ?? character.resources}
+              snapshot={currentSnapshot}
+            />
           </aside>
 
           <section className="panel center-panel" aria-label={t("panel.sequenceDetails")}>
@@ -1164,6 +1261,7 @@ export function App() {
               <PanelHeader title={t("panel.library")} />
               <CatalogLibrary
                 activePassives={character.classState?.huppermage?.activePassives ?? []}
+                activeSublimations={character.sublimations}
                 deckSpellLimit={deckSpellLimit}
                 hiddenEntries={hiddenCatalogEntries}
                 passives={passives}
@@ -1179,6 +1277,7 @@ export function App() {
                 onShowHiddenEntriesChange={setShowHiddenCatalogEntries}
                 onToggleEntryHidden={toggleCatalogEntryHidden}
                 onTogglePassive={togglePassive}
+                onChangeSublimations={changeBuilderSublimations}
               />
             </aside>
           ) : null}
@@ -1487,6 +1586,21 @@ function getBuilderBackLabel(route: ResearchRoute): string {
     default:
       return "Retour";
   }
+}
+
+function areSublimationBuildsEqual(left: SublimationBuild | undefined, right: SublimationBuild | undefined): boolean {
+  return createSublimationBuildComparisonKey(left) === createSublimationBuildComparisonKey(right);
+}
+
+function createSublimationBuildComparisonKey(build: SublimationBuild | undefined): string {
+  return JSON.stringify({
+    contactEnemiesAssumption: build?.contactEnemiesAssumption ?? null,
+    hpAssumption: build?.hpAssumption ?? null,
+    nearbyAlliesAssumption: build?.nearbyAlliesAssumption ?? null,
+    selections: [...(build?.selections ?? [])]
+      .map((selection) => selection.sublimationId)
+      .sort(),
+  });
 }
 
 function PanelHeader({
@@ -1812,6 +1926,7 @@ function CostPills({ entry }: { entry: CatalogEntry }) {
 
 function CatalogLibrary({
   activePassives,
+  activeSublimations,
   deckSpellLimit,
   hiddenEntries,
   passives,
@@ -1827,8 +1942,10 @@ function CatalogLibrary({
   onShowHiddenEntriesChange,
   onToggleEntryHidden,
   onTogglePassive,
+  onChangeSublimations,
 }: {
   activePassives: string[];
+  activeSublimations: SublimationBuild | undefined;
   deckSpellLimit: number;
   hiddenEntries: HiddenCatalogEntryState;
   passives: CatalogEntry[];
@@ -1844,14 +1961,14 @@ function CatalogLibrary({
   onShowHiddenEntriesChange: (showHiddenEntries: boolean) => void;
   onToggleEntryHidden: (entry: CatalogEntry) => void;
   onTogglePassive: (passiveId: string, active: boolean) => void;
+  onChangeSublimations: (sublimations: SublimationBuild) => void;
 }) {
   const [spellSearch, setSpellSearch] = useState("");
-  const [passiveSearch, setPassiveSearch] = useState("");
   const visibleSpells = getVisibleCatalogEntries(spells, hiddenEntries, showHiddenEntries)
     .filter((spell) => catalogSearchMatches(spell, spellSearch));
   const activePassiveRank = new Map(activePassives.map((passiveId, index) => [passiveId, index]));
   const visiblePassives = getVisibleCatalogEntries(passives, hiddenEntries, showHiddenEntries)
-    .filter((passive) => catalogSearchMatches(passive, passiveSearch))
+    .filter((passive) => catalogSearchMatches(passive, spellSearch))
     .sort((left, right) => {
       const leftActive = activePassiveRank.has(left.id);
       const rightActive = activePassiveRank.has(right.id);
@@ -1860,7 +1977,7 @@ function CatalogLibrary({
       }
 
       return Number(rightActive) - Number(leftActive);
-    });
+  });
   const hiddenCount = countHiddenCatalogEntries(hiddenEntries);
   const usedDeckSpellIds = usedSpellIds.filter((spellId) => {
     const spell = spells.find((entry) => entry.id === spellId);
@@ -1869,7 +1986,29 @@ function CatalogLibrary({
   const usedSpellCount = usedDeckSpellIds.length;
   const deckFull = usedSpellCount >= deckSpellLimit;
   const activePassiveCount = activePassives.length;
+  const activeSublimationSelections = activeSublimations?.selections ?? [];
+  const activeSublimationCount = activeSublimationSelections.length;
+  const activeSublimationRank = new Map(activeSublimationSelections.map((selection, index) => [selection.sublimationId, index]));
+  const activeSublimationCountsById = countSublimationSelectionsById(activeSublimationSelections);
+  const selectedSublimationIds = new Set(activeSublimationSelections.map((selection) => selection.sublimationId));
+  const selectedSublimationEntries = activeSublimationSelections
+    .map((selection) => findSublimation(selection.sublimationId))
+    .filter((sublimation): sublimation is SublimationCatalogEntry => Boolean(sublimation));
+  const selectedSublimationCategoryCounts = countSublimationCategories(selectedSublimationEntries);
+  const selectedSublimationFamilyLevels = countSublimationFamilyLevels(selectedSublimationEntries);
+  const visibleSublimations = sublimationCatalog
+    .filter((sublimation) => sublimationSearchMatches(sublimation, spellSearch))
+    .sort((left, right) => compareSublimationCatalogEntries(
+      left,
+      right,
+      selectedSublimationIds,
+      activeSublimationRank,
+      selectedSublimationCategoryCounts,
+      selectedSublimationFamilyLevels,
+    ));
+  const sublimationValidation = validateSublimationBuild(activeSublimations);
   const [catalogTooltip, setCatalogTooltip] = useState<{ entry: CatalogEntry; left: number; top: number } | null>(null);
+  const [sublimationTooltip, setSublimationTooltip] = useState<{ item: SublimationPreviewItem; left: number; top: number } | null>(null);
   const catalogTooltipSuppressedRef = useRef(false);
 
   useEffect(() => {
@@ -1893,28 +2032,47 @@ function CatalogLibrary({
       return;
     }
 
-    const rect = event.currentTarget.getBoundingClientRect();
+    const { left, top } = getLibraryTooltipPlacement(event.currentTarget);
+    setCatalogTooltip({ entry, left, top });
+  }
+
+  function showSublimationTooltip(event: React.MouseEvent<HTMLElement> | React.FocusEvent<HTMLElement>, item: SublimationPreviewItem) {
+    const { left, top } = getLibraryTooltipPlacement(event.currentTarget);
+    setSublimationTooltip({ item, left, top });
+  }
+
+  function getLibraryTooltipPlacement(target: HTMLElement) {
+    const rect = target.getBoundingClientRect();
     const tooltipWidth = 340;
     const preferredLeft = rect.left - tooltipWidth - 14;
     const fallbackLeft = rect.right + 14;
     const left = preferredLeft >= 12 ? preferredLeft : Math.min(window.innerWidth - tooltipWidth - 12, fallbackLeft);
     const top = clamp(rect.top + rect.height / 2, 160, window.innerHeight - 24);
-    setCatalogTooltip({ entry, left: Math.max(12, left), top });
+    return { left: Math.max(12, left), top };
+  }
+
+  function hideSublimationTooltip() {
+    setSublimationTooltip(null);
   }
 
   function hideCatalogTooltip() {
     setCatalogTooltip(null);
   }
 
+  function hideLibraryTooltips() {
+    hideCatalogTooltip();
+    hideSublimationTooltip();
+  }
+
   function suppressCatalogTooltip() {
     catalogTooltipSuppressedRef.current = true;
-    hideCatalogTooltip();
+    hideLibraryTooltips();
     onHoverEntry(null);
   }
 
   function releaseCatalogTooltip() {
     catalogTooltipSuppressedRef.current = false;
-    hideCatalogTooltip();
+    hideLibraryTooltips();
     onHoverEntry(null);
   }
 
@@ -1931,6 +2089,21 @@ function CatalogLibrary({
   function finishCatalogSpellDrag() {
     releaseCatalogTooltip();
     onDragEnd();
+  }
+
+  function changeSublimationCount(sublimationId: string, delta: number) {
+    hideSublimationTooltip();
+    const selections = activeSublimations?.selections ?? [];
+    const nextSublimations: SublimationBuild = {
+      selections: delta > 0
+        ? [...selections, { sublimationId }]
+        : removeFirstSublimationSelection(selections, sublimationId),
+      hpAssumption: activeSublimations?.hpAssumption ?? "normal",
+      nearbyAlliesAssumption: activeSublimations?.nearbyAlliesAssumption ?? "unspecified",
+      contactEnemiesAssumption: activeSublimations?.contactEnemiesAssumption ?? "unspecified",
+    };
+
+    onChangeSublimations(nextSublimations);
   }
 
   return (
@@ -2031,11 +2204,6 @@ function CatalogLibrary({
             <span>{formatUiMessage("passive.ratio", { used: activePassiveCount, limit: passiveLimit })}</span>
           </div>
         </div>
-        <CatalogSearchField
-          label={t("library.searchPassives")}
-          value={passiveSearch}
-          onChange={setPassiveSearch}
-        />
         <div className="passive-library">
           {visiblePassives.map((passive) => {
             const active = activePassives.includes(passive.id);
@@ -2089,14 +2257,309 @@ function CatalogLibrary({
           })}
         </div>
       </section>
+      <section>
+        <div className="catalog-section-header">
+          <h3>Sublimations</h3>
+          <div className={`catalog-counter catalog-counter-compact ${activeSublimationCount >= 12 ? "full" : ""}`}>
+            <span>{activeSublimationCount}/12</span>
+          </div>
+        </div>
+        {sublimationValidation.violations.length > 0 ? (
+          <ul className="library-sublimation-violations">
+            {sublimationValidation.violations.map((violation, index) => <li key={`${violation.type}-${index}`}>{violation.message}</li>)}
+          </ul>
+        ) : null}
+        <div className="library-sublimation-list">
+          {visibleSublimations.map((sublimation) => {
+            const selected = selectedSublimationIds.has(sublimation.id);
+            const selectedCount = activeSublimationCountsById.get(sublimation.id) ?? 0;
+            const disabledReason = getSublimationSelectionDisabledReason(
+              sublimation,
+              selectedSublimationCategoryCounts,
+              selectedSublimationFamilyLevels,
+            );
+            return (
+              <SublimationCatalogChoice
+                disabledReason={disabledReason}
+                key={sublimation.id}
+                selected={selected}
+                selectedCount={selectedCount}
+                sublimation={sublimation}
+                onHideTooltip={hideSublimationTooltip}
+                onShowTooltip={showSublimationTooltip}
+                onDecrement={() => changeSublimationCount(sublimation.id, -1)}
+                onIncrement={() => changeSublimationCount(sublimation.id, 1)}
+              />
+            );
+          })}
+          {visibleSublimations.length === 0 ? <span className="setup-detail-empty">Aucune sublimation trouvée</span> : null}
+        </div>
+      </section>
       {catalogTooltip ? (
         <CatalogInfoTooltip
           entry={catalogTooltip.entry}
           style={{ left: catalogTooltip.left, top: catalogTooltip.top }}
         />
       ) : null}
+      {sublimationTooltip ? (
+        <BuilderSublimationTooltip
+          item={sublimationTooltip.item}
+          style={{ left: sublimationTooltip.left, top: sublimationTooltip.top }}
+        />
+      ) : null}
     </div>
   );
+}
+
+function BuilderSublimationMiniCard({ item }: { item: SublimationPreviewItem }) {
+  return (
+    <div className={`sublimation-preview-card sublimation-preview-${item.category} sublimation-preview-tone-${item.tone}`} tabIndex={0}>
+      {item.iconSrc ? (
+        <img className="sublimation-preview-icon" src={item.iconSrc} alt="" draggable={false} />
+      ) : (
+        <span className="sublimation-preview-icon sublimation-preview-icon-fallback" aria-hidden="true">{item.name.slice(0, 1)}</span>
+      )}
+      <span className={`sublimation-preview-name sublimation-title-${item.tone}`}>{item.name}</span>
+      <BuilderSublimationTooltip item={item} />
+    </div>
+  );
+}
+
+function SublimationCatalogChoice({
+  disabledReason,
+  onDecrement,
+  onHideTooltip,
+  onIncrement,
+  onShowTooltip,
+  selected,
+  selectedCount,
+  sublimation,
+}: {
+  disabledReason?: string;
+  onDecrement: () => void;
+  onHideTooltip: () => void;
+  onIncrement: () => void;
+  onShowTooltip: (event: React.MouseEvent<HTMLElement> | React.FocusEvent<HTMLElement>, item: SublimationPreviewItem) => void;
+  selected: boolean;
+  selectedCount: number;
+  sublimation: SublimationCatalogEntry;
+}) {
+  const previewItem = createSublimationPreviewItem(sublimation);
+  return (
+    <div
+      className={`library-sublimation-choice ${selected ? "selected" : ""} ${disabledReason ? "disabled" : ""}`}
+      onBlur={onHideTooltip}
+      onFocus={(event) => onShowTooltip(event, previewItem)}
+      onMouseEnter={(event) => onShowTooltip(event, previewItem)}
+      onMouseLeave={onHideTooltip}
+      onMouseMove={(event) => onShowTooltip(event, previewItem)}
+    >
+      <div className="library-sublimation-row">
+        <span className={`library-sublimation-icon library-sublimation-icon-${sublimation.category}`} aria-hidden="true">
+          <SublimationCatalogIcon sublimation={sublimation} />
+        </span>
+        <span className="library-sublimation-main">
+          <strong className={`sublimation-title-${sublimation.category}`}>{sublimation.name}</strong>
+          {disabledReason ? <small>{disabledReason}</small> : null}
+        </span>
+        {sublimation.displayLevel ? <span className="library-sublimation-level">{sublimation.displayLevel}</span> : null}
+        <span className="library-sublimation-stepper">
+          <IconButton
+            className="library-sublimation-step"
+            disabled={selectedCount === 0}
+            label={`Retirer ${sublimation.name}`}
+            onClick={onDecrement}
+          >
+            <Minus size={12} />
+          </IconButton>
+          <span className="library-sublimation-count" aria-label={`${selectedCount} sélection(s) de ${sublimation.name}`}>{selectedCount}</span>
+          <IconButton
+            className="library-sublimation-step"
+            disabled={Boolean(disabledReason)}
+            label={disabledReason ? `${sublimation.name} indisponible : ${disabledReason}` : `Ajouter ${sublimation.name}`}
+            onClick={onIncrement}
+          >
+            <Plus size={12} />
+          </IconButton>
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function SublimationCatalogIcon({ sublimation }: { sublimation: SublimationCatalogEntry }) {
+  const iconSrc = getWakfuliSublimationIconSrc(sublimation.id) ?? getWakfuliSublimationIconSrc(`${sublimation.familyId}-${sublimation.cumulativeMax}`);
+  return iconSrc ? (
+    <img src={iconSrc} alt="" title={sublimation.name} draggable={false} />
+  ) : (
+    <span>{sublimation.name.slice(0, 1)}</span>
+  );
+}
+
+function BuilderSublimationTooltip({ item, style }: { item: SublimationPreviewItem; style?: React.CSSProperties }) {
+  const effectLines = item.effectLines.length > 0 ? item.effectLines : item.sourceDescription ? [item.sourceDescription] : [];
+
+  return (
+    <aside className="spell-info-tooltip sublimation-info-tooltip" role="tooltip" style={style}>
+      <div className="spell-info-header sublimation-info-header">
+        <div>
+          <span>Sublimation{item.displayLevel ? ` · niv. ${item.displayLevel}` : ""}</span>
+          <strong className={`sublimation-title-${item.tone}`}>{item.name}</strong>
+        </div>
+      </div>
+      <section className="spell-info-section">
+        <h3>Effets</h3>
+        <ul className="catalog-info-list">
+          {effectLines.length > 0 ? effectLines.map((line) => (
+            <li key={line}>{line}</li>
+          )) : <li>Effet non renseigné dans Wakfu.Guide.</li>}
+        </ul>
+      </section>
+      {item.supportReason ? (
+        <section className="spell-info-section">
+          <h3>Non supporté</h3>
+          <ul className="catalog-info-list">
+            <li>{item.supportReason}</li>
+          </ul>
+        </section>
+      ) : null}
+      {item.rawLevel !== item.effectiveLevel ? (
+        <section className="spell-info-section">
+          <h3>Cumul</h3>
+          <ul className="catalog-info-list">
+            <li>Niveau effectif {item.effectiveLevel}/{item.cumulativeMax} · brut {item.rawLevel}</li>
+          </ul>
+        </section>
+      ) : null}
+    </aside>
+  );
+}
+
+const sublimationSlotLimits: Record<SublimationCategory, number> = {
+  normal: 10,
+  epic: 1,
+  relic: 1,
+};
+
+function createSublimationPreviewItem(sublimation: SublimationCatalogEntry): SublimationPreviewItem {
+  return createSublimationPreviewItems({
+    selections: [{ sublimationId: sublimation.id }],
+    hpAssumption: "normal",
+    nearbyAlliesAssumption: "unspecified",
+    contactEnemiesAssumption: "unspecified",
+  })[0] ?? {
+    id: sublimation.id,
+    name: sublimation.name,
+    category: sublimation.category,
+    tone: getSublimationPreviewTone(sublimation),
+    iconSrc: getWakfuliSublimationIconSrc(sublimation.id) ?? getWakfuliSublimationIconSrc(`${sublimation.familyId}-${sublimation.cumulativeMax}`),
+    displayLevel: sublimation.displayLevel,
+    effectiveLevel: sublimation.level,
+    rawLevel: sublimation.level,
+    cumulativeMax: sublimation.cumulativeMax,
+    effectLines: [],
+    supportReason: sublimation.supportReason,
+    socketPattern: sublimation.socketPattern,
+    sourceDescription: sublimation.sourceDescription,
+    sourceLocation: sublimation.sourceLocation,
+  };
+}
+
+function compareSublimationCatalogEntries(
+  left: SublimationCatalogEntry,
+  right: SublimationCatalogEntry,
+  selectedIds: Set<string>,
+  selectedRank: Map<string, number>,
+  categoryCounts: Record<SublimationCategory, number>,
+  familyLevels: Map<string, number>,
+): number {
+  const leftSelected = selectedIds.has(left.id);
+  const rightSelected = selectedIds.has(right.id);
+  if (leftSelected || rightSelected) {
+    if (leftSelected && rightSelected) {
+      return (selectedRank.get(left.id) ?? 0) - (selectedRank.get(right.id) ?? 0);
+    }
+
+    return Number(rightSelected) - Number(leftSelected);
+  }
+
+  const leftUsable = !getSublimationSelectionDisabledReason(left, categoryCounts, familyLevels);
+  const rightUsable = !getSublimationSelectionDisabledReason(right, categoryCounts, familyLevels);
+  return Number(rightUsable) - Number(leftUsable);
+}
+
+function getSublimationSelectionDisabledReason(
+  sublimation: SublimationCatalogEntry,
+  categoryCounts: Record<SublimationCategory, number>,
+  familyLevels: Map<string, number>,
+): string | undefined {
+  if (sublimation.supportStatus !== "supported") {
+    return sublimation.supportReason ?? "Effet non supporté";
+  }
+
+  if (categoryCounts[sublimation.category] >= sublimationSlotLimits[sublimation.category]) {
+    return "Slots pleins";
+  }
+
+  const currentLevel = familyLevels.get(sublimation.familyId) ?? 0;
+  if (currentLevel >= sublimation.cumulativeMax) {
+    return "Cumul maximal";
+  }
+
+  if (currentLevel + sublimation.level > sublimation.cumulativeMax) {
+    return `Max ${sublimation.cumulativeMax}`;
+  }
+
+  return undefined;
+}
+
+function countSublimationSelectionsById(selections: SublimationBuild["selections"]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const selection of selections) {
+    counts.set(selection.sublimationId, (counts.get(selection.sublimationId) ?? 0) + 1);
+  }
+  return counts;
+}
+
+function countSublimationCategories(entries: SublimationCatalogEntry[]): Record<SublimationCategory, number> {
+  return entries.reduce<Record<SublimationCategory, number>>((counts, entry) => ({
+    ...counts,
+    [entry.category]: counts[entry.category] + 1,
+  }), { normal: 0, epic: 0, relic: 0 });
+}
+
+function countSublimationFamilyLevels(entries: SublimationCatalogEntry[]): Map<string, number> {
+  const levels = new Map<string, number>();
+  for (const entry of entries) {
+    levels.set(entry.familyId, (levels.get(entry.familyId) ?? 0) + entry.level);
+  }
+  return levels;
+}
+
+function removeFirstSublimationSelection(
+  selections: SublimationBuild["selections"],
+  sublimationId: string,
+): SublimationBuild["selections"] {
+  const removalIndex = selections.findIndex((selection) => selection.sublimationId === sublimationId);
+  if (removalIndex < 0) {
+    return [...selections];
+  }
+
+  return selections.filter((_, index) => index !== removalIndex);
+}
+
+function sublimationSearchMatches(sublimation: SublimationCatalogEntry, search: string): boolean {
+  const query = normalizeCatalogSearchText(search);
+  if (!query) {
+    return true;
+  }
+
+  return [
+    sublimation.name,
+    sublimation.wakfuGuideName,
+    sublimation.sourceDescription,
+    sublimation.sourceLocation,
+  ].some((value) => normalizeCatalogSearchText(value ?? "").includes(query));
 }
 
 function CatalogSearchField({
@@ -2631,13 +3094,19 @@ function EquipmentExtraStatsEditor({
 }
 
 function HuppermageStateTracker({
+  activeSublimations,
   resources,
   snapshot,
 }: {
+  activeSublimations: SublimationBuild | undefined;
   resources: SimulatedCharacter["resources"];
   snapshot: TimelineSnapshot | undefined;
 }) {
   const huppermage = snapshot?.classState.huppermage;
+  const sublimationStateItems = createSublimationStateItems({
+    appliedEffects: snapshot?.appliedEffects ?? [],
+    build: activeSublimations,
+  });
 
   return (
     <section className="form-section state-tracker">
@@ -2676,6 +3145,22 @@ function HuppermageStateTracker({
           <dd>{huppermage?.passiveLimit ?? 6}</dd>
         </div>
       </dl>
+      {sublimationStateItems.length > 0 ? (
+        <div className="state-sublimation-overview">
+          <span>Sublimations</span>
+          <ul className="state-sublimation-list">
+            {sublimationStateItems.map((item, index) => (
+              <li className={`state-sublimation-item ${item.status}`} key={`${item.id}-${index}`}>
+                <span>
+                  <strong>{item.name}</strong>
+                  <small>{item.detail}</small>
+                </span>
+                <em>{item.statusLabel}</em>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
     </section>
   );
 }

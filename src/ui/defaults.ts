@@ -61,6 +61,8 @@ export function createDefaultCharacter(): SimulatedCharacter {
     sublimations: {
       selections: [],
       hpAssumption: "normal",
+      nearbyAlliesAssumption: "unspecified",
+      contactEnemiesAssumption: "unspecified",
     },
     classState: {
       huppermage: {
