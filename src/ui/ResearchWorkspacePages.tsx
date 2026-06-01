@@ -1037,7 +1037,7 @@ export function OptimizerWorkspacePage({
           </select>
         </label>
         <label className="field">
-          Itérations
+          Essais par lot
           <input
             type="number"
             min={10}
@@ -1094,9 +1094,8 @@ export function OptimizerWorkspacePage({
           <div className="optimizer-progress" role="status" aria-live="polite">
             <div>
               <b>{runProgress.label}</b>
-              <span>{runProgress.percent}% · {runProgress.attempts}/{normalizedControls.iterationBudget}</span>
+              <span>{runProgress.attempts} essais explorés</span>
             </div>
-            <progress value={runProgress.percent} max={100}>{runProgress.percent}%</progress>
             <div className="optimizer-progress-stats">
               <span>Valides: {runProgress.validCandidates}</span>
               <span>Invalides: {runProgress.invalidCandidates}</span>
