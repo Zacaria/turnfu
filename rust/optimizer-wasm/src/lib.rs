@@ -3683,6 +3683,804 @@ fn has_no_secondary_mastery(stats: &BaseStats) -> bool {
         && stats.critical_mastery <= 0.0
 }
 
+#[derive(Clone, Copy)]
+struct SupportedSublimationDefinition {
+    id: &'static str,
+    family_id: &'static str,
+    category: &'static str,
+    effective_level: f64,
+    cumulative_max: f64,
+    hp_requirement: SublimationHpRequirement,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SublimationHpRequirement {
+    Any,
+    Min90,
+    Max50,
+}
+
+const fn supported_sublimation(
+    id: &'static str,
+    family_id: &'static str,
+    category: &'static str,
+    effective_level: f64,
+    cumulative_max: f64,
+    hp_requirement: SublimationHpRequirement,
+) -> SupportedSublimationDefinition {
+    SupportedSublimationDefinition {
+        id,
+        family_id,
+        category,
+        effective_level,
+        cumulative_max,
+        hp_requirement,
+    }
+}
+
+const SUPPORTED_SUBLIMATIONS: &[SupportedSublimationDefinition] = &[
+    supported_sublimation(
+        "agilite-vitale-ii",
+        "agilite-vitale",
+        "normal",
+        2.0,
+        2.0,
+        SublimationHpRequirement::Min90,
+    ),
+    supported_sublimation(
+        "agilite-vitale-2",
+        "agilite-vitale",
+        "normal",
+        2.0,
+        2.0,
+        SublimationHpRequirement::Min90,
+    ),
+    supported_sublimation(
+        "alternance",
+        "alternance",
+        "relic",
+        1.0,
+        1.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "alternance-ii",
+        "alternance",
+        "relic",
+        1.0,
+        1.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "armure-lourde-i",
+        "armure-lourde",
+        "normal",
+        1.0,
+        2.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "armure-lourde-ii",
+        "armure-lourde",
+        "normal",
+        2.0,
+        2.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "armure-lourde-2",
+        "armure-lourde",
+        "normal",
+        2.0,
+        2.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "brulure-i",
+        "brulure",
+        "normal",
+        1.0,
+        4.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "brulure-ii",
+        "brulure",
+        "normal",
+        2.0,
+        4.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "brulure-iii",
+        "brulure",
+        "normal",
+        3.0,
+        4.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "brulure-4",
+        "brulure",
+        "normal",
+        4.0,
+        4.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "brulure-secondaire-i",
+        "brulure-secondaire",
+        "normal",
+        1.0,
+        4.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "brulure-secondaire-ii",
+        "brulure-secondaire",
+        "normal",
+        2.0,
+        4.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "brulure-secondaire-iii",
+        "brulure-secondaire",
+        "normal",
+        3.0,
+        4.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "brulure-secondaire-4",
+        "brulure-secondaire",
+        "normal",
+        4.0,
+        4.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "carnage-i",
+        "carnage",
+        "normal",
+        1.0,
+        6.0,
+        SublimationHpRequirement::Min90,
+    ),
+    supported_sublimation(
+        "carnage-ii",
+        "carnage",
+        "normal",
+        2.0,
+        6.0,
+        SublimationHpRequirement::Min90,
+    ),
+    supported_sublimation(
+        "carnage-iii",
+        "carnage",
+        "normal",
+        3.0,
+        6.0,
+        SublimationHpRequirement::Min90,
+    ),
+    supported_sublimation(
+        "carnage-6",
+        "carnage",
+        "normal",
+        6.0,
+        6.0,
+        SublimationHpRequirement::Min90,
+    ),
+    supported_sublimation(
+        "chaos",
+        "chaos",
+        "epic",
+        1.0,
+        1.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "cicatrisation-i",
+        "cicatrisation",
+        "normal",
+        1.0,
+        6.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "cicatrisation-ii",
+        "cicatrisation",
+        "normal",
+        2.0,
+        6.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "cicatrisation-iii",
+        "cicatrisation",
+        "normal",
+        3.0,
+        6.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "cicatrisation-6",
+        "cicatrisation",
+        "normal",
+        6.0,
+        6.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "concentration-elementaire",
+        "concentration-elementaire",
+        "epic",
+        1.0,
+        1.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "critique-berserk-i",
+        "critique-berserk",
+        "normal",
+        1.0,
+        6.0,
+        SublimationHpRequirement::Max50,
+    ),
+    supported_sublimation(
+        "critique-berserk-ii",
+        "critique-berserk",
+        "normal",
+        2.0,
+        6.0,
+        SublimationHpRequirement::Max50,
+    ),
+    supported_sublimation(
+        "critique-berserk-iii",
+        "critique-berserk",
+        "normal",
+        3.0,
+        6.0,
+        SublimationHpRequirement::Max50,
+    ),
+    supported_sublimation(
+        "critique-berserk-6",
+        "critique-berserk",
+        "normal",
+        6.0,
+        6.0,
+        SublimationHpRequirement::Max50,
+    ),
+    supported_sublimation(
+        "devastation-i",
+        "devastation",
+        "normal",
+        1.0,
+        3.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "devastation-ii",
+        "devastation",
+        "normal",
+        2.0,
+        3.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "devastation-iii",
+        "devastation",
+        "normal",
+        3.0,
+        3.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "devastation-3",
+        "devastation",
+        "normal",
+        3.0,
+        3.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "exces",
+        "exces",
+        "relic",
+        1.0,
+        1.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "exces-ii",
+        "exces",
+        "relic",
+        1.0,
+        1.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "expert-des-armes-legeres-i",
+        "expert-des-armes-legeres",
+        "normal",
+        1.0,
+        6.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "expert-des-armes-legeres-ii",
+        "expert-des-armes-legeres",
+        "normal",
+        2.0,
+        6.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "expert-des-armes-legeres-iii",
+        "expert-des-armes-legeres",
+        "normal",
+        3.0,
+        6.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "expert-des-armes-legeres-6",
+        "expert-des-armes-legeres",
+        "normal",
+        6.0,
+        6.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "force-vitale-ii",
+        "force-vitale",
+        "normal",
+        2.0,
+        2.0,
+        SublimationHpRequirement::Min90,
+    ),
+    supported_sublimation(
+        "force-vitale-2",
+        "force-vitale",
+        "normal",
+        2.0,
+        2.0,
+        SublimationHpRequirement::Min90,
+    ),
+    supported_sublimation(
+        "gel-i",
+        "gel",
+        "normal",
+        1.0,
+        4.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "gel-ii",
+        "gel",
+        "normal",
+        2.0,
+        4.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "gel-iii",
+        "gel",
+        "normal",
+        3.0,
+        4.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "gel-4",
+        "gel",
+        "normal",
+        4.0,
+        4.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "gel-secondaire-i",
+        "gel-secondaire",
+        "normal",
+        1.0,
+        4.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "gel-secondaire-ii",
+        "gel-secondaire",
+        "normal",
+        2.0,
+        4.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "gel-secondaire-iii",
+        "gel-secondaire",
+        "normal",
+        3.0,
+        4.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "gel-secondaire-4",
+        "gel-secondaire",
+        "normal",
+        4.0,
+        4.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "inflexibilite",
+        "inflexibilite",
+        "epic",
+        1.0,
+        1.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "inflexibilite-ii",
+        "inflexibilite",
+        "epic",
+        1.0,
+        1.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "influence-i",
+        "influence",
+        "normal",
+        1.0,
+        6.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "influence-ii",
+        "influence",
+        "normal",
+        2.0,
+        6.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "influence-iii",
+        "influence",
+        "normal",
+        3.0,
+        6.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "influence-6",
+        "influence",
+        "normal",
+        6.0,
+        6.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "influence-vitale-i",
+        "influence-vitale",
+        "normal",
+        1.0,
+        6.0,
+        SublimationHpRequirement::Min90,
+    ),
+    supported_sublimation(
+        "influence-vitale-ii",
+        "influence-vitale",
+        "normal",
+        2.0,
+        6.0,
+        SublimationHpRequirement::Min90,
+    ),
+    supported_sublimation(
+        "influence-vitale-iii",
+        "influence-vitale",
+        "normal",
+        3.0,
+        6.0,
+        SublimationHpRequirement::Min90,
+    ),
+    supported_sublimation(
+        "influence-vitale-6",
+        "influence-vitale",
+        "normal",
+        6.0,
+        6.0,
+        SublimationHpRequirement::Min90,
+    ),
+    supported_sublimation(
+        "longueur-i",
+        "longueur",
+        "normal",
+        1.0,
+        6.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "longueur-ii",
+        "longueur",
+        "normal",
+        2.0,
+        6.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "longueur-iii",
+        "longueur",
+        "normal",
+        3.0,
+        6.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "longueur-6",
+        "longueur",
+        "normal",
+        6.0,
+        6.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "puissance-brute-i",
+        "puissance-brute",
+        "normal",
+        1.0,
+        4.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "puissance-brute-ii",
+        "puissance-brute",
+        "normal",
+        2.0,
+        4.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "puissance-brute-iii",
+        "puissance-brute",
+        "normal",
+        3.0,
+        4.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "puissance-brute-4",
+        "puissance-brute",
+        "normal",
+        4.0,
+        4.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "sauvegarde-ii",
+        "sauvegarde",
+        "normal",
+        2.0,
+        6.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "sauvegarde-6",
+        "sauvegarde",
+        "normal",
+        6.0,
+        6.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "secret-critique",
+        "secret-critique",
+        "epic",
+        1.0,
+        1.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "tellurisme-i",
+        "tellurisme",
+        "normal",
+        1.0,
+        4.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "tellurisme-ii",
+        "tellurisme",
+        "normal",
+        2.0,
+        4.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "tellurisme-iii",
+        "tellurisme",
+        "normal",
+        3.0,
+        4.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "tellurisme-4",
+        "tellurisme",
+        "normal",
+        4.0,
+        4.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "tellurisme-secondaire-i",
+        "tellurisme-secondaire",
+        "normal",
+        1.0,
+        4.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "tellurisme-secondaire-ii",
+        "tellurisme-secondaire",
+        "normal",
+        2.0,
+        4.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "tellurisme-secondaire-iii",
+        "tellurisme-secondaire",
+        "normal",
+        3.0,
+        4.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "tellurisme-secondaire-4",
+        "tellurisme-secondaire",
+        "normal",
+        4.0,
+        4.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "tolerance-i",
+        "tolerance",
+        "normal",
+        1.0,
+        2.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "tolerance-ii",
+        "tolerance",
+        "normal",
+        2.0,
+        2.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "tolerance-2",
+        "tolerance",
+        "normal",
+        2.0,
+        2.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "velocite-ii",
+        "velocite",
+        "normal",
+        2.0,
+        2.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "velocite-2",
+        "velocite",
+        "normal",
+        2.0,
+        2.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "ventilation-i",
+        "ventilation",
+        "normal",
+        1.0,
+        4.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "ventilation-ii",
+        "ventilation",
+        "normal",
+        2.0,
+        4.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "ventilation-iii",
+        "ventilation",
+        "normal",
+        3.0,
+        4.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "ventilation-4",
+        "ventilation",
+        "normal",
+        4.0,
+        4.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "ventilation-secondaire-i",
+        "ventilation-secondaire",
+        "normal",
+        1.0,
+        4.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "ventilation-secondaire-ii",
+        "ventilation-secondaire",
+        "normal",
+        2.0,
+        4.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "ventilation-secondaire-iii",
+        "ventilation-secondaire",
+        "normal",
+        3.0,
+        4.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "ventilation-secondaire-4",
+        "ventilation-secondaire",
+        "normal",
+        4.0,
+        4.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "vivacite-ii",
+        "vivacite",
+        "normal",
+        2.0,
+        2.0,
+        SublimationHpRequirement::Any,
+    ),
+    supported_sublimation(
+        "vivacite-2",
+        "vivacite",
+        "normal",
+        2.0,
+        2.0,
+        SublimationHpRequirement::Any,
+    ),
+];
+
+fn find_supported_sublimation(
+    sublimation_id: &str,
+) -> Option<&'static SupportedSublimationDefinition> {
+    SUPPORTED_SUBLIMATIONS
+        .iter()
+        .find(|definition| definition.id == sublimation_id)
+}
+
+fn get_sublimation_family_requirement(family_id: &str) -> SublimationHpRequirement {
+    SUPPORTED_SUBLIMATIONS
+        .iter()
+        .find(|definition| definition.family_id == family_id)
+        .map(|definition| definition.hp_requirement)
+        .unwrap_or(SublimationHpRequirement::Any)
+}
+
 fn collect_candidate_sublimation_families(
     candidate: &OptimizerCandidateInput,
 ) -> Vec<&'static str> {
@@ -3697,16 +4495,14 @@ fn collect_candidate_sublimation_families(
 }
 
 fn is_sublimation_hp_requirement_satisfied(family_id: &str, hp_assumption: &str) -> bool {
-    match family_id {
-        "agilite-vitale" | "carnage" | "force-vitale" | "influence-vitale" => {
-            hp_assumption == "healthy90"
-        }
-        "critique-berserk" => {
+    match get_sublimation_family_requirement(family_id) {
+        SublimationHpRequirement::Any => true,
+        SublimationHpRequirement::Min90 => hp_assumption == "healthy90",
+        SublimationHpRequirement::Max50 => {
             hp_assumption == "normal"
                 || hp_assumption == "berserk50"
                 || hp_assumption == "berserk20"
         }
-        _ => true,
     }
 }
 
@@ -3731,177 +4527,25 @@ fn candidate_has_sublimation_family(candidate: &OptimizerCandidateInput, family_
 }
 
 fn sublimation_family_id(sublimation_id: &str) -> Option<&'static str> {
-    match sublimation_id {
-        "agilite-vitale-ii" | "agilite-vitale-2" => Some("agilite-vitale"),
-        "alternance" | "alternance-ii" => Some("alternance"),
-        "armure-lourde-i" | "armure-lourde-ii" | "armure-lourde-2" => Some("armure-lourde"),
-        "brulure-i" | "brulure-ii" | "brulure-iii" | "brulure-4" => Some("brulure"),
-        "brulure-secondaire-i"
-        | "brulure-secondaire-ii"
-        | "brulure-secondaire-iii"
-        | "brulure-secondaire-4" => Some("brulure-secondaire"),
-        "carnage-i" | "carnage-ii" | "carnage-iii" | "carnage-6" => Some("carnage"),
-        "chaos" => Some("chaos"),
-        "cicatrisation-i" | "cicatrisation-ii" | "cicatrisation-iii" | "cicatrisation-6" => {
-            Some("cicatrisation")
-        }
-        "concentration-elementaire" => Some("concentration-elementaire"),
-        "critique-berserk-i"
-        | "critique-berserk-ii"
-        | "critique-berserk-iii"
-        | "critique-berserk-6" => Some("critique-berserk"),
-        "devastation-i" | "devastation-ii" | "devastation-iii" | "devastation-3" => {
-            Some("devastation")
-        }
-        "exces" | "exces-ii" => Some("exces"),
-        "expert-des-armes-legeres-i"
-        | "expert-des-armes-legeres-ii"
-        | "expert-des-armes-legeres-iii"
-        | "expert-des-armes-legeres-6" => Some("expert-des-armes-legeres"),
-        "force-vitale-ii" | "force-vitale-2" => Some("force-vitale"),
-        "gel-i" | "gel-ii" | "gel-iii" | "gel-4" => Some("gel"),
-        "gel-secondaire-i" | "gel-secondaire-ii" | "gel-secondaire-iii" | "gel-secondaire-4" => {
-            Some("gel-secondaire")
-        }
-        "inflexibilite" | "inflexibilite-ii" => Some("inflexibilite"),
-        "influence-i" | "influence-ii" | "influence-iii" | "influence-6" => Some("influence"),
-        "influence-vitale-i"
-        | "influence-vitale-ii"
-        | "influence-vitale-iii"
-        | "influence-vitale-6" => Some("influence-vitale"),
-        "longueur-i" | "longueur-ii" | "longueur-iii" | "longueur-6" => Some("longueur"),
-        "puissance-brute-i"
-        | "puissance-brute-ii"
-        | "puissance-brute-iii"
-        | "puissance-brute-4" => Some("puissance-brute"),
-        "sauvegarde-ii" | "sauvegarde-6" => Some("sauvegarde"),
-        "secret-critique" => Some("secret-critique"),
-        "tellurisme-i" | "tellurisme-ii" | "tellurisme-iii" | "tellurisme-4" => Some("tellurisme"),
-        "tellurisme-secondaire-i"
-        | "tellurisme-secondaire-ii"
-        | "tellurisme-secondaire-iii"
-        | "tellurisme-secondaire-4" => Some("tellurisme-secondaire"),
-        "tolerance-i" | "tolerance-ii" | "tolerance-2" => Some("tolerance"),
-        "velocite-ii" | "velocite-2" => Some("velocite"),
-        "ventilation-i" | "ventilation-ii" | "ventilation-iii" | "ventilation-4" => {
-            Some("ventilation")
-        }
-        "ventilation-secondaire-i"
-        | "ventilation-secondaire-ii"
-        | "ventilation-secondaire-iii"
-        | "ventilation-secondaire-4" => Some("ventilation-secondaire"),
-        "vivacite-ii" | "vivacite-2" => Some("vivacite"),
-        _ => None,
-    }
+    find_supported_sublimation(sublimation_id).map(|definition| definition.family_id)
 }
 
 fn get_sublimation_category(sublimation_id: &str) -> Option<&'static str> {
-    match sublimation_id {
-        "chaos"
-        | "concentration-elementaire"
-        | "inflexibilite"
-        | "inflexibilite-ii"
-        | "secret-critique" => Some("epic"),
-        "alternance" | "alternance-ii" | "exces" | "exces-ii" => Some("relic"),
-        _ if is_supported_sublimation_id(sublimation_id) => Some("normal"),
-        _ => None,
-    }
+    find_supported_sublimation(sublimation_id).map(|definition| definition.category)
 }
 
 fn get_sublimation_cumulative_max(family_id: &str) -> f64 {
-    match family_id {
-        "agilite-vitale" | "armure-lourde" | "force-vitale" | "tolerance" | "velocite"
-        | "vivacite" => 2.0,
-        "devastation" => 3.0,
-        "brulure"
-        | "brulure-secondaire"
-        | "gel"
-        | "gel-secondaire"
-        | "puissance-brute"
-        | "tellurisme"
-        | "tellurisme-secondaire"
-        | "ventilation"
-        | "ventilation-secondaire" => 4.0,
-        "carnage"
-        | "cicatrisation"
-        | "critique-berserk"
-        | "expert-des-armes-legeres"
-        | "influence"
-        | "influence-vitale"
-        | "longueur"
-        | "sauvegarde" => 6.0,
-        _ => 1.0,
-    }
+    SUPPORTED_SUBLIMATIONS
+        .iter()
+        .filter(|definition| definition.family_id == family_id)
+        .map(|definition| definition.cumulative_max)
+        .fold(1.0, f64::max)
 }
 
 fn get_sublimation_effective_level(sublimation_id: &str) -> f64 {
-    match sublimation_id {
-        "influence-6"
-        | "influence-vitale-6"
-        | "critique-berserk-6"
-        | "carnage-6"
-        | "cicatrisation-6"
-        | "expert-des-armes-legeres-6"
-        | "longueur-6"
-        | "sauvegarde-6" => 6.0,
-        "brulure-4"
-        | "brulure-secondaire-4"
-        | "gel-4"
-        | "gel-secondaire-4"
-        | "tellurisme-4"
-        | "tellurisme-secondaire-4"
-        | "ventilation-4"
-        | "ventilation-secondaire-4"
-        | "puissance-brute-4" => 4.0,
-        "devastation-iii" | "devastation-3" => 3.0,
-        "agilite-vitale-ii"
-        | "armure-lourde-ii"
-        | "brulure-ii"
-        | "brulure-secondaire-ii"
-        | "carnage-ii"
-        | "cicatrisation-ii"
-        | "critique-berserk-ii"
-        | "devastation-ii"
-        | "expert-des-armes-legeres-ii"
-        | "force-vitale-ii"
-        | "gel-ii"
-        | "gel-secondaire-ii"
-        | "influence-ii"
-        | "influence-vitale-ii"
-        | "longueur-ii"
-        | "puissance-brute-ii"
-        | "sauvegarde-ii"
-        | "tellurisme-ii"
-        | "tellurisme-secondaire-ii"
-        | "tolerance-ii"
-        | "velocite-ii"
-        | "ventilation-ii"
-        | "ventilation-secondaire-ii"
-        | "vivacite-ii"
-        | "tolerance-2"
-        | "vivacite-2"
-        | "velocite-2"
-        | "force-vitale-2"
-        | "agilite-vitale-2"
-        | "armure-lourde-2" => 2.0,
-        "brulure-iii"
-        | "brulure-secondaire-iii"
-        | "carnage-iii"
-        | "cicatrisation-iii"
-        | "critique-berserk-iii"
-        | "expert-des-armes-legeres-iii"
-        | "gel-iii"
-        | "gel-secondaire-iii"
-        | "influence-iii"
-        | "influence-vitale-iii"
-        | "longueur-iii"
-        | "puissance-brute-iii"
-        | "tellurisme-iii"
-        | "tellurisme-secondaire-iii"
-        | "ventilation-iii"
-        | "ventilation-secondaire-iii" => 3.0,
-        _ => 1.0,
-    }
+    find_supported_sublimation(sublimation_id)
+        .map(|definition| definition.effective_level)
+        .unwrap_or(1.0)
 }
 
 fn create_sublimation_combat_state(character: &Value) -> SublimationCombatState {
