@@ -1362,10 +1362,19 @@ pub fn enqueue_hybrid_repair_candidate(
 
 pub fn enqueue_hybrid_elite_neighbors(
     request: &OptimizerRequest,
-    mut queue: Vec<OptimizerCandidateInput>,
+    queue: Vec<OptimizerCandidateInput>,
     input: &OptimizerCandidateInput,
 ) -> Result<HybridNeighborResult, String> {
     let catalog = read_search_catalog(request)?;
+    enqueue_hybrid_elite_neighbors_with_catalog(request, &catalog, queue, input)
+}
+
+fn enqueue_hybrid_elite_neighbors_with_catalog(
+    request: &OptimizerRequest,
+    catalog: &[SearchCatalogEntry],
+    mut queue: Vec<OptimizerCandidateInput>,
+    input: &OptimizerCandidateInput,
+) -> Result<HybridNeighborResult, String> {
     let actions = get_top_weighted_actions(request, &catalog, 20);
     let mut seen = queue
         .iter()
@@ -1386,6 +1395,7 @@ pub fn enqueue_hybrid_elite_neighbors(
 
     for turn_index in (0..input.plan.turns.len()).rev() {
         let turn = &input.plan.turns[turn_index];
+
         for action_index in 0..turn.actions.len().saturating_sub(1) {
             if encode_candidate_action(&turn.actions[action_index])
                 == encode_candidate_action(&turn.actions[action_index + 1])
@@ -5154,12 +5164,17 @@ fn enqueue_repair_candidate_for_search(
 
 fn enqueue_elite_neighbors_for_search(
     request: &OptimizerRequest,
+    catalog: &[SearchCatalogEntry],
     elite_neighbor_queue: &mut Vec<OptimizerCandidateInput>,
     candidate: &OptimizerCandidateInput,
     metrics: &mut BTreeMap<String, u32>,
 ) -> Result<(), String> {
-    let result =
-        enqueue_hybrid_elite_neighbors(request, std::mem::take(elite_neighbor_queue), candidate)?;
+    let result = enqueue_hybrid_elite_neighbors_with_catalog(
+        request,
+        catalog,
+        std::mem::take(elite_neighbor_queue),
+        candidate,
+    )?;
     *elite_neighbor_queue = result.queue;
     merge_metric_maps(metrics, result.metrics);
     Ok(())
@@ -5226,6 +5241,7 @@ fn run_hybrid_island_search(
             if tracked.improved {
                 enqueue_elite_neighbors_for_search(
                     request,
+                    catalog,
                     &mut elite_neighbor_queue,
                     &entry.candidate,
                     &mut accumulator.metrics,
@@ -5277,6 +5293,7 @@ fn run_hybrid_island_search(
                 if tracked.improved {
                     enqueue_elite_neighbors_for_search(
                         request,
+                        catalog,
                         &mut elite_neighbor_queue,
                         &entry.candidate,
                         &mut accumulator.metrics,
@@ -5327,6 +5344,7 @@ fn run_hybrid_island_search(
                     if tracked.improved {
                         enqueue_elite_neighbors_for_search(
                             request,
+                            catalog,
                             &mut elite_neighbor_queue,
                             &entry.candidate,
                             &mut accumulator.metrics,
@@ -5450,6 +5468,7 @@ fn run_hybrid_island_search(
             if tracked.improved {
                 enqueue_elite_neighbors_for_search(
                     request,
+                    catalog,
                     &mut elite_neighbor_queue,
                     &entry.candidate,
                     &mut accumulator.metrics,
