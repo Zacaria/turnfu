@@ -16,6 +16,63 @@ pub struct ResourcePool {
     pub bq: f64,
 }
 
+impl ResourcePool {
+    fn amount(&self, resource: &str) -> Option<f64> {
+        match resource {
+            "ap" => Some(self.ap),
+            "mp" => Some(self.mp),
+            "wp" => Some(self.wp),
+            "bq" => Some(self.bq),
+            _ => None,
+        }
+    }
+
+    fn add_resource(&mut self, resource: &str, amount: f64) -> bool {
+        match resource {
+            "ap" => self.ap += amount,
+            "mp" => self.mp += amount,
+            "wp" => self.wp += amount,
+            "bq" => self.bq += amount,
+            _ => return false,
+        }
+        true
+    }
+
+    fn add_resource_clamped_min(&mut self, resource: &str, amount: f64, min_value: f64) -> bool {
+        match resource {
+            "ap" => self.ap = (self.ap + amount).max(min_value),
+            "mp" => self.mp = (self.mp + amount).max(min_value),
+            "wp" => self.wp = (self.wp + amount).max(min_value),
+            "bq" => self.bq = (self.bq + amount).max(min_value),
+            _ => return false,
+        }
+        true
+    }
+
+    fn can_afford(&self, cost: SpellCost) -> bool {
+        cost.non_negative_amounts()
+            .into_iter()
+            .all(|(resource, required)| {
+                self.amount(resource)
+                    .is_some_and(|available| required <= available)
+            })
+    }
+
+    fn pay(self, cost: SpellCost) -> Self {
+        let mut resources = self;
+        for (resource, amount) in cost.amounts() {
+            resources.add_resource(resource, -amount);
+        }
+        resources
+    }
+
+    fn pay_non_negative(&mut self, cost: SpellCost) {
+        for (resource, amount) in cost.non_negative_amounts() {
+            self.add_resource(resource, -amount);
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SpellCost {
@@ -27,6 +84,26 @@ pub struct SpellCost {
     pub wp: i32,
     #[serde(default)]
     pub bq: i32,
+}
+
+impl SpellCost {
+    fn amounts(&self) -> [(&'static str, f64); 4] {
+        [
+            ("ap", f64::from(self.ap)),
+            ("mp", f64::from(self.mp)),
+            ("wp", f64::from(self.wp)),
+            ("bq", f64::from(self.bq)),
+        ]
+    }
+
+    fn non_negative_amounts(&self) -> [(&'static str, f64); 4] {
+        [
+            ("ap", f64::from(self.ap.max(0))),
+            ("mp", f64::from(self.mp.max(0))),
+            ("wp", f64::from(self.wp.max(0))),
+            ("bq", f64::from(self.bq.max(0))),
+        ]
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -3125,12 +3202,8 @@ fn apply_search_resource_deltas(
             continue;
         }
         let amount = f64::from(read_i32_field(Some(&delta), "amount"));
-        match read_string_field(&delta, "resource").as_deref() {
-            Some("ap") => resources.ap += amount,
-            Some("mp") => resources.mp += amount,
-            Some("wp") => resources.wp += amount,
-            Some("bq") => resources.bq += amount,
-            _ => {}
+        if let Some(resource) = read_string_field(&delta, "resource") {
+            resources.add_resource(&resource, amount);
         }
     }
 }
@@ -4909,20 +4982,14 @@ fn can_use_action_softly(
 }
 
 fn can_afford_cost(resources: ResourcePool, cost: SpellCost) -> bool {
-    f64::from(cost.ap.max(0)) <= resources.ap
-        && f64::from(cost.mp.max(0)) <= resources.mp
-        && f64::from(cost.wp.max(0)) <= resources.wp
-        && f64::from(cost.bq.max(0)) <= resources.bq
+    resources.can_afford(cost)
 }
 
 fn apply_soft_action_resources(
     mut resources: ResourcePool,
     spell: &SearchCatalogEntry,
 ) -> ResourcePool {
-    resources.ap -= f64::from(spell.cost.ap.max(0));
-    resources.mp -= f64::from(spell.cost.mp.max(0));
-    resources.wp -= f64::from(spell.cost.wp.max(0));
-    resources.bq -= f64::from(spell.cost.bq.max(0));
+    resources.pay_non_negative(spell.cost);
 
     for effect in &spell.effects {
         if read_string_field(effect, "type").as_deref() == Some("resourceDelta")
@@ -4931,12 +4998,8 @@ fn apply_soft_action_resources(
                 .unwrap_or(true)
         {
             let amount = read_i32_field(Some(effect), "amount");
-            match read_string_field(effect, "resource").as_deref() {
-                Some("ap") => resources.ap = (resources.ap + f64::from(amount)).max(0.0),
-                Some("mp") => resources.mp = (resources.mp + f64::from(amount)).max(0.0),
-                Some("wp") => resources.wp = (resources.wp + f64::from(amount)).max(0.0),
-                Some("bq") => resources.bq = (resources.bq + f64::from(amount)).max(0.0),
-                _ => {}
+            if let Some(resource) = read_string_field(effect, "resource") {
+                resources.add_resource_clamped_min(&resource, f64::from(amount), 0.0);
             }
         }
     }
@@ -5082,12 +5145,7 @@ pub fn resolve_action_context(context: Option<PartialActionContext>) -> ActionCo
 }
 
 pub fn pay_cost(resources: ResourcePool, cost: SpellCost) -> ResourcePool {
-    ResourcePool {
-        ap: resources.ap - f64::from(cost.ap),
-        mp: resources.mp - f64::from(cost.mp),
-        wp: resources.wp - f64::from(cost.wp),
-        bq: resources.bq - f64::from(cost.bq),
-    }
+    resources.pay(cost)
 }
 
 pub fn validate_resource_cost(
@@ -6227,14 +6285,7 @@ fn opposite_rune(rune: &Rune) -> Rune {
 }
 
 fn add_resource_by_name(resources: &mut ResourcePool, resource: &str, amount: i32) {
-    let amount = f64::from(amount);
-    match resource {
-        "ap" => resources.ap += amount,
-        "mp" => resources.mp += amount,
-        "wp" => resources.wp += amount,
-        "bq" => resources.bq += amount,
-        _ => {}
-    }
+    resources.add_resource(resource, f64::from(amount));
 }
 
 fn add_stat_by_name(stats: &mut BaseStats, stat: &str, amount: f64, element: Option<&Element>) {
@@ -6376,14 +6427,14 @@ fn first_insufficient_resource(
     resources: ResourcePool,
     cost: SpellCost,
 ) -> Option<(&'static str, f64, f64)> {
-    [
-        ("ap", f64::from(cost.ap), resources.ap),
-        ("mp", f64::from(cost.mp), resources.mp),
-        ("wp", f64::from(cost.wp), resources.wp),
-        ("bq", f64::from(cost.bq), resources.bq),
-    ]
-    .into_iter()
-    .find(|(_, required, available)| required > available)
+    cost.amounts()
+        .into_iter()
+        .filter_map(|(resource, required)| {
+            resources
+                .amount(resource)
+                .map(|available| (resource, required, available))
+        })
+        .find(|(_, required, available)| required > available)
 }
 
 #[wasm_bindgen]
