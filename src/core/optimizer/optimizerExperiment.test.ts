@@ -126,7 +126,7 @@ test("keeps TypeScript backend as default and requires configured Rust backend",
   );
 });
 
-test("runs configured Rust/WASM hybrid backend through the TypeScript gameplay oracle", () => {
+test("runs configured Rust/WASM hybrid backend through the Rust batch evaluator guarded by the TypeScript oracle", () => {
   configureRustWasmOptimizerBackend({
     generate_hybrid_candidates_json(requestJson) {
       const request = JSON.parse(requestJson);
@@ -162,6 +162,30 @@ test("runs configured Rust/WASM hybrid backend through the TypeScript gameplay o
         },
       });
     },
+    evaluate_candidate_batch_json(_requestJson, candidatesJson) {
+      const candidates = JSON.parse(candidatesJson);
+      return JSON.stringify(candidates.map((candidate: { id: string; plan: { turns: Array<{ actions: Array<{ spellId: string }> }> } }) => {
+        const firstSpell = candidate.plan.turns[0]?.actions[0]?.spellId;
+        const score = firstSpell === "setup" ? 144 : 40;
+        return {
+          candidateId: candidate.id,
+          valid: true,
+          totalDamage: score,
+          score: {
+            score,
+            totalDamage: score,
+            damageByResolvedElement: {
+              fire: score,
+              water: 0,
+              earth: 0,
+              air: 0,
+              light: 0,
+              neutral: 0,
+            },
+          },
+        };
+      }));
+    },
   });
 
   try {
@@ -182,6 +206,7 @@ test("runs configured Rust/WASM hybrid backend through the TypeScript gameplay o
     assert.equal(engine?.attempts, 2);
     assert.equal(engine?.metrics.rustWasmBatchCalls, 1);
     assert.equal(engine?.metrics.rustWasmGeneratedCandidates, 2);
+    assert.equal(engine?.metrics.rustWasmCandidateEvaluations, 2);
     assert.equal(result.bestCandidate?.score.score, 144);
     assert.equal(result.bestCandidate?.plan.turns[0]?.actions[0]?.spellId, "setup");
   } finally {

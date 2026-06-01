@@ -13,7 +13,10 @@ import {
 } from "./comboOptimizer.ts";
 import {
   createRustWasmOptimizerRequest,
+  type RustWasmCandidateEvaluationInput,
+  type RustWasmCandidateEvaluationResult,
   type RustWasmOptimizerCandidateBatchResponse,
+  type RustWasmOptimizerRequest,
   type RustWasmOptimizerWasmExports,
 } from "./rustWasmBackendTypes.ts";
 
@@ -339,12 +342,9 @@ function runRustWasmHybridOptimizerEngine(normalized: NormalizedExperimentOption
     accumulator.metrics.rustWasmBatchCalls = (accumulator.metrics.rustWasmBatchCalls ?? 0) + 1;
     mergeNumericMetrics(accumulator.metrics, response.metrics);
 
-    for (const candidate of response.candidates) {
-      if (accumulator.attempts >= normalized.budget.iterations || normalized.signal?.aborted) {
-        break;
-      }
-      evaluateAndRecord(context, accumulator, candidate);
-    }
+    const candidates = response.candidates.slice(0, Math.max(0, normalized.budget.iterations - accumulator.attempts));
+    const evaluations = evaluateRustWasmCandidateBatch(wasm, request, candidates, batchIndex);
+    recordRustWasmCandidateEvaluations(context, accumulator, candidates, evaluations);
 
     if (response.candidates.length === 0) {
       break;
@@ -368,6 +368,96 @@ function parseRustWasmCandidateBatchResponse(responseJson: string): RustWasmOpti
     throw new Error("Rust/WASM optimizer backend returned an invalid candidate batch response.");
   }
   return parsed;
+}
+
+function evaluateRustWasmCandidateBatch(
+  wasm: RustWasmOptimizerWasmExports,
+  request: RustWasmOptimizerRequest,
+  candidates: Array<{ passiveIds?: string[]; plan: ComboPlan }>,
+  batchIndex: number,
+): RustWasmCandidateEvaluationResult[] {
+  const inputs: RustWasmCandidateEvaluationInput[] = candidates.map((candidate, candidateIndex) => ({
+    id: `batch:${batchIndex}:candidate:${candidateIndex}`,
+    passiveIds: candidate.passiveIds,
+    plan: candidate.plan,
+  }));
+  const parsed = JSON.parse(wasm.evaluate_candidate_batch_json(
+    JSON.stringify(request),
+    JSON.stringify(inputs),
+  )) as RustWasmCandidateEvaluationResult[];
+  if (!Array.isArray(parsed)) {
+    throw new Error("Rust/WASM optimizer backend returned an invalid candidate evaluation response.");
+  }
+  if (parsed.length !== inputs.length) {
+    throw new Error(`Rust/WASM optimizer backend returned ${parsed.length} evaluations for ${inputs.length} candidates.`);
+  }
+  return parsed;
+}
+
+function recordRustWasmCandidateEvaluations(
+  context: EngineContext,
+  accumulator: EngineAccumulator,
+  candidates: Array<{ passiveIds?: string[]; plan: ComboPlan }>,
+  rustEvaluations: RustWasmCandidateEvaluationResult[],
+) {
+  for (const [candidateIndex, candidate] of candidates.entries()) {
+    if (accumulator.attempts >= context.options.budget.iterations || context.options.signal?.aborted) {
+      break;
+    }
+
+    accumulator.attempts += 1;
+    accumulator.metrics.rustWasmCandidateEvaluations = (accumulator.metrics.rustWasmCandidateEvaluations ?? 0) + 1;
+
+    const rustEvaluation = rustEvaluations[candidateIndex];
+    const oracleEvaluation = context.evaluator.evaluateDetailed(candidate);
+    assertRustWasmEvaluationMatchesOracle(rustEvaluation, oracleEvaluation);
+
+    if (oracleEvaluation.result && rustEvaluation.score) {
+      const result = {
+        ...oracleEvaluation.result,
+        score: rustEvaluation.score,
+      };
+      accumulator.validCandidates += 1;
+      addTopCandidate(context, accumulator, result);
+      if (!accumulator.bestCandidate || compareCandidates(result, accumulator.bestCandidate) < 0) {
+        accumulator.bestCandidate = result;
+        recordProgress(context, accumulator);
+      }
+    } else {
+      accumulator.invalidCandidates += 1;
+    }
+
+    if (accumulator.attempts % context.options.progressInterval === 0) {
+      recordProgress(context, accumulator);
+    }
+  }
+}
+
+function assertRustWasmEvaluationMatchesOracle(
+  rustEvaluation: RustWasmCandidateEvaluationResult,
+  oracleEvaluation: OptimizerExperimentEvaluation,
+) {
+  const oracleValid = Boolean(oracleEvaluation.result);
+  if (rustEvaluation.valid !== oracleValid) {
+    throw new Error(`Rust/WASM candidate evaluation mismatch for '${rustEvaluation.candidateId}': valid=${rustEvaluation.valid}, TypeScript oracle valid=${oracleValid}.`);
+  }
+  if (!oracleEvaluation.result || !rustEvaluation.score) {
+    return;
+  }
+
+  assertCloseRustWasmScore(rustEvaluation, "score.score", rustEvaluation.score.score, oracleEvaluation.result.score.score);
+  assertCloseRustWasmScore(rustEvaluation, "score.totalDamage", rustEvaluation.score.totalDamage, oracleEvaluation.result.score.totalDamage);
+}
+
+function assertCloseRustWasmScore(
+  rustEvaluation: RustWasmCandidateEvaluationResult,
+  fieldPath: string,
+  rustValue: number,
+  oracleValue: number,
+) {
+  if (Math.abs(rustValue - oracleValue) > 0.001) {
+    throw new Error(`Rust/WASM candidate evaluation mismatch for '${rustEvaluation.candidateId}' at ${fieldPath}: Rust=${rustValue}, TypeScript=${oracleValue}.`);
+  }
 }
 
 function mergeNumericMetrics(target: Record<string, number>, source: Record<string, number>) {

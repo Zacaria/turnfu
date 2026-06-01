@@ -49,8 +49,22 @@ export type RustWasmOptimizerCandidateBatchResponse = {
   metrics: Record<string, number>;
 };
 
+export type RustWasmCandidateEvaluationInput = {
+  id: string;
+  passiveIds?: string[];
+  plan: ComboPlan;
+};
+
+export type RustWasmCandidateEvaluationResult = {
+  candidateId: string;
+  valid: boolean;
+  totalDamage: number;
+  score?: ComboScoreBreakdown;
+};
+
 export type RustWasmOptimizerWasmExports = {
   generate_hybrid_candidates_json: (requestJson: string) => string;
+  evaluate_candidate_batch_json: (requestJson: string, candidatesJson: string) => string;
 };
 
 export function createRustWasmOptimizerRequest(options: OptimizerExperimentOptions): RustWasmOptimizerRequest {

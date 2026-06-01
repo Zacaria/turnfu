@@ -2294,6 +2294,121 @@ fn collect_search_damage_effects(spell: &SearchCatalogEntry) -> Vec<DamageEffect
         .collect()
 }
 
+fn collect_search_damage_inflicted_bonus_percent(
+    spell: &SearchCatalogEntry,
+    state: &HuppermageState,
+    action: &CandidateAction,
+    resources: ResourcePool,
+) -> f64 {
+    collect_search_tag_values(
+        &spell.effects,
+        "damageInflictedPercentPerBqPercentRemaining",
+        state,
+        action,
+    )
+    .into_iter()
+    .filter_map(|value| value.as_f64())
+    .fold(0.0, |total, value| {
+        let bq_percent_remaining = if state.bq_max > 0 {
+            (resources.bq.max(0) as f64 / state.bq_max as f64) * 100.0
+        } else {
+            0.0
+        };
+        round_damage(total + value * bq_percent_remaining)
+    })
+}
+
+fn collect_search_consumed_runes(
+    spell: &SearchCatalogEntry,
+    state: &HuppermageState,
+    action: &CandidateAction,
+) -> Vec<Rune> {
+    let mut runes = collect_search_tag_values(&spell.effects, "consumeRune", state, action)
+        .into_iter()
+        .filter_map(|value| serde_json::from_value::<Rune>(value).ok())
+        .collect::<Vec<_>>();
+    if collect_search_tag_values(&spell.effects, "consumeAllRunes", state, action)
+        .into_iter()
+        .any(|value| value.as_bool() == Some(true))
+    {
+        runes.extend(
+            rune_application_order()
+                .into_iter()
+                .filter(|rune| is_rune_active(&state.runes.active, rune)),
+        );
+    }
+    sort_runes_for_application(&runes)
+}
+
+fn collect_search_tag_values(
+    effects: &[Value],
+    tag_name: &str,
+    state: &HuppermageState,
+    action: &CandidateAction,
+) -> Vec<Value> {
+    let mut values = vec![];
+    for effect in effects {
+        match read_string_field(effect, "type").as_deref() {
+            Some("tag") if read_string_field(effect, "tag").as_deref() == Some(tag_name) => {
+                if let Some(value) = effect.get("value") {
+                    values.push(value.clone());
+                }
+            }
+            Some("conditional") => {
+                if is_search_condition_met(effect.get("condition"), state, action) {
+                    let nested_values = effect
+                        .get("effects")
+                        .and_then(Value::as_array)
+                        .map(|nested| collect_search_tag_values(nested, tag_name, state, action))
+                        .unwrap_or_default();
+                    values.extend(nested_values);
+                }
+            }
+            Some("trigger") => {
+                let nested_values = effect
+                    .get("effects")
+                    .and_then(Value::as_array)
+                    .map(|nested| collect_search_tag_values(nested, tag_name, state, action))
+                    .unwrap_or_default();
+                values.extend(nested_values);
+            }
+            _ => {}
+        }
+    }
+    values
+}
+
+fn is_search_condition_met(
+    condition: Option<&Value>,
+    state: &HuppermageState,
+    action: &CandidateAction,
+) -> bool {
+    match condition
+        .and_then(|value| read_string_field(value, "type"))
+        .as_deref()
+    {
+        Some("hasRune") => condition
+            .and_then(|value| value.get("rune"))
+            .cloned()
+            .and_then(|value| serde_json::from_value::<Rune>(value).ok())
+            .is_some_and(|rune| is_rune_active(&state.runes.active, &rune)),
+        Some("exactRuneCount") => {
+            let count = read_u32_field(condition, "count") as usize;
+            get_active_rune_count(state) == count
+        }
+        Some("targetIs") => condition
+            .and_then(|value| read_string_field(value, "value"))
+            .is_some_and(|expected| {
+                action
+                    .target
+                    .as_ref()
+                    .map(|target| action_target_kind_key(&target.kind))
+                    == Some(expected.as_str())
+            }),
+        _ => false,
+    }
+}
+
 fn get_search_actions(
     request: &OptimizerRequest,
     catalog: &[SearchCatalogEntry],
@@ -2599,6 +2714,13 @@ fn counts_as_soft_target_cast(action: &CandidateAction) -> bool {
         .as_ref()
         .map(|target| target.kind != ActionTargetKind::EmptyCell)
         .unwrap_or(true)
+}
+
+fn is_empty_cell_action(action: &CandidateAction) -> bool {
+    action
+        .target
+        .as_ref()
+        .is_some_and(|target| target.kind == ActionTargetKind::EmptyCell)
 }
 
 fn read_action_target_kind(value: Option<&Value>) -> Option<ActionTargetKind> {
@@ -3598,6 +3720,92 @@ fn rune_to_element(rune: &Rune) -> Element {
     }
 }
 
+fn element_to_rune(element: &Element) -> Option<Rune> {
+    match element {
+        Element::Fire => Some(Rune::Incandescent),
+        Element::Water => Some(Rune::Aquatic),
+        Element::Earth => Some(Rune::Telluric),
+        Element::Air => Some(Rune::Aerial),
+        Element::Light | Element::Neutral => None,
+    }
+}
+
+fn damage_matches_last_generated_rune(
+    stats: &BaseStats,
+    effect: &DamageEffect,
+    state: &HuppermageState,
+) -> bool {
+    let Some(last_generated_rune) = state.runes.last_generated_rune.as_ref() else {
+        return false;
+    };
+    resolve_damage_element(&effect.element, stats) == rune_to_element(last_generated_rune)
+}
+
+fn apply_heart_stats(
+    mut stats: BaseStats,
+    heart: &HuppermageHeart,
+    state: &HuppermageState,
+) -> BaseStats {
+    if !has_passive(state, "altruisme-de-lame") {
+        stats.damage_inflicted_percent += 30.0;
+    }
+    stats.heals_performed_percent += if has_passive(state, "altruisme-de-lame") {
+        30.0
+    } else {
+        15.0
+    };
+
+    if !has_passive(state, "refraction-elementaire") {
+        let heart_mastery = (max_elemental_mastery(&stats.elemental_mastery) * 1.2).floor();
+        set_heart_elemental_mastery(&mut stats.elemental_mastery, heart, heart_mastery);
+    }
+
+    if has_passive(state, "initiative-de-lame") {
+        keep_only_heart_elemental_mastery(&mut stats.elemental_mastery, heart);
+    }
+
+    stats
+}
+
+fn max_elemental_mastery(mastery: &ElementalMastery) -> f64 {
+    mastery
+        .fire
+        .max(mastery.water)
+        .max(mastery.earth)
+        .max(mastery.air)
+        .max(mastery.light)
+        .max(mastery.neutral)
+        .max(0.0)
+}
+
+fn set_heart_elemental_mastery(
+    mastery: &mut ElementalMastery,
+    heart: &HuppermageHeart,
+    value: f64,
+) {
+    match heart {
+        HuppermageHeart::Fire => mastery.fire = value,
+        HuppermageHeart::Water => mastery.water = value,
+        HuppermageHeart::Earth => mastery.earth = value,
+        HuppermageHeart::Air => mastery.air = value,
+    }
+}
+
+fn keep_only_heart_elemental_mastery(mastery: &mut ElementalMastery, heart: &HuppermageHeart) {
+    if heart != &HuppermageHeart::Fire {
+        mastery.fire = 0.0;
+    }
+    if heart != &HuppermageHeart::Water {
+        mastery.water = 0.0;
+    }
+    if heart != &HuppermageHeart::Earth {
+        mastery.earth = 0.0;
+    }
+    if heart != &HuppermageHeart::Air {
+        mastery.air = 0.0;
+    }
+}
+
 fn rune_to_heart(rune: &Rune) -> HuppermageHeart {
     match rune {
         Rune::Incandescent => HuppermageHeart::Fire,
@@ -4108,6 +4316,7 @@ pub fn evaluate_candidate(
 
     for (turn_index, turn) in candidate.plan.turns.iter().enumerate() {
         let mut turn_damage = 0.0;
+        let mut turn_stats = base_stats.clone();
         let mut casts_by_spell_id = BTreeMap::new();
         let mut target_casts_by_spell_id = BTreeMap::new();
 
@@ -4177,14 +4386,56 @@ pub fn evaluate_candidate(
             }
             resources = resource_validation.resources_after_cost;
 
-            for effect in collect_search_damage_effects(spell) {
-                let damage = compute_raw_damage(&base_stats, &effect, default_context.clone());
-                turn_damage = round_damage(turn_damage + damage.result);
-                damage_by_resolved_element = add_resolved_element_damage(
-                    damage_by_resolved_element,
-                    &damage.resolved_element,
-                    damage.result,
-                );
+            if spell.id == "coeur-de-lumiere" {
+                let heart = huppermage
+                    .runes
+                    .last_generated_rune
+                    .as_ref()
+                    .map(rune_to_heart);
+                if let Some(heart) = heart {
+                    turn_stats = apply_heart_stats(turn_stats, &heart, &huppermage);
+                    huppermage.active_heart = Some(heart);
+                }
+            }
+
+            let generated_rune = spell.element.as_ref().and_then(element_to_rune);
+            let generated_rune_was_active = generated_rune
+                .as_ref()
+                .is_some_and(|rune| is_rune_active(&huppermage.runes.active, rune));
+            let mut action_stats = turn_stats.clone();
+            if spell.element == Some(Element::Light) && huppermage.abundance_level > 0 {
+                action_stats.damage_inflicted_percent += huppermage.abundance_level as f64;
+                huppermage.abundance_level = 0;
+            }
+            action_stats.damage_inflicted_percent += collect_search_damage_inflicted_bonus_percent(
+                spell,
+                &huppermage,
+                &action,
+                resources,
+            );
+
+            if !is_empty_cell_action(action) {
+                for effect in collect_search_damage_effects(spell) {
+                    let mut damage_stats = action_stats.clone();
+                    if damage_matches_last_generated_rune(&damage_stats, &effect, &huppermage) {
+                        damage_stats.damage_inflicted_percent += 20.0;
+                    }
+                    let damage =
+                        compute_raw_damage(&damage_stats, &effect, default_context.clone());
+                    turn_damage = round_damage(turn_damage + damage.result);
+                    damage_by_resolved_element = add_resolved_element_damage(
+                        damage_by_resolved_element,
+                        &damage.resolved_element,
+                        damage.result,
+                    );
+                }
+            }
+
+            let consumed_runes = collect_search_consumed_runes(spell, &huppermage, action);
+            if !consumed_runes.is_empty() {
+                let consumed_count = consumed_runes.len();
+                huppermage = consume_runes(huppermage, &consumed_runes);
+                huppermage = add_abundance(huppermage, (consumed_count as i32) * 15).state;
             }
 
             casts_by_spell_id.insert(
@@ -4203,11 +4454,24 @@ pub fn evaluate_candidate(
             }
             apply_spell_cooldown(&mut huppermage.cooldowns_by_spell_id, &rules);
             huppermage = add_used_spell_id(huppermage, &rules);
+            if let Some(rune) = generated_rune {
+                if !generated_rune_was_active {
+                    let generation = apply_generated_rune(huppermage, resources, rune);
+                    huppermage = generation.state;
+                    resources = generation.resources;
+                }
+            }
         }
 
         let turn_end = apply_turn_end_bq(huppermage, resources);
         huppermage = turn_end.state;
         resources = turn_end.resources;
+        if has_passive(&huppermage, "profusion-runique") {
+            let active_rune_count = get_active_rune_count(&huppermage);
+            if active_rune_count > 0 {
+                huppermage = add_abundance(huppermage, (active_rune_count as i32) * 15).state;
+            }
+        }
         total_damage = round_damage(total_damage + turn_damage);
 
         if turn_index + 1 < candidate.plan.turns.len() {
@@ -4703,6 +4967,88 @@ mod tests {
                 },
             })
         );
+    }
+
+    #[test]
+    fn candidate_evaluation_composes_rune_generation_profusion_and_abundance_damage() {
+        let request = parse_optimizer_request(
+            r#"{
+              "schemaVersion":1,
+              "engine":"hybrid",
+              "seed":"abundance",
+              "duration":2,
+              "iterations":10,
+              "maxActionsPerTurn":3,
+              "maxPassiveCount":1,
+              "availableSpellIds":["air-hit","light-hit"],
+              "availablePassiveIds":["profusion-runique"],
+              "catalog":[
+                {
+                  "kind":"spell",
+                  "id":"air-hit",
+                  "element":"air",
+                  "cost":{"ap":1},
+                  "effects":[{"type":"damage","base":50,"element":"air"}],
+                  "constraints":[],
+                  "tags":[]
+                },
+                {
+                  "kind":"spell",
+                  "id":"light-hit",
+                  "element":"light",
+                  "cost":{"ap":1},
+                  "effects":[{"type":"damage","base":100,"element":"light"}],
+                  "constraints":[],
+                  "tags":[]
+                },
+                {
+                  "kind":"passive",
+                  "id":"profusion-runique",
+                  "effects":[],
+                  "constraints":[],
+                  "tags":["passive","abondance"]
+                }
+              ],
+              "character":{
+                "id":"test",
+                "resources":{"ap":6,"mp":3,"wp":2,"bq":100},
+                "stats":{"damageInflictedPercent":20}
+              }
+            }"#,
+        )
+        .expect("request should parse");
+        let candidate = OptimizerCandidateInput {
+            passive_ids: vec!["profusion-runique".to_string()],
+            plan: CandidatePlan {
+                turns: vec![
+                    CandidateTurn {
+                        actions: vec![action("air-hit")],
+                    },
+                    CandidateTurn {
+                        actions: vec![action("light-hit")],
+                    },
+                ],
+            },
+        };
+
+        let evaluation = evaluate_candidate(&request, &candidate, "candidate:abundance")
+            .expect("candidate should evaluate");
+
+        assert!(evaluation.valid);
+        assert_eq!(evaluation.total_damage, 195.0);
+        assert_eq!(
+            evaluation.score,
+            Some(CandidateScoreBreakdown {
+                score: 195.0,
+                total_damage: 195.0,
+                damage_by_resolved_element: DamageByElement {
+                    air: 60.0,
+                    fire: 135.0,
+                    ..DamageByElement::default()
+                },
+            })
+        );
+        assert_eq!(evaluation.final_huppermage.abundance_level, 15);
     }
 
     #[test]
