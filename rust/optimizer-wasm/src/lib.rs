@@ -136,6 +136,8 @@ pub struct HuppermageState {
     pub active_passives: Vec<String>,
     #[serde(default)]
     pub active_heart: Option<HuppermageHeart>,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub halo_chatoyant_marks: u32,
     pub bq_max: i32,
     pub stored_bq: i32,
     #[serde(default)]
@@ -2294,6 +2296,50 @@ fn collect_search_damage_effects(spell: &SearchCatalogEntry) -> Vec<DamageEffect
         .collect()
 }
 
+fn resolve_search_effective_cost(
+    spell: &SearchCatalogEntry,
+    state: &HuppermageState,
+    action: &CandidateAction,
+) -> SpellCost {
+    let mut cost = spell.cost;
+
+    for value in collect_search_tag_values(&spell.effects, "costDelta", state, action) {
+        let Some(delta) = value.as_str() else {
+            continue;
+        };
+        let Some((resource, amount)) = delta.split_once(':') else {
+            continue;
+        };
+        let Ok(amount) = amount.parse::<i32>() else {
+            continue;
+        };
+        add_spell_cost_resource(&mut cost, resource, amount);
+    }
+
+    for tag_name in ["additionalBqCostPerRune", "dynamicBqCostPerRune"] {
+        for value in collect_search_tag_values(&spell.effects, tag_name, state, action) {
+            let amount = value
+                .as_i64()
+                .map(|value| value as i32)
+                .or_else(|| value.as_f64().map(|value| value.round() as i32))
+                .unwrap_or(0);
+            cost.bq += amount * get_active_rune_count(state) as i32;
+        }
+    }
+
+    cost
+}
+
+fn add_spell_cost_resource(cost: &mut SpellCost, resource: &str, amount: i32) {
+    match resource {
+        "ap" => cost.ap += amount,
+        "mp" => cost.mp += amount,
+        "wp" => cost.wp += amount,
+        "bq" => cost.bq += amount,
+        _ => {}
+    }
+}
+
 fn collect_search_damage_inflicted_bonus_percent(
     spell: &SearchCatalogEntry,
     state: &HuppermageState,
@@ -2330,6 +2376,9 @@ fn collect_search_consumed_runes(
     if collect_search_tag_values(&spell.effects, "consumeAllRunes", state, action)
         .into_iter()
         .any(|value| value.as_bool() == Some(true))
+        || collect_search_tag_values(&spell.effects, "consumesRunes", state, action)
+            .into_iter()
+            .any(|value| value.as_bool() == Some(true))
     {
         runes.extend(
             rune_application_order()
@@ -2338,6 +2387,191 @@ fn collect_search_consumed_runes(
         );
     }
     sort_runes_for_application(&runes)
+}
+
+fn apply_halo_chatoyant_damage(
+    spell: &SearchCatalogEntry,
+    state: &mut HuppermageState,
+    action: &CandidateAction,
+) -> Option<DamageEffect> {
+    if spell.id != "halo-chatoyant" {
+        return None;
+    }
+
+    let triggered_existing_marks = u32::from(state.halo_chatoyant_marks > 0);
+    let triggers_current_mark =
+        collect_search_tag_values(&spell.effects, "triggerMarkImmediately", state, action)
+            .into_iter()
+            .any(|value| value.as_bool() == Some(true));
+    let trigger_count = triggered_existing_marks + u32::from(triggers_current_mark);
+    state.halo_chatoyant_marks = if triggers_current_mark { 0 } else { 1 };
+
+    if trigger_count == 0 {
+        return None;
+    }
+
+    Some(DamageEffect {
+        element: Element::Light,
+        base: 81.0,
+        times: Some(trigger_count as f64),
+    })
+}
+
+fn collect_search_delayed_damage(
+    spell: &SearchCatalogEntry,
+    state: &HuppermageState,
+    action: &CandidateAction,
+    action_damage: f64,
+) -> Vec<(Element, f64)> {
+    if action_damage <= 0.0 {
+        return vec![];
+    }
+
+    let element = state
+        .runes
+        .last_generated_rune
+        .as_ref()
+        .map(rune_to_element)
+        .or_else(|| spell.element.clone())
+        .unwrap_or(Element::Light);
+
+    collect_search_tag_values(
+        &spell.effects,
+        "delayedDamagePercentOfActionDamage",
+        state,
+        action,
+    )
+    .into_iter()
+    .filter_map(|value| value.as_f64())
+    .map(|percent| {
+        (
+            element.clone(),
+            round_damage(action_damage * percent / 100.0),
+        )
+    })
+    .filter(|(_, amount)| *amount > 0.0)
+    .collect()
+}
+
+fn apply_search_resource_deltas(
+    spell: &SearchCatalogEntry,
+    state: &HuppermageState,
+    action: &CandidateAction,
+    resources: &mut ResourcePool,
+) {
+    let deltas = collect_search_effects_by_type(&spell.effects, "resourceDelta", state, action);
+    for delta in deltas {
+        if read_string_field(&delta, "target").is_some_and(|target| target != "caster") {
+            continue;
+        }
+        let amount = read_i32_field(Some(&delta), "amount");
+        match read_string_field(&delta, "resource").as_deref() {
+            Some("ap") => resources.ap += amount,
+            Some("mp") => resources.mp += amount,
+            Some("wp") => resources.wp += amount,
+            Some("bq") => resources.bq += amount,
+            _ => {}
+        }
+    }
+}
+
+fn apply_search_stat_modifiers(
+    spell: &SearchCatalogEntry,
+    state: &HuppermageState,
+    action: &CandidateAction,
+    stats: &mut BaseStats,
+) {
+    let scale_per_rune =
+        collect_search_tag_values(&spell.effects, "statModifiersScalePerRune", state, action)
+            .into_iter()
+            .any(|value| value.as_bool() == Some(true));
+    let multiplier = if scale_per_rune {
+        get_active_rune_count(state) as f64
+    } else {
+        1.0
+    };
+
+    let modifiers = collect_search_effects_by_type(&spell.effects, "statModifier", state, action);
+    for modifier in modifiers {
+        if read_string_field(&modifier, "target").is_some_and(|target| target != "caster") {
+            continue;
+        }
+        let amount = read_f64_field(Some(&modifier), "amount") * multiplier;
+        match read_string_field(&modifier, "stat").as_deref() {
+            Some("damageInflictedPercent") => stats.damage_inflicted_percent += amount,
+            Some("healsPerformedPercent") => stats.heals_performed_percent += amount,
+            Some("range") => stats.range += amount,
+            Some("willpower") => stats.willpower += amount,
+            Some("criticalHitPercent") => stats.critical_hit_percent += amount,
+            Some("elementalResistance") => stats.elemental_resistance += amount,
+            Some("parry") => stats.parry += amount,
+            _ => {}
+        }
+    }
+}
+
+fn apply_passive_spell_stat_modifiers(
+    spell: &SearchCatalogEntry,
+    state: &HuppermageState,
+    stats: &mut BaseStats,
+) {
+    if spell
+        .element
+        .as_ref()
+        .is_some_and(|element| is_elemental_spell_element(element))
+        && has_passive(state, "antithese")
+    {
+        stats.damage_inflicted_percent -= 10.0;
+    }
+
+    if spell.element == Some(Element::Light) && has_passive(state, "absorption-quadramentale") {
+        stats.damage_inflicted_percent -= 10.0;
+    }
+}
+
+fn is_elemental_spell_element(element: &Element) -> bool {
+    matches!(
+        element,
+        Element::Fire | Element::Water | Element::Earth | Element::Air
+    )
+}
+
+fn collect_search_effects_by_type(
+    effects: &[Value],
+    effect_type: &str,
+    state: &HuppermageState,
+    action: &CandidateAction,
+) -> Vec<Value> {
+    let mut values = vec![];
+    for effect in effects {
+        match read_string_field(effect, "type").as_deref() {
+            Some(current_type) if current_type == effect_type => values.push(effect.clone()),
+            Some("conditional") => {
+                if is_search_condition_met(effect.get("condition"), state, action) {
+                    let nested_values = effect
+                        .get("effects")
+                        .and_then(Value::as_array)
+                        .map(|nested| {
+                            collect_search_effects_by_type(nested, effect_type, state, action)
+                        })
+                        .unwrap_or_default();
+                    values.extend(nested_values);
+                }
+            }
+            Some("trigger") => {
+                let nested_values = effect
+                    .get("effects")
+                    .and_then(Value::as_array)
+                    .map(|nested| {
+                        collect_search_effects_by_type(nested, effect_type, state, action)
+                    })
+                    .unwrap_or_default();
+                values.extend(nested_values);
+            }
+            _ => {}
+        }
+    }
+    values
 }
 
 fn collect_search_tag_values(
@@ -2880,6 +3114,10 @@ pub fn round_damage(value: f64) -> f64 {
     ((value + f64::EPSILON) * 100.0).round() / 100.0
 }
 
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
+}
+
 pub fn create_huppermage_state(
     resources: ResourcePool,
     active_passives: Vec<String>,
@@ -2895,6 +3133,7 @@ pub fn create_huppermage_state(
         used_spell_ids: vec![],
         active_passives,
         active_heart: None,
+        halo_chatoyant_marks: 0,
         bq_max: resources.bq.max(resources.wp * 75),
         stored_bq: 0,
         cooldowns_by_spell_id: BTreeMap::new(),
@@ -4366,9 +4605,10 @@ pub fn evaluate_candidate(
                 ));
             }
 
+            let effective_cost = resolve_search_effective_cost(spell, &huppermage, action);
             let resource_validation = validate_resource_cost(
                 resources,
-                spell.cost,
+                effective_cost,
                 &spell.id,
                 action_index as u32,
                 default_context.clone(),
@@ -4386,6 +4626,12 @@ pub fn evaluate_candidate(
             }
             resources = resource_validation.resources_after_cost;
 
+            if spell.id == "cycle-elementaire" {
+                let cycle = apply_cycle_elementaire(huppermage, resources);
+                huppermage = cycle.state;
+                resources = cycle.resources;
+            }
+
             if spell.id == "coeur-de-lumiere" {
                 let heart = huppermage
                     .runes
@@ -4397,6 +4643,10 @@ pub fn evaluate_candidate(
                     huppermage.active_heart = Some(heart);
                 }
             }
+
+            apply_search_resource_deltas(spell, &huppermage, action, &mut resources);
+            apply_search_stat_modifiers(spell, &huppermage, action, &mut turn_stats);
+            apply_passive_spell_stat_modifiers(spell, &huppermage, &mut turn_stats);
 
             let generated_rune = spell.element.as_ref().and_then(element_to_rune);
             let generated_rune_was_active = generated_rune
@@ -4414,6 +4664,7 @@ pub fn evaluate_candidate(
                 resources,
             );
 
+            let mut action_damage = 0.0;
             if !is_empty_cell_action(action) {
                 for effect in collect_search_damage_effects(spell) {
                     let mut damage_stats = action_stats.clone();
@@ -4422,6 +4673,7 @@ pub fn evaluate_candidate(
                     }
                     let damage =
                         compute_raw_damage(&damage_stats, &effect, default_context.clone());
+                    action_damage = round_damage(action_damage + damage.result);
                     turn_damage = round_damage(turn_damage + damage.result);
                     damage_by_resolved_element = add_resolved_element_damage(
                         damage_by_resolved_element,
@@ -4429,6 +4681,32 @@ pub fn evaluate_candidate(
                         damage.result,
                     );
                 }
+            }
+
+            if spell.id == "orbes-luisants" {
+                let active_rune_count = get_active_rune_count(&huppermage);
+                if active_rune_count > 0 {
+                    huppermage = add_abundance(huppermage, (active_rune_count as i32) * 10).state;
+                }
+            }
+
+            for (element, damage) in
+                collect_search_delayed_damage(spell, &huppermage, action, action_damage)
+            {
+                turn_damage = round_damage(turn_damage + damage);
+                damage_by_resolved_element =
+                    add_resolved_element_damage(damage_by_resolved_element, &element, damage);
+            }
+
+            if let Some(halo_damage) = apply_halo_chatoyant_damage(spell, &mut huppermage, action) {
+                let damage =
+                    compute_raw_damage(&action_stats, &halo_damage, default_context.clone());
+                turn_damage = round_damage(turn_damage + damage.result);
+                damage_by_resolved_element = add_resolved_element_damage(
+                    damage_by_resolved_element,
+                    &damage.resolved_element,
+                    damage.result,
+                );
             }
 
             let consumed_runes = collect_search_consumed_runes(spell, &huppermage, action);
@@ -4471,6 +4749,9 @@ pub fn evaluate_candidate(
             if active_rune_count > 0 {
                 huppermage = add_abundance(huppermage, (active_rune_count as i32) * 15).state;
             }
+        }
+        if has_passive(&huppermage, "dynamo") {
+            huppermage.runes.active = RuneTracker::default();
         }
         total_damage = round_damage(total_damage + turn_damage);
 
@@ -5049,6 +5330,252 @@ mod tests {
             })
         );
         assert_eq!(evaluation.final_huppermage.abundance_level, 15);
+    }
+
+    #[test]
+    fn candidate_evaluation_applies_halo_chatoyant_mark_triggers() {
+        let request = parse_optimizer_request(
+            r#"{
+              "schemaVersion":1,
+              "engine":"hybrid",
+              "seed":"halo",
+              "duration":2,
+              "iterations":10,
+              "maxActionsPerTurn":3,
+              "maxPassiveCount":0,
+              "availableSpellIds":["halo-chatoyant","air-rune"],
+              "availablePassiveIds":[],
+              "catalog":[
+                {
+                  "kind":"spell",
+                  "id":"halo-chatoyant",
+                  "element":"light",
+                  "cost":{"ap":1},
+                  "effects":[
+                    {
+                      "type":"conditional",
+                      "condition":{"type":"hasRune","rune":"aerial"},
+                      "effects":[
+                        {"type":"tag","tag":"triggerMarkImmediately","value":true},
+                        {"type":"tag","tag":"consumeRune","value":"aerial"}
+                      ]
+                    }
+                  ],
+                  "constraints":[{"type":"requiresTarget","target":"emptyCell"}],
+                  "tags":[]
+                },
+                {
+                  "kind":"spell",
+                  "id":"air-rune",
+                  "element":"air",
+                  "cost":{"ap":1},
+                  "effects":[],
+                  "constraints":[],
+                  "tags":[]
+                }
+              ],
+              "character":{"id":"test","resources":{"ap":6,"mp":3,"wp":2,"bq":100}}
+            }"#,
+        )
+        .expect("request should parse");
+        let candidate = OptimizerCandidateInput {
+            passive_ids: vec![],
+            plan: CandidatePlan {
+                turns: vec![
+                    CandidateTurn {
+                        actions: vec![empty_cell_action("halo-chatoyant"), action("air-rune")],
+                    },
+                    CandidateTurn {
+                        actions: vec![empty_cell_action("halo-chatoyant")],
+                    },
+                ],
+            },
+        };
+
+        let evaluation = evaluate_candidate(&request, &candidate, "candidate:halo")
+            .expect("candidate should evaluate");
+
+        assert!(evaluation.valid);
+        assert_eq!(evaluation.total_damage, 162.0);
+        assert_eq!(evaluation.final_huppermage.halo_chatoyant_marks, 0);
+        assert!(!evaluation.final_huppermage.runes.active.aerial);
+        assert_eq!(evaluation.final_huppermage.abundance_level, 15);
+        assert_eq!(
+            evaluation.score,
+            Some(CandidateScoreBreakdown {
+                score: 162.0,
+                total_damage: 162.0,
+                damage_by_resolved_element: DamageByElement {
+                    fire: 162.0,
+                    ..DamageByElement::default()
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn candidate_evaluation_applies_delayed_damage_from_consumed_rune() {
+        let request = parse_optimizer_request(
+            r#"{
+              "schemaVersion":1,
+              "engine":"hybrid",
+              "seed":"delayed-damage",
+              "duration":2,
+              "iterations":10,
+              "maxActionsPerTurn":2,
+              "maxPassiveCount":0,
+              "availableSpellIds":["fire-rune","lueur-de-laube"],
+              "availablePassiveIds":[],
+              "catalog":[
+                {
+                  "kind":"spell",
+                  "id":"fire-rune",
+                  "element":"fire",
+                  "cost":{"ap":1},
+                  "effects":[],
+                  "constraints":[],
+                  "tags":[]
+                },
+                {
+                  "kind":"spell",
+                  "id":"lueur-de-laube",
+                  "element":"fire",
+                  "cost":{"ap":1},
+                  "effects":[
+                    {"type":"damage","base":54,"element":"fire"},
+                    {
+                      "type":"conditional",
+                      "condition":{"type":"hasRune","rune":"incandescent"},
+                      "effects":[
+                        {"type":"tag","tag":"delayedDamagePercentOfActionDamage","value":10},
+                        {"type":"tag","tag":"consumeRune","value":"incandescent"}
+                      ]
+                    }
+                  ],
+                  "constraints":[],
+                  "tags":[]
+                }
+              ],
+              "character":{"id":"test","resources":{"ap":6,"mp":3,"wp":2,"bq":100}}
+            }"#,
+        )
+        .expect("request should parse");
+        let candidate = OptimizerCandidateInput {
+            passive_ids: vec![],
+            plan: CandidatePlan {
+                turns: vec![
+                    CandidateTurn {
+                        actions: vec![action("fire-rune")],
+                    },
+                    CandidateTurn {
+                        actions: vec![action("lueur-de-laube")],
+                    },
+                ],
+            },
+        };
+
+        let evaluation = evaluate_candidate(&request, &candidate, "candidate:delayed")
+            .expect("candidate should evaluate");
+
+        assert!(evaluation.valid);
+        assert_eq!(evaluation.total_damage, 71.28);
+        assert!(!evaluation.final_huppermage.runes.active.incandescent);
+        assert_eq!(evaluation.final_huppermage.abundance_level, 15);
+        assert_eq!(
+            evaluation.score,
+            Some(CandidateScoreBreakdown {
+                score: 71.28,
+                total_damage: 71.28,
+                damage_by_resolved_element: DamageByElement {
+                    fire: 71.28,
+                    ..DamageByElement::default()
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn candidate_evaluation_applies_antithese_per_elemental_spell() {
+        let request = parse_optimizer_request(
+            r#"{
+              "schemaVersion":1,
+              "engine":"hybrid",
+              "seed":"antithese-candidate",
+              "duration":1,
+              "iterations":10,
+              "maxActionsPerTurn":2,
+              "maxPassiveCount":1,
+              "availableSpellIds":["fire-hit","water-hit"],
+              "availablePassiveIds":["antithese"],
+              "catalog":[
+                {
+                  "kind":"spell",
+                  "id":"fire-hit",
+                  "element":"fire",
+                  "cost":{"ap":1},
+                  "effects":[{"type":"damage","base":10,"element":"fire"}],
+                  "constraints":[],
+                  "tags":[]
+                },
+                {
+                  "kind":"spell",
+                  "id":"water-hit",
+                  "element":"water",
+                  "cost":{"ap":1},
+                  "effects":[{"type":"damage","base":10,"element":"water"}],
+                  "constraints":[],
+                  "tags":[]
+                },
+                {
+                  "kind":"passive",
+                  "id":"antithese",
+                  "effects":[
+                    {"type":"statModifier","stat":"damageInflictedPercent","amount":-10},
+                    {
+                      "type":"trigger",
+                      "event":"runeGenerated",
+                      "effects":[{"type":"resourceDelta","resource":"bq","amount":20}]
+                    }
+                  ],
+                  "constraints":[],
+                  "tags":["passive"]
+                }
+              ],
+              "character":{
+                "id":"test",
+                "resources":{"ap":6,"mp":3,"wp":2,"bq":100},
+                "stats":{"damageInflictedPercent":20}
+              }
+            }"#,
+        )
+        .expect("request should parse");
+        let candidate = OptimizerCandidateInput {
+            passive_ids: vec!["antithese".to_string()],
+            plan: CandidatePlan {
+                turns: vec![CandidateTurn {
+                    actions: vec![action("fire-hit"), action("water-hit")],
+                }],
+            },
+        };
+
+        let evaluation = evaluate_candidate(&request, &candidate, "candidate:antithese")
+            .expect("candidate should evaluate");
+
+        assert!(evaluation.valid);
+        assert_eq!(evaluation.total_damage, 19.0);
+        assert_eq!(evaluation.final_resources.bq, 240);
+        assert_eq!(
+            evaluation.score,
+            Some(CandidateScoreBreakdown {
+                score: 19.0,
+                total_damage: 19.0,
+                damage_by_resolved_element: DamageByElement {
+                    fire: 10.0,
+                    water: 9.0,
+                    ..DamageByElement::default()
+                },
+            })
+        );
     }
 
     #[test]
@@ -5735,6 +6262,15 @@ mod tests {
             } else {
                 None
             },
+        }
+    }
+
+    fn empty_cell_action(spell_id: &str) -> CandidateAction {
+        CandidateAction {
+            spell_id: spell_id.to_string(),
+            target: Some(CandidateActionTarget {
+                kind: ActionTargetKind::EmptyCell,
+            }),
         }
     }
 
