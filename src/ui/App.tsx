@@ -174,23 +174,13 @@ type TimelineSnapshot = ReturnType<typeof createComboTimelineSnapshots>[number];
 
 type CenterTabId = "combos" | "aptitudes" | "equipment";
 
-type EquipmentExtraStatKey =
-  | "barrier"
-  | "equipmentKnowledge"
-  | "leadership"
-  | "lockDodge"
-  | "prospection"
-  | "wisdom";
-
-type EquipmentExtraStats = Record<EquipmentExtraStatKey, number>;
-
 type DragPayload =
   | { type: "spell"; spellId: string }
   | { type: "timelineAction"; uid: string };
 
 const dragPayloadType = "application/x-wakfu-turn-action";
 const runeOptions: Rune[] = ["incandescent", "aquatic", "telluric", "aerial"];
-const elementOptions: Element[] = ["fire", "water", "earth", "air", "light", "neutral"];
+const editableElementOptions: Array<Exclude<Element, "light" | "neutral">> = ["fire", "water", "earth", "air"];
 const targetOptions: ActionTarget["kind"][] = ["enemy", "ally", "fighter", "emptyCell", "feuFollet"];
 const positionOptions: AttackPosition[] = ["face", "side", "rear"];
 const rangeModeOptions: Array<RangeMode | "none"> = ["none", "melee", "distance"];
@@ -219,7 +209,6 @@ export function App() {
   const [buildClassFilter, setBuildClassFilter] = useState<WakfuClassId | "all">("all");
   const [characterConfig, setCharacterConfig] = useState<SimulatedCharacter>(() => createDefaultCharacter());
   const [equipmentCharacter, setEquipmentCharacter] = useState<SimulatedCharacter>(() => createDefaultEquipmentCharacter());
-  const [equipmentExtras, setEquipmentExtras] = useState<EquipmentExtraStats>(() => createDefaultEquipmentExtraStats());
   const [locale, setLocale] = useState<UiLocale>("fr");
   const [centerTab, setCenterTab] = useState<CenterTabId>("combos");
   const [aptitudeDistribution, setAptitudeDistribution] = useState<AptitudeDistribution>(() => createDefaultAptitudeDistribution());
@@ -1252,7 +1241,6 @@ export function App() {
             {centerTab === "equipment" ? (
               <div className="equipment-tab-content">
                 <ResourceEditor character={equipmentCharacter} onChange={setEquipmentCharacter} />
-                <EquipmentExtraStatsEditor stats={equipmentExtras} onChange={setEquipmentExtras} />
                 <StatsEditor character={equipmentCharacter} onChange={setEquipmentCharacter} />
               </div>
             ) : null}
@@ -1370,17 +1358,6 @@ function createDefaultEquipmentCharacter(): SimulatedCharacter {
       ...createEmptyEquipmentStats(),
       generalMastery: 1000,
     },
-  };
-}
-
-function createDefaultEquipmentExtraStats(): EquipmentExtraStats {
-  return {
-    barrier: 0,
-    equipmentKnowledge: 0,
-    leadership: 0,
-    lockDodge: 0,
-    prospection: 0,
-    wisdom: 0,
   };
 }
 
@@ -3034,7 +3011,7 @@ function StatsEditor({ character, onChange }: { character: SimulatedCharacter; o
         })}
       </div>
       <div className="stat-stepper-list elemental-stat-list">
-        {elementOptions.map((element) => (
+        {editableElementOptions.map((element) => (
           <StatStepper
             key={element}
             element={element}
@@ -3044,51 +3021,6 @@ function StatsEditor({ character, onChange }: { character: SimulatedCharacter; o
             onChange={(delta) => updateElementalMastery(element, adjustStat(character.stats.elementalMastery[element] ?? 0, delta))}
           />
         ))}
-      </div>
-    </section>
-  );
-}
-
-function EquipmentExtraStatsEditor({
-  onChange,
-  stats,
-}: {
-  onChange: (stats: EquipmentExtraStats) => void;
-  stats: EquipmentExtraStats;
-}) {
-  const statControls: Array<{
-    iconKey: StatIconKey;
-    key: EquipmentExtraStatKey;
-    label: string;
-  }> = [
-    { iconKey: "barrier", key: "barrier", label: t("stat.barrier") },
-    { iconKey: "lockDodge", key: "lockDodge", label: t("stat.lockDodge") },
-    { iconKey: "equipmentKnowledge", key: "equipmentKnowledge", label: t("stat.equipmentKnowledge") },
-    { iconKey: "prospection", key: "prospection", label: t("stat.prospection") },
-    { iconKey: "wisdom", key: "wisdom", label: t("stat.wisdom") },
-    { iconKey: "leadership", key: "leadership", label: t("stat.leadership") },
-  ];
-
-  function updateExtraStat(key: EquipmentExtraStatKey, value: number) {
-    onChange({ ...stats, [key]: Math.max(0, value) });
-  }
-
-  return (
-    <section className="form-section equipment-extra-section">
-      <h3>{t("form.additionalEquipmentStats")}</h3>
-      <div className="stat-stepper-list">
-        {statControls.map((control) => {
-          const value = stats[control.key];
-          return (
-            <StatStepper
-              key={control.key}
-              icon={getStatIconSrc(control.iconKey)}
-              label={control.label}
-              value={value}
-              onChange={(delta) => updateExtraStat(control.key, value + delta)}
-            />
-          );
-        })}
       </div>
     </section>
   );
