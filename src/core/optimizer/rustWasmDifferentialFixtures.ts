@@ -30,6 +30,7 @@ import {
 } from "../simulation/index.ts";
 import { evaluateSustainableCycle, scoreComboSimulation } from "./comboOptimizer.ts";
 import { createRustWasmOptimizerRequest, type RustWasmOptimizerRequest } from "./rustWasmBackendTypes.ts";
+import { sublimationCatalog } from "../sublimations/catalog.ts";
 
 export type RustWasmDifferentialFixture =
   | {
@@ -546,7 +547,6 @@ function createMultiTurnFixtures(): RustWasmDifferentialFixture[] {
 function createSeededCandidateBatchFixtures(
   options: Required<RustWasmDifferentialFixtureOptions>,
 ): RustWasmDifferentialFixture[] {
-  const character = createGeneratedBatchCharacter();
   const spellIds = [
     "epee-de-lumiere",
     "faisceau-de-lune",
@@ -558,25 +558,31 @@ function createSeededCandidateBatchFixtures(
     "flux-denergie",
     "debacle",
     "averse",
+    "eboulement",
+    "faille",
+    "mirage",
+    "ombres-dansantes",
   ];
   const spellBook = Object.fromEntries(spellIds.map((spellId) => {
     const spell = requireSpell(spellId);
     return [spellId, createGeneratedSpellProjection(spell)];
   }));
 
-  return options.candidateBatchSeeds.map((seed) => {
+  const supportedSublimationIds = getSupportedSublimationIds();
+  return options.candidateBatchSeeds.flatMap((seed) => {
+    const normalCharacter = createGeneratedBatchCharacter("normal");
     const candidates = [
       ...createSeededGeneratedCandidates(seed, spellIds, options.candidatesPerBatch),
-      ...createSublimationGeneratedCandidates(seed),
+      ...createSublimationGeneratedCandidates(seed, supportedSublimationIds),
     ];
 
-    return {
+    const normalFixture: RustWasmDifferentialFixture = {
       kind: "candidateBatch",
       name: `candidate-batch:${seed}`,
       seed,
       request: createRustWasmOptimizerRequest({
         catalog: huppermageCatalog,
-        character,
+        character: normalCharacter,
         duration: 3,
         engines: ["hybrid"],
         budget: { iterations: candidates.length },
@@ -585,81 +591,196 @@ function createSeededCandidateBatchFixtures(
         maxActionsPerTurn: 4,
         maxPassiveCount: 0,
         maxSublimationCount: 2,
-        availableSublimationIds: [
-          "influence-6",
-          "brulure-4",
-          "brulure-secondaire-4",
-          "alternance-ii",
-          "exces-ii",
-          "puissance-brute-4",
-          "concentration-elementaire",
-          "chaos",
-        ],
+        availableSublimationIds: supportedSublimationIds,
       }),
       candidates,
-      resources: character.resources,
-      stats: normalizeStatsForRust(character.stats),
-      initialHuppermage: createRustHuppermageState({ bqMax: character.resources.bq }),
+      resources: normalCharacter.resources,
+      stats: normalizeStatsForRust(normalCharacter.stats),
+      initialHuppermage: createRustHuppermageState({ bqMax: normalCharacter.resources.bq }),
       spellBook,
-      expected: candidates.map((candidate) => evaluateGeneratedCandidateWithTypeScript(candidate, character)),
+      expected: candidates.map((candidate) => evaluateGeneratedCandidateWithTypeScript(candidate, normalCharacter)),
     };
+
+    return [
+      normalFixture,
+      createSublimationAssumptionCandidateBatchFixture(seed, "healthy90", spellIds, spellBook, [
+        "agilite-vitale-ii",
+        "carnage-iii",
+        "force-vitale-ii",
+        "influence-vitale-iii",
+      ]),
+      createSublimationAssumptionCandidateBatchFixture(seed, "berserk50", spellIds, spellBook, [
+        "critique-berserk-iii",
+      ]),
+      createLowApSublimationCandidateBatchFixture(seed, spellIds, spellBook),
+    ];
   });
 }
 
-function createSublimationGeneratedCandidates(seed: string): GeneratedCandidate[] {
+function createSublimationAssumptionCandidateBatchFixture(
+  seed: string,
+  hpAssumption: NonNullable<NonNullable<SimulatedCharacter["sublimations"]>["hpAssumption"]>,
+  spellIds: string[],
+  spellBook: Record<string, GeneratedSpellProjection>,
+  sublimationIds: string[],
+): RustWasmDifferentialFixture {
+  const character = createGeneratedBatchCharacter(hpAssumption);
+  const candidates = sublimationIds.map((sublimationId) =>
+    createSublimationGeneratedCandidate(`${seed}:sublimation:${hpAssumption}`, sublimationId)
+  );
+
+  return {
+    kind: "candidateBatch",
+    name: `candidate-batch:${seed}:${hpAssumption}`,
+    seed: `${seed}:${hpAssumption}`,
+    request: createRustWasmOptimizerRequest({
+      catalog: huppermageCatalog,
+      character,
+      duration: 3,
+      engines: ["hybrid"],
+      budget: { iterations: candidates.length },
+      seed: `${seed}:${hpAssumption}`,
+      availableSpellIds: spellIds,
+      maxActionsPerTurn: 12,
+      maxPassiveCount: 0,
+      maxSublimationCount: 2,
+      availableSublimationIds: getSupportedSublimationIds(),
+    }),
+    candidates,
+    resources: character.resources,
+    stats: normalizeStatsForRust(character.stats),
+    initialHuppermage: createRustHuppermageState({ bqMax: character.resources.bq }),
+    spellBook,
+    expected: candidates.map((candidate) => evaluateGeneratedCandidateWithTypeScript(candidate, character)),
+  };
+}
+
+function createLowApSublimationCandidateBatchFixture(
+  seed: string,
+  spellIds: string[],
+  spellBook: Record<string, GeneratedSpellProjection>,
+): RustWasmDifferentialFixture {
+  const character = {
+    ...createGeneratedBatchCharacter("normal"),
+    resources: createResources({ ap: 10, mp: 6, wp: 6, bq: 3_000 }),
+    stats: {
+      ...baseStats,
+      meleeMastery: 0,
+      distanceMastery: 0,
+      berserkMastery: 0,
+      rearMastery: 0,
+      criticalMastery: 0,
+    },
+  } satisfies SimulatedCharacter;
+  const candidates = ["inflexibilite", "inflexibilite-ii", "secret-critique"].map((sublimationId) =>
+    createSublimationGeneratedCandidate(`${seed}:sublimation:low-ap`, sublimationId)
+  );
+
+  return {
+    kind: "candidateBatch",
+    name: `candidate-batch:${seed}:low-ap`,
+    seed: `${seed}:low-ap`,
+    request: createRustWasmOptimizerRequest({
+      catalog: huppermageCatalog,
+      character,
+      duration: 3,
+      engines: ["hybrid"],
+      budget: { iterations: candidates.length },
+      seed: `${seed}:low-ap`,
+      availableSpellIds: spellIds,
+      maxActionsPerTurn: 12,
+      maxPassiveCount: 0,
+      maxSublimationCount: 2,
+      availableSublimationIds: getSupportedSublimationIds(),
+    }),
+    candidates,
+    resources: character.resources,
+    stats: normalizeStatsForRust(character.stats),
+    initialHuppermage: createRustHuppermageState({ bqMax: character.resources.bq }),
+    spellBook,
+    expected: candidates.map((candidate) => evaluateGeneratedCandidateWithTypeScript(candidate, character)),
+  };
+}
+
+function createSublimationGeneratedCandidates(seed: string, sublimationIds: string[]): GeneratedCandidate[] {
   return [
-    {
-      id: `${seed}:sublimation:initial-critical`,
-      sublimationIds: ["influence-6"],
-      plan: { turns: [{ actions: [{ spellId: "lueur-de-laube", context: { criticalMode: "expected" } }] }] },
-    },
-    {
-      id: `${seed}:sublimation:fire-action`,
-      sublimationIds: ["brulure-4"],
-      plan: { turns: [{ actions: [{ spellId: "lueur-de-laube" }] }] },
-    },
-    {
-      id: `${seed}:sublimation:secondary-carryover`,
-      sublimationIds: ["brulure-secondaire-4"],
-      plan: { turns: [{ actions: [{ spellId: "debacle" }, { spellId: "lueur-de-laube" }] }] },
-    },
-    {
-      id: `${seed}:sublimation:alternance-ii`,
-      sublimationIds: ["alternance-ii"],
-      plan: { turns: [{ actions: [{ spellId: "lueur-de-laube" }, { spellId: "debacle" }] }] },
-    },
-    {
-      id: `${seed}:sublimation:exces-ii`,
-      sublimationIds: ["exces-ii"],
-      plan: {
-        turns: [{
-          actions: [
-            { spellId: "lueur-de-laube" },
-            { spellId: "flux-denergie" },
-            { spellId: "disque-luminescent" },
-            { spellId: "debacle" },
-            { spellId: "resonance" },
-            { spellId: "larmes-scintillantes" },
-          ],
-        }],
-      },
-    },
-    {
-      id: `${seed}:sublimation:puissance-brute`,
-      sublimationIds: ["puissance-brute-4"],
-      plan: { turns: [{ actions: [{ spellId: "averse" }, { spellId: "averse" }, { spellId: "lueur-de-laube" }] }] },
-    },
-    {
-      id: `${seed}:sublimation:elemental-mastery-percent`,
-      sublimationIds: ["concentration-elementaire"],
-      plan: { turns: [{ actions: [{ spellId: "lueur-de-laube" }] }] },
-    },
+    ...sublimationIds.map((sublimationId) => createSublimationGeneratedCandidate(seed, sublimationId)),
     {
       id: `${seed}:sublimation:invalid-sublimation`,
       sublimationIds: ["absolution"],
       plan: { turns: [{ actions: [{ spellId: "lueur-de-laube" }] }] },
     },
   ];
+}
+
+function createSublimationGeneratedCandidate(seed: string, sublimationId: string): GeneratedCandidate {
+  return {
+    id: `${seed}:sublimation:${sublimationId}`,
+    sublimationIds: [sublimationId],
+    plan: createSublimationPlan(sublimationId),
+  };
+}
+
+function createSublimationPlan(sublimationId: string): ComboPlan {
+  const familyId = requireSublimationFamilyId(sublimationId);
+  if (familyId === "brulure") {
+    return { turns: [{ actions: [{ spellId: "lueur-de-laube" }] }] };
+  }
+  if (familyId === "gel") {
+    return { turns: [{ actions: [{ spellId: "debacle" }] }] };
+  }
+  if (familyId === "tellurisme") {
+    return { turns: [{ actions: [{ spellId: "eboulement" }] }] };
+  }
+  if (familyId === "ventilation") {
+    return { turns: [{ actions: [{ spellId: "mirage" }] }] };
+  }
+  if (familyId === "brulure-secondaire") {
+    return { turns: [{ actions: [{ spellId: "debacle" }, { spellId: "lueur-de-laube" }] }] };
+  }
+  if (familyId === "gel-secondaire") {
+    return { turns: [{ actions: [{ spellId: "lueur-de-laube" }, { spellId: "debacle" }] }] };
+  }
+  if (familyId === "tellurisme-secondaire") {
+    return { turns: [{ actions: [{ spellId: "lueur-de-laube" }, { spellId: "eboulement" }] }] };
+  }
+  if (familyId === "ventilation-secondaire") {
+    return { turns: [{ actions: [{ spellId: "lueur-de-laube" }, { spellId: "mirage" }] }] };
+  }
+  if (familyId === "alternance") {
+    return { turns: [{ actions: [{ spellId: "lueur-de-laube" }, { spellId: "debacle" }] }] };
+  }
+  if (familyId === "exces") {
+    return {
+      turns: [
+        { actions: [{ spellId: "lueur-de-laube" }, { spellId: "flux-denergie" }, { spellId: "disque-luminescent" }, { spellId: "debacle" }] },
+        { actions: [{ spellId: "eboulement" }, { spellId: "mirage" }, { spellId: "resonance" }, { spellId: "larmes-scintillantes" }] },
+        { actions: [{ spellId: "faisceau-de-lune" }, { spellId: "epee-de-lumiere" }, { spellId: "ombres-dansantes" }] },
+      ],
+    };
+  }
+  if (familyId === "puissance-brute") {
+    return { turns: [{ actions: [{ spellId: "averse" }, { spellId: "averse" }, { spellId: "lueur-de-laube" }] }] };
+  }
+  if (familyId === "sauvegarde" || familyId === "tolerance") {
+    return { turns: [{ actions: [{ spellId: "lueur-de-laube" }] }, { actions: [{ spellId: "debacle" }] }] };
+  }
+  return { turns: [{ actions: [{ spellId: "lueur-de-laube", context: { criticalMode: "expected" } }] }] };
+}
+
+function getSupportedSublimationIds(): string[] {
+  return sublimationCatalog
+    .filter((entry) => entry.supportStatus === "supported")
+    .map((entry) => entry.id)
+    .sort();
+}
+
+function requireSublimationFamilyId(sublimationId: string): string {
+  const sublimation = sublimationCatalog.find((entry) => entry.id === sublimationId);
+  if (!sublimation) {
+    throw new Error(`Missing sublimation fixture '${sublimationId}'.`);
+  }
+  return sublimation.familyId;
 }
 
 function createSeededGeneratedCandidates(seed: string, spellIds: string[], count: number): GeneratedCandidate[] {
@@ -870,8 +991,16 @@ function createBaseCharacter(
   };
 }
 
-function createGeneratedBatchCharacter(): SimulatedCharacter {
-  return createBaseCharacter(createResources({ ap: 30, mp: 6, wp: 6, bq: 3_000 }));
+function createGeneratedBatchCharacter(
+  hpAssumption: NonNullable<NonNullable<SimulatedCharacter["sublimations"]>["hpAssumption"]> = "normal",
+): SimulatedCharacter {
+  return {
+    ...createBaseCharacter(createResources({ ap: 30, mp: 6, wp: 6, bq: 3_000 })),
+    sublimations: {
+      selections: [],
+      hpAssumption,
+    },
+  };
 }
 
 function simulateInvalidPlan(

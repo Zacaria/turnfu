@@ -91,17 +91,16 @@ Results:
 
 - TypeScript tests: 254 passed.
 - Rust tests: 55 passed.
-- CI differential: 91 fixtures, 32 generated candidates, 0 mismatches. The
-  generated batch now includes targeted sublimation candidates for initial
-  stat/resource effects, action damage, elemental carryover, Alternance,
-  Exces, Puissance Brute, elemental mastery percentage modifiers, and invalid
-  sublimation violations.
-- Soak differential: 98 fixtures, 1088 generated candidates, 0 mismatches.
+- CI differential: 94 fixtures, 102 generated candidates, 0 mismatches. The
+  generated batch now includes one targeted candidate for each currently
+  supported sublimation catalog entry, plus HP-assumption-specific candidates
+  for healthy, berserk, and low-AP/secondary-mastery conditions.
+- Soak differential: 122 fixtures, 1648 generated candidates, 0 mismatches.
 - OpenSpec strict validation: valid.
 - Diff whitespace check: passed.
 - `t3-full` 100k smoke, no per-candidate oracle:
-  - TypeScript: `6,389.64 it/s`, score `103545.66`.
-  - Rust/WASM: `11,478.01 it/s`, score `103545.66`.
+  - TypeScript: `7,010.96 it/s`, score `103545.66`.
+  - Rust/WASM: `11,572.42 it/s`, score `103545.66`.
   - Final top candidates revalidated in TypeScript with score delta `0`.
 
 Notes:
@@ -149,6 +148,10 @@ sublimation engine. TypeScript remains the oracle. Rust/WASM now:
 - applies supported sublimation effective levels for initial stat/resource
   effects, per-action elemental bonuses, elemental carryover, Exces counters,
   Puissance Brute spent-resource bonuses, and AP/MP carryover;
+- preserves fractional AP/MP/WP/BQ resources required by supported
+  sublimations such as Devastation and Armure Lourde;
+- mirrors TypeScript HP-assumption range overlap for threshold sublimations,
+  including berserk effects that overlap the `normal` 21-89% assumption;
 - reports global `invalidSublimation` candidate violations with the same
   normalized `actionIndex: -1` shape as TypeScript;
 - keeps final Rust top candidates revalidated through TypeScript in no-oracle

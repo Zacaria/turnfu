@@ -112,24 +112,25 @@ Raw file: `docs/benchmarks/rust-wasm-rollout-100k-1m-compare.jsonl`.
 Post-rebase sublimation smoke on 2026-06-02:
 
 - Command: `rtk pnpm bench:hybrid -- --compare-backends --scenario t3-full --budget 100000 --seed smoke --no-build --no-oracle`
-- TypeScript: `6,389.64 it/s`, score `103,545.66`, valid rate `0.4434`.
-- Rust/WASM direct: `11,478.01 it/s`, score `103,545.66`, valid rate
+- TypeScript: `7,010.96 it/s`, score `103,545.66`, valid rate `0.4434`.
+- Rust/WASM direct: `11,572.42 it/s`, score `103,545.66`, valid rate
   `0.3124`.
 - Rust final top-candidate TypeScript validation: top 5 valid, max score delta
   `0`, max total damage delta `0`.
 
 The same post-rebase validation pass ran:
 
-- `rtk pnpm diff:rust-wasm`: 91 fixtures, 32 generated candidates, 0
+- `rtk pnpm diff:rust-wasm`: 94 fixtures, 102 generated candidates, 0
   mismatches.
-- `rtk pnpm diff:rust-wasm:soak`: 98 fixtures, 1088 generated candidates, 0
+- `rtk pnpm diff:rust-wasm:soak`: 122 fixtures, 1648 generated candidates, 0
   mismatches.
 
 The generated differential batches now include targeted candidates for
-supported sublimation rules: initial stat/resource effects, action damage,
-elemental carryover, Alternance, Exces, Puissance Brute, elemental mastery
-percentage modifiers, action-level `criticalMode`, and invalid sublimation
-violations.
+every currently supported sublimation catalog entry, including initial
+stat/resource effects with fractional resources, action damage, elemental
+carryover, Alternance, Exces, Puissance Brute, elemental mastery percentage
+modifiers, HP-assumption threshold overlap, action-level `criticalMode`, and
+invalid sublimation violations.
 
 ### 10M Parallel Rust/WASM Matrix
 

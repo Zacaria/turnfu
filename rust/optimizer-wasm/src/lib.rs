@@ -7,13 +7,13 @@ use wasm_bindgen::prelude::*;
 #[serde(rename_all = "camelCase")]
 pub struct ResourcePool {
     #[serde(default)]
-    pub ap: i32,
+    pub ap: f64,
     #[serde(default)]
-    pub mp: i32,
+    pub mp: f64,
     #[serde(default)]
-    pub wp: i32,
+    pub wp: f64,
     #[serde(default)]
-    pub bq: i32,
+    pub bq: f64,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -158,7 +158,7 @@ pub struct HuppermageState {
     pub water_heart_last_spell_kind: Option<HuppermageWaterHeartSpellKind>,
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub halo_chatoyant_marks: u32,
-    pub bq_max: i32,
+    pub bq_max: f64,
     pub stored_bq: i32,
     #[serde(default)]
     pub cooldowns_by_spell_id: BTreeMap<String, u32>,
@@ -203,8 +203,8 @@ pub struct TurnEndBqResult {
     pub state: HuppermageState,
     pub resources: ResourcePool,
     pub amount: i32,
-    pub before: i32,
-    pub after: i32,
+    pub before: f64,
+    pub after: f64,
     pub stored_before: i32,
     pub stored_after: i32,
 }
@@ -354,10 +354,10 @@ pub struct ScoreBreakdown {
 pub struct SustainabilityResult {
     pub required: bool,
     pub sustainable: bool,
-    pub initial_wp: i32,
-    pub final_wp: i32,
-    pub initial_bq: i32,
-    pub final_bq: i32,
+    pub initial_wp: f64,
+    pub final_wp: f64,
+    pub initial_bq: f64,
+    pub final_bq: f64,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -452,8 +452,8 @@ pub struct ResourceViolation {
     pub action_index: u32,
     pub spell_id: String,
     pub resource: String,
-    pub required: i32,
-    pub available: i32,
+    pub required: f64,
+    pub available: f64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -590,9 +590,9 @@ pub struct CandidateEvaluationViolation {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resource: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub required: Option<i32>,
+    pub required: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub available: Option<i32>,
+    pub available: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
 }
@@ -2701,7 +2701,7 @@ fn read_request_huppermage(
         .and_then(|value| serde_json::from_value::<HuppermageState>(value).ok());
     let mut state = parsed.unwrap_or_else(|| create_huppermage_state(resources, vec![]));
     state.active_passives = active_passive_ids;
-    state.bq_max = state.bq_max.max(resources.bq.max(resources.wp * 75));
+    state.bq_max = state.bq_max.max(resources.bq.max(resources.wp * 75.0));
     state
 }
 
@@ -2723,10 +2723,10 @@ fn read_passive_entries_from_catalog(
 
 fn read_resource_pool(value: Option<&Value>) -> ResourcePool {
     ResourcePool {
-        ap: read_i32_field(value, "ap"),
-        mp: read_i32_field(value, "mp"),
-        wp: read_i32_field(value, "wp"),
-        bq: read_i32_field(value, "bq"),
+        ap: read_f64_field(value, "ap"),
+        mp: read_f64_field(value, "mp"),
+        wp: read_f64_field(value, "wp"),
+        bq: read_f64_field(value, "bq"),
     }
 }
 
@@ -2871,8 +2871,8 @@ fn collect_search_damage_inflicted_bonus_percent(
     .into_iter()
     .filter_map(|value| value.as_f64())
     .fold(0.0, |total, value| {
-        let bq_percent_remaining = if state.bq_max > 0 {
-            (resources.bq.max(0) as f64 / state.bq_max as f64) * 100.0
+        let bq_percent_remaining = if state.bq_max > 0.0 {
+            (resources.bq.max(0.0) / state.bq_max) * 100.0
         } else {
             0.0
         };
@@ -3052,7 +3052,7 @@ fn apply_absorption_quadramentale_bq_gain(
 
     let trigger_count = count_search_removal_events(&spell.effects, state, action);
     if trigger_count > 0 {
-        resources.bq += apply_bq_gain_multiplier(trigger_count * 20, state);
+        resources.bq += f64::from(apply_bq_gain_multiplier(trigger_count * 20, state));
     }
 }
 
@@ -3099,7 +3099,7 @@ fn apply_extension_des_sens_bq_regeneration(
 
     let amount = trigger_count * ap_cost * 20;
     if amount > 0 {
-        resources.bq += apply_bq_gain_multiplier(amount, state);
+        resources.bq += f64::from(apply_bq_gain_multiplier(amount, state));
     }
 }
 
@@ -3124,7 +3124,7 @@ fn apply_search_resource_deltas(
         if read_string_field(&delta, "target").is_some_and(|target| target != "caster") {
             continue;
         }
-        let amount = read_i32_field(Some(&delta), "amount");
+        let amount = f64::from(read_i32_field(Some(&delta), "amount"));
         match read_string_field(&delta, "resource").as_deref() {
             Some("ap") => resources.ap += amount,
             Some("mp") => resources.mp += amount,
@@ -3511,68 +3511,57 @@ fn pick_weighted_sublimation_id(sublimation_ids: &[String], rng: &mut SeededRand
 }
 
 fn is_supported_sublimation_id(sublimation_id: &str) -> bool {
-    matches!(
-        sublimation_id,
-        "sauvegarde-6"
-            | "tolerance-2"
-            | "vivacite-2"
-            | "velocite-2"
-            | "devastation-3"
-            | "cicatrisation-6"
-            | "influence-6"
-            | "influence-vitale-6"
-            | "critique-berserk-6"
-            | "force-vitale-2"
-            | "agilite-vitale-2"
-            | "armure-lourde-2"
-            | "carnage-6"
-            | "brulure-4"
-            | "brulure-secondaire-4"
-            | "gel-4"
-            | "gel-secondaire-4"
-            | "tellurisme-4"
-            | "tellurisme-secondaire-4"
-            | "ventilation-4"
-            | "ventilation-secondaire-4"
-            | "puissance-brute-4"
-            | "concentration-elementaire"
-            | "chaos"
-            | "secret-critique"
-            | "inflexibilite"
-            | "inflexibilite-ii"
-            | "alternance"
-            | "alternance-ii"
-            | "exces"
-            | "exces-ii"
-            | "expert-des-armes-legeres-6"
-            | "longueur-6"
-    )
+    sublimation_family_id(sublimation_id).is_some()
 }
 
 fn get_sublimation_search_weight(sublimation_id: &str) -> f64 {
-    match sublimation_id {
-        "puissance-brute-4" | "alternance" | "alternance-ii" | "exces" | "exces-ii" => 10.0,
+    match sublimation_family_id(sublimation_id).unwrap_or("") {
+        "puissance-brute" | "alternance" | "exces" => 10.0,
         "concentration-elementaire" | "chaos" => 9.0,
-        "carnage-6" | "armure-lourde-2" => 8.0,
-        "influence-6" | "influence-vitale-6" | "critique-berserk-6" => 6.0,
-        "brulure-4" | "gel-4" | "tellurisme-4" | "ventilation-4" => 5.0,
-        "brulure-secondaire-4"
-        | "gel-secondaire-4"
-        | "tellurisme-secondaire-4"
-        | "ventilation-secondaire-4" => 4.5,
-        "longueur-6" => 4.0,
-        "sauvegarde-6" | "tolerance-2" => 3.0,
-        "force-vitale-2" | "agilite-vitale-2" | "vivacite-2" | "velocite-2" => 2.0,
+        "carnage" | "armure-lourde" => 8.0,
+        "influence" | "influence-vitale" | "critique-berserk" => 6.0,
+        "brulure" | "gel" | "tellurisme" | "ventilation" => 5.0,
+        "brulure-secondaire"
+        | "gel-secondaire"
+        | "tellurisme-secondaire"
+        | "ventilation-secondaire" => 4.5,
+        "longueur" => 4.0,
+        "sauvegarde" | "tolerance" => 3.0,
+        "force-vitale" | "agilite-vitale" | "vivacite" | "velocite" => 2.0,
         _ => 1.0,
     }
 }
 
 fn validate_candidate_sublimations(candidate: &OptimizerCandidateInput) -> Option<String> {
-    candidate
+    if let Some(unknown_sublimation_id) = candidate
         .sublimation_ids
         .iter()
         .find(|sublimation_id| !is_supported_sublimation_id(sublimation_id))
         .cloned()
+    {
+        return Some(unknown_sublimation_id);
+    }
+
+    let normal_count = candidate
+        .sublimation_ids
+        .iter()
+        .filter(|sublimation_id| get_sublimation_category(sublimation_id) == Some("normal"))
+        .count();
+    let epic_count = candidate
+        .sublimation_ids
+        .iter()
+        .filter(|sublimation_id| get_sublimation_category(sublimation_id) == Some("epic"))
+        .count();
+    let relic_count = candidate
+        .sublimation_ids
+        .iter()
+        .filter(|sublimation_id| get_sublimation_category(sublimation_id) == Some("relic"))
+        .count();
+    if normal_count > 10 || epic_count > 1 || relic_count > 1 {
+        return Some("slotLimitExceeded".to_string());
+    }
+
+    None
 }
 
 fn apply_initial_sublimations(
@@ -3589,34 +3578,35 @@ fn apply_initial_sublimations(
     let condition_stats = stats.clone();
     let condition_resources = *resources;
 
-    for sublimation_id in &candidate.sublimation_ids {
-        let level = get_sublimation_effective_level(sublimation_id);
-        match sublimation_id.as_str() {
-            "vivacite-2" => {
-                resources.ap += (0.5 * level).round() as i32;
+    for family_id in collect_candidate_sublimation_families(candidate) {
+        if !is_sublimation_hp_requirement_satisfied(family_id, hp_assumption) {
+            continue;
+        }
+        let level = get_candidate_sublimation_family_level(candidate, family_id);
+        match family_id {
+            "vivacite" => {
+                resources.ap += 0.5 * level;
                 stats.elemental_resistance -= 37.5 * level;
             }
-            "velocite-2" => {
-                resources.mp += (0.5 * level).round() as i32;
+            "velocite" => {
+                resources.mp += 0.5 * level;
                 stats.damage_inflicted_percent -= 5.0 * level;
             }
-            "devastation-3" => {
-                resources.wp += ((1.0 / 3.0) * level).round() as i32;
+            "devastation" => {
+                resources.wp += (1.0 / 3.0) * level;
                 stats.willpower -= (10.0 / 3.0) * level;
             }
-            "influence-6" => stats.critical_hit_percent += 3.0 * level,
-            "influence-vitale-6" => stats.critical_hit_percent += 4.0 * level,
-            "critique-berserk-6" => stats.critical_hit_percent += 5.0 * level,
-            "force-vitale-2" => resources.ap += (0.5 * level).round() as i32,
-            "agilite-vitale-2" => resources.mp += (0.5 * level).round() as i32,
-            "armure-lourde-2" => {
-                resources.mp += (-0.5 * level).round() as i32;
+            "influence" => stats.critical_hit_percent += 3.0 * level,
+            "influence-vitale" => stats.critical_hit_percent += 4.0 * level,
+            "critique-berserk" => stats.critical_hit_percent += 5.0 * level,
+            "force-vitale" => resources.ap += 0.5 * level,
+            "agilite-vitale" => resources.mp += 0.5 * level,
+            "armure-lourde" => {
+                resources.mp += -0.5 * level;
                 stats.damage_inflicted_percent += 5.0 * level;
             }
-            "carnage-6" if hp_assumption == "berserk50" || hp_assumption == "berserk20" => {
-                stats.general_mastery += 90.0 * level;
-            }
-            "puissance-brute-4" => resources.wp -= level.round() as i32,
+            "carnage" => stats.general_mastery += 90.0 * level,
+            "puissance-brute" => resources.wp -= level,
             "concentration-elementaire" => {
                 stats.damage_inflicted_percent += 20.0;
                 stats.heals_performed_percent += 20.0;
@@ -3630,18 +3620,28 @@ fn apply_initial_sublimations(
             "secret-critique" if condition_stats.critical_mastery <= 0.0 => {
                 stats.critical_hit_percent += 30.0;
             }
-            "inflexibilite" if condition_resources.ap <= 10 => {
-                stats.damage_inflicted_percent += 15.0;
-                stats.willpower += 10.0;
-            }
-            "inflexibilite-ii" if has_no_secondary_mastery(&condition_stats) => {
-                stats.damage_inflicted_percent += 20.0;
-                stats.heals_performed_percent += 20.0;
-            }
-            "exces" | "exces-ii" => stats.damage_inflicted_percent -= 10.0,
-            "expert-des-armes-legeres-6" => stats.general_mastery += 150.0 * level,
+            "exces" => stats.damage_inflicted_percent -= 10.0,
+            "expert-des-armes-legeres" => stats.general_mastery += 150.0 * level,
             _ => {}
         }
+    }
+    if candidate
+        .sublimation_ids
+        .iter()
+        .any(|sublimation_id| sublimation_id == "inflexibilite")
+        && condition_resources.ap <= 10.0
+    {
+        stats.damage_inflicted_percent += 15.0;
+        stats.willpower += 10.0;
+    }
+    if candidate
+        .sublimation_ids
+        .iter()
+        .any(|sublimation_id| sublimation_id == "inflexibilite-ii")
+        && has_no_secondary_mastery(&condition_stats)
+    {
+        stats.damage_inflicted_percent += 20.0;
+        stats.heals_performed_percent += 20.0;
     }
 }
 
@@ -3683,14 +3683,167 @@ fn has_no_secondary_mastery(stats: &BaseStats) -> bool {
         && stats.critical_mastery <= 0.0
 }
 
+fn collect_candidate_sublimation_families(
+    candidate: &OptimizerCandidateInput,
+) -> Vec<&'static str> {
+    let mut families = candidate
+        .sublimation_ids
+        .iter()
+        .filter_map(|sublimation_id| sublimation_family_id(sublimation_id))
+        .collect::<Vec<_>>();
+    families.sort_unstable();
+    families.dedup();
+    families
+}
+
+fn is_sublimation_hp_requirement_satisfied(family_id: &str, hp_assumption: &str) -> bool {
+    match family_id {
+        "agilite-vitale" | "carnage" | "force-vitale" | "influence-vitale" => {
+            hp_assumption == "healthy90"
+        }
+        "critique-berserk" => {
+            hp_assumption == "normal"
+                || hp_assumption == "berserk50"
+                || hp_assumption == "berserk20"
+        }
+        _ => true,
+    }
+}
+
+fn get_candidate_sublimation_family_level(
+    candidate: &OptimizerCandidateInput,
+    family_id: &str,
+) -> f64 {
+    let raw_level = candidate
+        .sublimation_ids
+        .iter()
+        .filter(|sublimation_id| sublimation_family_id(sublimation_id) == Some(family_id))
+        .map(|sublimation_id| get_sublimation_effective_level(sublimation_id))
+        .sum::<f64>();
+    raw_level.min(get_sublimation_cumulative_max(family_id))
+}
+
+fn candidate_has_sublimation_family(candidate: &OptimizerCandidateInput, family_id: &str) -> bool {
+    candidate
+        .sublimation_ids
+        .iter()
+        .any(|sublimation_id| sublimation_family_id(sublimation_id) == Some(family_id))
+}
+
+fn sublimation_family_id(sublimation_id: &str) -> Option<&'static str> {
+    match sublimation_id {
+        "agilite-vitale-ii" | "agilite-vitale-2" => Some("agilite-vitale"),
+        "alternance" | "alternance-ii" => Some("alternance"),
+        "armure-lourde-i" | "armure-lourde-ii" | "armure-lourde-2" => Some("armure-lourde"),
+        "brulure-i" | "brulure-ii" | "brulure-iii" | "brulure-4" => Some("brulure"),
+        "brulure-secondaire-i"
+        | "brulure-secondaire-ii"
+        | "brulure-secondaire-iii"
+        | "brulure-secondaire-4" => Some("brulure-secondaire"),
+        "carnage-i" | "carnage-ii" | "carnage-iii" | "carnage-6" => Some("carnage"),
+        "chaos" => Some("chaos"),
+        "cicatrisation-i" | "cicatrisation-ii" | "cicatrisation-iii" | "cicatrisation-6" => {
+            Some("cicatrisation")
+        }
+        "concentration-elementaire" => Some("concentration-elementaire"),
+        "critique-berserk-i"
+        | "critique-berserk-ii"
+        | "critique-berserk-iii"
+        | "critique-berserk-6" => Some("critique-berserk"),
+        "devastation-i" | "devastation-ii" | "devastation-iii" | "devastation-3" => {
+            Some("devastation")
+        }
+        "exces" | "exces-ii" => Some("exces"),
+        "expert-des-armes-legeres-i"
+        | "expert-des-armes-legeres-ii"
+        | "expert-des-armes-legeres-iii"
+        | "expert-des-armes-legeres-6" => Some("expert-des-armes-legeres"),
+        "force-vitale-ii" | "force-vitale-2" => Some("force-vitale"),
+        "gel-i" | "gel-ii" | "gel-iii" | "gel-4" => Some("gel"),
+        "gel-secondaire-i" | "gel-secondaire-ii" | "gel-secondaire-iii" | "gel-secondaire-4" => {
+            Some("gel-secondaire")
+        }
+        "inflexibilite" | "inflexibilite-ii" => Some("inflexibilite"),
+        "influence-i" | "influence-ii" | "influence-iii" | "influence-6" => Some("influence"),
+        "influence-vitale-i"
+        | "influence-vitale-ii"
+        | "influence-vitale-iii"
+        | "influence-vitale-6" => Some("influence-vitale"),
+        "longueur-i" | "longueur-ii" | "longueur-iii" | "longueur-6" => Some("longueur"),
+        "puissance-brute-i"
+        | "puissance-brute-ii"
+        | "puissance-brute-iii"
+        | "puissance-brute-4" => Some("puissance-brute"),
+        "sauvegarde-ii" | "sauvegarde-6" => Some("sauvegarde"),
+        "secret-critique" => Some("secret-critique"),
+        "tellurisme-i" | "tellurisme-ii" | "tellurisme-iii" | "tellurisme-4" => Some("tellurisme"),
+        "tellurisme-secondaire-i"
+        | "tellurisme-secondaire-ii"
+        | "tellurisme-secondaire-iii"
+        | "tellurisme-secondaire-4" => Some("tellurisme-secondaire"),
+        "tolerance-i" | "tolerance-ii" | "tolerance-2" => Some("tolerance"),
+        "velocite-ii" | "velocite-2" => Some("velocite"),
+        "ventilation-i" | "ventilation-ii" | "ventilation-iii" | "ventilation-4" => {
+            Some("ventilation")
+        }
+        "ventilation-secondaire-i"
+        | "ventilation-secondaire-ii"
+        | "ventilation-secondaire-iii"
+        | "ventilation-secondaire-4" => Some("ventilation-secondaire"),
+        "vivacite-ii" | "vivacite-2" => Some("vivacite"),
+        _ => None,
+    }
+}
+
+fn get_sublimation_category(sublimation_id: &str) -> Option<&'static str> {
+    match sublimation_id {
+        "chaos"
+        | "concentration-elementaire"
+        | "inflexibilite"
+        | "inflexibilite-ii"
+        | "secret-critique" => Some("epic"),
+        "alternance" | "alternance-ii" | "exces" | "exces-ii" => Some("relic"),
+        _ if is_supported_sublimation_id(sublimation_id) => Some("normal"),
+        _ => None,
+    }
+}
+
+fn get_sublimation_cumulative_max(family_id: &str) -> f64 {
+    match family_id {
+        "agilite-vitale" | "armure-lourde" | "force-vitale" | "tolerance" | "velocite"
+        | "vivacite" => 2.0,
+        "devastation" => 3.0,
+        "brulure"
+        | "brulure-secondaire"
+        | "gel"
+        | "gel-secondaire"
+        | "puissance-brute"
+        | "tellurisme"
+        | "tellurisme-secondaire"
+        | "ventilation"
+        | "ventilation-secondaire" => 4.0,
+        "carnage"
+        | "cicatrisation"
+        | "critique-berserk"
+        | "expert-des-armes-legeres"
+        | "influence"
+        | "influence-vitale"
+        | "longueur"
+        | "sauvegarde" => 6.0,
+        _ => 1.0,
+    }
+}
+
 fn get_sublimation_effective_level(sublimation_id: &str) -> f64 {
     match sublimation_id {
         "influence-6"
         | "influence-vitale-6"
         | "critique-berserk-6"
         | "carnage-6"
+        | "cicatrisation-6"
         | "expert-des-armes-legeres-6"
-        | "longueur-6" => 6.0,
+        | "longueur-6"
+        | "sauvegarde-6" => 6.0,
         "brulure-4"
         | "brulure-secondaire-4"
         | "gel-4"
@@ -3700,9 +3853,53 @@ fn get_sublimation_effective_level(sublimation_id: &str) -> f64 {
         | "ventilation-4"
         | "ventilation-secondaire-4"
         | "puissance-brute-4" => 4.0,
-        "devastation-3" => 3.0,
-        "sauvegarde-6" | "tolerance-2" | "vivacite-2" | "velocite-2" | "force-vitale-2"
-        | "agilite-vitale-2" | "armure-lourde-2" => 2.0,
+        "devastation-iii" | "devastation-3" => 3.0,
+        "agilite-vitale-ii"
+        | "armure-lourde-ii"
+        | "brulure-ii"
+        | "brulure-secondaire-ii"
+        | "carnage-ii"
+        | "cicatrisation-ii"
+        | "critique-berserk-ii"
+        | "devastation-ii"
+        | "expert-des-armes-legeres-ii"
+        | "force-vitale-ii"
+        | "gel-ii"
+        | "gel-secondaire-ii"
+        | "influence-ii"
+        | "influence-vitale-ii"
+        | "longueur-ii"
+        | "puissance-brute-ii"
+        | "sauvegarde-ii"
+        | "tellurisme-ii"
+        | "tellurisme-secondaire-ii"
+        | "tolerance-ii"
+        | "velocite-ii"
+        | "ventilation-ii"
+        | "ventilation-secondaire-ii"
+        | "vivacite-ii"
+        | "tolerance-2"
+        | "vivacite-2"
+        | "velocite-2"
+        | "force-vitale-2"
+        | "agilite-vitale-2"
+        | "armure-lourde-2" => 2.0,
+        "brulure-iii"
+        | "brulure-secondaire-iii"
+        | "carnage-iii"
+        | "cicatrisation-iii"
+        | "critique-berserk-iii"
+        | "expert-des-armes-legeres-iii"
+        | "gel-iii"
+        | "gel-secondaire-iii"
+        | "influence-iii"
+        | "influence-vitale-iii"
+        | "longueur-iii"
+        | "puissance-brute-iii"
+        | "tellurisme-iii"
+        | "tellurisme-secondaire-iii"
+        | "ventilation-iii"
+        | "ventilation-secondaire-iii" => 3.0,
         _ => 1.0,
     }
 }
@@ -3744,10 +3941,10 @@ fn read_element_key(key: &str) -> Option<Element> {
 }
 
 fn add_spent_resources_for_sublimations(state: &mut SublimationCombatState, cost: SpellCost) {
-    state.spent_resources_this_turn.ap += cost.ap.max(0);
-    state.spent_resources_this_turn.mp += cost.mp.max(0);
-    state.spent_resources_this_turn.wp += cost.wp.max(0);
-    state.spent_resources_this_turn.bq += i32::from(cost.bq > 0);
+    state.spent_resources_this_turn.ap += f64::from(cost.ap.max(0));
+    state.spent_resources_this_turn.mp += f64::from(cost.mp.max(0));
+    state.spent_resources_this_turn.wp += f64::from(cost.wp.max(0));
+    state.spent_resources_this_turn.bq += f64::from(i32::from(cost.bq > 0));
 }
 
 fn collect_sublimation_damage_bonus_percent(
@@ -3775,24 +3972,22 @@ fn collect_action_sublimation_bonus(
     candidate: &OptimizerCandidateInput,
     spell: &SearchCatalogEntry,
 ) -> f64 {
-    candidate
-        .sublimation_ids
-        .iter()
-        .map(
-            |sublimation_id| match (sublimation_id.as_str(), &spell.element) {
-                ("brulure-4", Some(Element::Fire))
-                | ("gel-4", Some(Element::Water))
-                | ("tellurisme-4", Some(Element::Earth))
-                | ("ventilation-4", Some(Element::Air)) => {
-                    4.0 * get_sublimation_effective_level(sublimation_id)
-                }
-                ("longueur-6", _) if spell_supports_distance(spell) => {
-                    2.0 * get_sublimation_effective_level(sublimation_id)
-                }
-                _ => 0.0,
-            },
-        )
-        .sum()
+    let mut bonus = 0.0;
+    for family_id in collect_candidate_sublimation_families(candidate) {
+        bonus += match (family_id, &spell.element) {
+            ("brulure", Some(Element::Fire))
+            | ("gel", Some(Element::Water))
+            | ("tellurisme", Some(Element::Earth))
+            | ("ventilation", Some(Element::Air)) => {
+                4.0 * get_candidate_sublimation_family_level(candidate, family_id)
+            }
+            ("longueur", _) if spell_supports_distance(spell) => {
+                2.0 * get_candidate_sublimation_family_level(candidate, family_id)
+            }
+            _ => 0.0,
+        };
+    }
+    bonus
 }
 
 fn consume_elemental_carryover_bonus(
@@ -3850,7 +4045,7 @@ fn consume_spell_count_carryover_bonus(
         if !candidate
             .sublimation_ids
             .iter()
-            .any(|sublimation_id| sublimation_family_id(sublimation_id) == family_id)
+            .any(|sublimation_id| sublimation_family_id(sublimation_id) == Some(family_id))
         {
             continue;
         }
@@ -3868,16 +4063,12 @@ fn collect_spent_resource_sublimation_bonus(
     candidate: &OptimizerCandidateInput,
     state: &SublimationCombatState,
 ) -> f64 {
-    if !candidate
-        .sublimation_ids
-        .iter()
-        .any(|sublimation_id| sublimation_id == "puissance-brute-4")
-    {
+    if !candidate_has_sublimation_family(candidate, "puissance-brute") {
         return 0.0;
     }
-    let level = get_sublimation_effective_level("puissance-brute-4");
+    let level = get_candidate_sublimation_family_level(candidate, "puissance-brute");
     let spent = state.spent_resources_this_turn.wp + state.spent_resources_this_turn.bq;
-    (spent.max(0) as f64 * 2.0 * level).min(4.0 * level)
+    (spent.max(0.0) * 2.0 * level).min(4.0 * level)
 }
 
 fn store_sublimation_after_action(
@@ -3890,11 +4081,11 @@ fn store_sublimation_after_action(
         return;
     };
 
-    for sublimation_id in &candidate.sublimation_ids {
-        let Some(target) = secondary_carryover_target(sublimation_id) else {
+    for family_id in collect_candidate_sublimation_families(candidate) {
+        let Some(target) = secondary_carryover_target(family_id) else {
             continue;
         };
-        if !secondary_carryover_triggers(sublimation_id, &damage_element) {
+        if !secondary_carryover_triggers(family_id, &damage_element) {
             continue;
         }
         let before = state
@@ -3902,7 +4093,7 @@ fn store_sublimation_after_action(
             .get(&target)
             .copied()
             .unwrap_or(0.0);
-        let added = 2.0 * get_sublimation_effective_level(sublimation_id);
+        let added = 2.0 * get_candidate_sublimation_family_level(candidate, family_id);
         state
             .elemental_carryover
             .insert(target, (before + added).min(30.0));
@@ -3939,33 +4130,28 @@ fn store_spell_count_carryover(
 }
 
 fn secondary_carryover_target(sublimation_id: &str) -> Option<Element> {
-    match sublimation_id {
-        "brulure-secondaire-4" => Some(Element::Fire),
-        "gel-secondaire-4" => Some(Element::Water),
-        "tellurisme-secondaire-4" => Some(Element::Earth),
-        "ventilation-secondaire-4" => Some(Element::Air),
+    match sublimation_family_id(sublimation_id).unwrap_or(sublimation_id) {
+        "brulure-secondaire" => Some(Element::Fire),
+        "gel-secondaire" => Some(Element::Water),
+        "tellurisme-secondaire" => Some(Element::Earth),
+        "ventilation-secondaire" => Some(Element::Air),
         _ => None,
     }
 }
 
 fn secondary_carryover_triggers(sublimation_id: &str, element: &Element) -> bool {
-    match sublimation_id {
-        "brulure-secondaire-4" => matches!(element, Element::Water | Element::Earth | Element::Air),
-        "gel-secondaire-4" => matches!(element, Element::Fire | Element::Earth | Element::Air),
-        "tellurisme-secondaire-4" => {
+    match sublimation_family_id(sublimation_id).unwrap_or(sublimation_id) {
+        "brulure-secondaire" => {
+            matches!(element, Element::Water | Element::Earth | Element::Air)
+        }
+        "gel-secondaire" => matches!(element, Element::Fire | Element::Earth | Element::Air),
+        "tellurisme-secondaire" => {
             matches!(element, Element::Fire | Element::Water | Element::Air)
         }
-        "ventilation-secondaire-4" => {
+        "ventilation-secondaire" => {
             matches!(element, Element::Fire | Element::Water | Element::Earth)
         }
         _ => false,
-    }
-}
-
-fn sublimation_family_id(sublimation_id: &str) -> &str {
-    match sublimation_id {
-        "exces" | "exces-ii" => "exces",
-        _ => sublimation_id,
     }
 }
 
@@ -3985,21 +4171,13 @@ fn collect_sublimation_resource_carryover(
     resources: ResourcePool,
 ) -> ResourcePool {
     let mut carryover = ResourcePool::default();
-    if candidate
-        .sublimation_ids
-        .iter()
-        .any(|sublimation_id| sublimation_id == "sauvegarde-6")
-        && resources.ap > 0
-    {
-        carryover.ap = std::cmp::min(resources.ap, 1);
+    if candidate_has_sublimation_family(candidate, "sauvegarde") && resources.ap > 0.0 {
+        let max_amount = 0.5 * get_candidate_sublimation_family_level(candidate, "sauvegarde");
+        carryover.ap = resources.ap.min(max_amount);
     }
-    if candidate
-        .sublimation_ids
-        .iter()
-        .any(|sublimation_id| sublimation_id == "tolerance-2")
-        && resources.mp > 0
-    {
-        carryover.mp = std::cmp::min(resources.mp, 2);
+    if candidate_has_sublimation_family(candidate, "tolerance") && resources.mp > 0.0 {
+        let max_amount = get_candidate_sublimation_family_level(candidate, "tolerance");
+        carryover.mp = resources.mp.min(max_amount);
     }
     carryover
 }
@@ -4087,20 +4265,20 @@ fn can_use_action_softly(
 }
 
 fn can_afford_cost(resources: ResourcePool, cost: SpellCost) -> bool {
-    cost.ap.max(0) <= resources.ap
-        && cost.mp.max(0) <= resources.mp
-        && cost.wp.max(0) <= resources.wp
-        && cost.bq.max(0) <= resources.bq
+    f64::from(cost.ap.max(0)) <= resources.ap
+        && f64::from(cost.mp.max(0)) <= resources.mp
+        && f64::from(cost.wp.max(0)) <= resources.wp
+        && f64::from(cost.bq.max(0)) <= resources.bq
 }
 
 fn apply_soft_action_resources(
     mut resources: ResourcePool,
     spell: &SearchCatalogEntry,
 ) -> ResourcePool {
-    resources.ap -= spell.cost.ap.max(0);
-    resources.mp -= spell.cost.mp.max(0);
-    resources.wp -= spell.cost.wp.max(0);
-    resources.bq -= spell.cost.bq.max(0);
+    resources.ap -= f64::from(spell.cost.ap.max(0));
+    resources.mp -= f64::from(spell.cost.mp.max(0));
+    resources.wp -= f64::from(spell.cost.wp.max(0));
+    resources.bq -= f64::from(spell.cost.bq.max(0));
 
     for effect in &spell.effects {
         if read_string_field(effect, "type").as_deref() == Some("resourceDelta")
@@ -4110,10 +4288,10 @@ fn apply_soft_action_resources(
         {
             let amount = read_i32_field(Some(effect), "amount");
             match read_string_field(effect, "resource").as_deref() {
-                Some("ap") => resources.ap = (resources.ap + amount).max(0),
-                Some("mp") => resources.mp = (resources.mp + amount).max(0),
-                Some("wp") => resources.wp = (resources.wp + amount).max(0),
-                Some("bq") => resources.bq = (resources.bq + amount).max(0),
+                Some("ap") => resources.ap = (resources.ap + f64::from(amount)).max(0.0),
+                Some("mp") => resources.mp = (resources.mp + f64::from(amount)).max(0.0),
+                Some("wp") => resources.wp = (resources.wp + f64::from(amount)).max(0.0),
+                Some("bq") => resources.bq = (resources.bq + f64::from(amount)).max(0.0),
                 _ => {}
             }
         }
@@ -4261,10 +4439,10 @@ pub fn resolve_action_context(context: Option<PartialActionContext>) -> ActionCo
 
 pub fn pay_cost(resources: ResourcePool, cost: SpellCost) -> ResourcePool {
     ResourcePool {
-        ap: resources.ap - cost.ap,
-        mp: resources.mp - cost.mp,
-        wp: resources.wp - cost.wp,
-        bq: resources.bq - cost.bq,
+        ap: resources.ap - f64::from(cost.ap),
+        mp: resources.mp - f64::from(cost.mp),
+        wp: resources.wp - f64::from(cost.wp),
+        bq: resources.bq - f64::from(cost.bq),
     }
 }
 
@@ -4451,7 +4629,7 @@ pub fn create_huppermage_state(
         active_heart: None,
         water_heart_last_spell_kind: None,
         halo_chatoyant_marks: 0,
-        bq_max: resources.bq.max(resources.wp * 75),
+        bq_max: resources.bq.max(resources.wp * 75.0),
         stored_bq: 0,
         cooldowns_by_spell_id: BTreeMap::new(),
         deck_spell_limit: 12,
@@ -4461,7 +4639,7 @@ pub fn create_huppermage_state(
 
 pub fn convert_wp_to_bq(resources: ResourcePool) -> ResourcePool {
     ResourcePool {
-        bq: resources.bq + resources.wp * 75,
+        bq: resources.bq + resources.wp * 75.0,
         ..resources
     }
 }
@@ -4487,7 +4665,7 @@ pub fn apply_generated_rune(
     state.runes.last_generated_rune = Some(rune);
 
     if granted_ap {
-        resources.ap += 1;
+        resources.ap += 1.0;
     }
 
     let antithese_bq_gain = if has_passive(&state, "antithese") {
@@ -4495,7 +4673,7 @@ pub fn apply_generated_rune(
     } else {
         0
     };
-    resources.bq += antithese_bq_gain;
+    resources.bq += f64::from(antithese_bq_gain);
 
     RuneGenerationResult {
         state,
@@ -4664,13 +4842,13 @@ pub fn apply_turn_end_bq(
         0
     } else {
         let gain = apply_bq_gain_multiplier(100 + state.stored_bq, &state);
-        resources.bq += gain;
+        resources.bq += f64::from(gain);
         state.stored_bq = 0;
         gain
     };
 
     if has_passive(&state, "universalite") && active_rune_count > 0 {
-        resources.bq -= (active_rune_count as i32) * 50;
+        resources.bq -= f64::from((active_rune_count as i32) * 50);
     }
 
     let stored_after = state.stored_bq;
@@ -5405,6 +5583,7 @@ fn opposite_rune(rune: &Rune) -> Rune {
 }
 
 fn add_resource_by_name(resources: &mut ResourcePool, resource: &str, amount: i32) {
+    let amount = f64::from(amount);
     match resource {
         "ap" => resources.ap += amount,
         "mp" => resources.mp += amount,
@@ -5552,12 +5731,12 @@ fn get_position_multiplier(position: &AttackPosition) -> f64 {
 fn first_insufficient_resource(
     resources: ResourcePool,
     cost: SpellCost,
-) -> Option<(&'static str, i32, i32)> {
+) -> Option<(&'static str, f64, f64)> {
     [
-        ("ap", cost.ap, resources.ap),
-        ("mp", cost.mp, resources.mp),
-        ("wp", cost.wp, resources.wp),
-        ("bq", cost.bq, resources.bq),
+        ("ap", f64::from(cost.ap), resources.ap),
+        ("mp", f64::from(cost.mp), resources.mp),
+        ("wp", f64::from(cost.wp), resources.wp),
+        ("bq", f64::from(cost.bq), resources.bq),
     ]
     .into_iter()
     .find(|(_, required, available)| required > available)
@@ -7393,7 +7572,7 @@ fn evaluate_candidate_with_catalog<'a>(
                     turn_stats = apply_heart_stats(turn_stats, &heart, &huppermage);
                     huppermage.active_heart = Some(heart);
                     if action_index == 0 && has_passive(&huppermage, "initiative-de-lame") {
-                        resources.ap += 2;
+                        resources.ap += 2.0;
                     }
                 }
             }
@@ -7630,8 +7809,8 @@ fn violation_with_turn(
         action_index: violation.action_index as i32,
         spell_id: violation.spell_id.clone(),
         resource: None,
-        required: violation.required,
-        available: violation.available,
+        required: violation.required.map(f64::from),
+        available: violation.available.map(f64::from),
         scope: violation.scope.clone(),
     }
 }
@@ -8021,8 +8200,8 @@ mod tests {
         assert!(evaluation.valid);
         assert_eq!(evaluation.candidate_id, "candidate:hit");
         assert_eq!(evaluation.total_damage, 40.0);
-        assert_eq!(evaluation.final_resources.ap, 5);
-        assert_eq!(evaluation.final_resources.bq, 300);
+        assert_eq!(evaluation.final_resources.ap, 5.0);
+        assert_eq!(evaluation.final_resources.bq, 300.0);
         assert_eq!(
             evaluation.score,
             Some(CandidateScoreBreakdown {
@@ -8378,7 +8557,7 @@ mod tests {
 
         assert!(evaluation.valid);
         assert_eq!(evaluation.total_damage, 19.0);
-        assert_eq!(evaluation.final_resources.bq, 240);
+        assert_eq!(evaluation.final_resources.bq, 240.0);
         assert_eq!(
             evaluation.score,
             Some(CandidateScoreBreakdown {
@@ -8445,7 +8624,7 @@ mod tests {
             .expect("candidate should evaluate");
 
         assert!(evaluation.valid);
-        assert_eq!(evaluation.final_resources.bq, 240);
+        assert_eq!(evaluation.final_resources.bq, 240.0);
     }
 
     #[test]
@@ -8495,7 +8674,7 @@ mod tests {
             .expect("candidate should evaluate");
 
         assert!(evaluation.valid);
-        assert_eq!(evaluation.final_resources.bq, 200);
+        assert_eq!(evaluation.final_resources.bq, 200.0);
     }
 
     #[test]
@@ -8560,7 +8739,7 @@ mod tests {
             .expect("candidate should evaluate");
 
         assert!(evaluation.valid);
-        assert_eq!(evaluation.final_resources.ap, 0);
+        assert_eq!(evaluation.final_resources.ap, 0.0);
     }
 
     #[test]
@@ -8613,7 +8792,7 @@ mod tests {
                 violation.required,
                 violation.available,
             )),
-            Some((1, Some("bq"), Some(50), Some(40)))
+            Some((1, Some("bq"), Some(50.0), Some(40.0)))
         );
     }
 
@@ -9375,10 +9554,10 @@ mod tests {
     fn validates_and_pays_resource_costs() {
         let result = validate_resource_cost(
             ResourcePool {
-                ap: 12,
-                mp: 6,
-                wp: 6,
-                bq: 500,
+                ap: 12.0,
+                mp: 6.0,
+                wp: 6.0,
+                bq: 500.0,
             },
             SpellCost {
                 ap: 3,
@@ -9402,10 +9581,10 @@ mod tests {
         assert_eq!(
             result.resources_after_cost,
             ResourcePool {
-                ap: 9,
-                mp: 5,
-                wp: 6,
-                bq: 425
+                ap: 9.0,
+                mp: 5.0,
+                wp: 6.0,
+                bq: 425.0
             }
         );
         assert_eq!(result.context.position, AttackPosition::Rear);
@@ -9419,10 +9598,10 @@ mod tests {
     fn rejects_insufficient_resource_without_paying_cost() {
         let result = validate_resource_cost(
             ResourcePool {
-                ap: 2,
-                mp: 6,
-                wp: 6,
-                bq: 500,
+                ap: 2.0,
+                mp: 6.0,
+                wp: 6.0,
+                bq: 500.0,
             },
             SpellCost {
                 ap: 3,
@@ -9439,10 +9618,10 @@ mod tests {
         assert_eq!(
             result.resources_after_cost,
             ResourcePool {
-                ap: 2,
-                mp: 6,
-                wp: 6,
-                bq: 500
+                ap: 2.0,
+                mp: 6.0,
+                wp: 6.0,
+                bq: 500.0
             }
         );
         assert_eq!(result.context.position, AttackPosition::Face);
@@ -9453,8 +9632,8 @@ mod tests {
                 action_index: 4,
                 spell_id: "too-expensive".to_string(),
                 resource: "ap".to_string(),
-                required: 3,
-                available: 2,
+                required: 3.0,
+                available: 2.0,
             })
         );
     }
@@ -9524,27 +9703,27 @@ mod tests {
     fn generates_runes_once_per_turn_and_grants_ap() {
         let state = create_huppermage_state(
             ResourcePool {
-                ap: 12,
-                mp: 6,
-                wp: 6,
-                bq: 500,
+                ap: 12.0,
+                mp: 6.0,
+                wp: 6.0,
+                bq: 500.0,
             },
             vec![],
         );
         let first = apply_generated_rune(
             state,
             ResourcePool {
-                ap: 8,
-                mp: 6,
-                wp: 6,
-                bq: 500,
+                ap: 8.0,
+                mp: 6.0,
+                wp: 6.0,
+                bq: 500.0,
             },
             Rune::Incandescent,
         );
 
         assert!(first.generated);
         assert!(first.granted_ap);
-        assert_eq!(first.resources.ap, 9);
+        assert_eq!(first.resources.ap, 9.0);
         assert!(first.state.runes.active.incandescent);
         assert_eq!(
             first.state.runes.last_generated_rune,
@@ -9553,17 +9732,17 @@ mod tests {
 
         let second = apply_generated_rune(first.state, first.resources, Rune::Incandescent);
         assert!(!second.generated);
-        assert_eq!(second.resources.ap, 9);
+        assert_eq!(second.resources.ap, 9.0);
     }
 
     #[test]
     fn applies_antithese_and_bq_gain_multipliers_on_rune_generation() {
         let mut state = create_huppermage_state(
             ResourcePool {
-                ap: 12,
-                mp: 6,
-                wp: 6,
-                bq: 500,
+                ap: 12.0,
+                mp: 6.0,
+                wp: 6.0,
+                bq: 500.0,
             },
             vec!["antithese".to_string(), "transcendance-runique".to_string()],
         );
@@ -9577,26 +9756,26 @@ mod tests {
         let result = apply_generated_rune(
             state,
             ResourcePool {
-                ap: 8,
-                mp: 6,
-                wp: 6,
-                bq: 500,
+                ap: 8.0,
+                mp: 6.0,
+                wp: 6.0,
+                bq: 500.0,
             },
             Rune::Aerial,
         );
 
         assert_eq!(result.antithese_bq_gain, 40);
-        assert_eq!(result.resources.bq, 540);
+        assert_eq!(result.resources.bq, 540.0);
     }
 
     #[test]
     fn caps_abundance_with_combinaison_elementaire() {
         let mut state = create_huppermage_state(
             ResourcePool {
-                ap: 12,
-                mp: 6,
-                wp: 6,
-                bq: 500,
+                ap: 12.0,
+                mp: 6.0,
+                wp: 6.0,
+                bq: 500.0,
             },
             vec!["combinaison-elementaire".to_string()],
         );
@@ -9613,10 +9792,10 @@ mod tests {
     fn activates_coeur_de_lumiere_from_last_generated_rune() {
         let mut state = create_huppermage_state(
             ResourcePool {
-                ap: 12,
-                mp: 6,
-                wp: 6,
-                bq: 500,
+                ap: 12.0,
+                mp: 6.0,
+                wp: 6.0,
+                bq: 500.0,
             },
             vec![],
         );
@@ -9696,7 +9875,7 @@ mod tests {
             .expect("candidate should evaluate");
 
         assert!(evaluation.valid);
-        assert_eq!(evaluation.final_resources.bq, 140);
+        assert_eq!(evaluation.final_resources.bq, 140.0);
         assert_eq!(evaluation.final_huppermage.stored_bq, 75);
     }
 
@@ -9762,7 +9941,7 @@ mod tests {
             .expect("candidate should evaluate");
 
         assert!(evaluation.valid);
-        assert_eq!(evaluation.final_resources.ap, 8);
+        assert_eq!(evaluation.final_resources.ap, 8.0);
         assert_eq!(
             evaluation.final_huppermage.active_heart,
             Some(HuppermageHeart::Earth)
@@ -9773,10 +9952,10 @@ mod tests {
     fn cycle_elementaire_restores_opposite_active_last_rune() {
         let mut state = create_huppermage_state(
             ResourcePool {
-                ap: 12,
-                mp: 6,
-                wp: 6,
-                bq: 500,
+                ap: 12.0,
+                mp: 6.0,
+                wp: 6.0,
+                bq: 500.0,
             },
             vec!["combinaison-elementaire".to_string()],
         );
@@ -9786,10 +9965,10 @@ mod tests {
         let result = apply_cycle_elementaire(
             state,
             ResourcePool {
-                ap: 8,
-                mp: 6,
-                wp: 6,
-                bq: 500,
+                ap: 8.0,
+                mp: 6.0,
+                wp: 6.0,
+                bq: 500.0,
             },
         );
 
@@ -9803,10 +9982,10 @@ mod tests {
     fn places_and_recovers_feu_follet_with_sauvegarde_runique_storage() {
         let mut state = create_huppermage_state(
             ResourcePool {
-                ap: 12,
-                mp: 6,
-                wp: 6,
-                bq: 500,
+                ap: 12.0,
+                mp: 6.0,
+                wp: 6.0,
+                bq: 500.0,
             },
             vec!["sauvegarde-runique".to_string()],
         );
@@ -9843,10 +10022,10 @@ mod tests {
     fn turn_end_stores_bq_under_heart_and_regenerates_without_heart() {
         let mut state = create_huppermage_state(
             ResourcePool {
-                ap: 12,
-                mp: 6,
-                wp: 6,
-                bq: 500,
+                ap: 12.0,
+                mp: 6.0,
+                wp: 6.0,
+                bq: 500.0,
             },
             vec![],
         );
@@ -9855,35 +10034,35 @@ mod tests {
         let stored = apply_turn_end_bq(
             state,
             ResourcePool {
-                ap: 0,
-                mp: 0,
-                wp: 6,
-                bq: 300,
+                ap: 0.0,
+                mp: 0.0,
+                wp: 6.0,
+                bq: 300.0,
             },
         );
         assert_eq!(stored.amount, 0);
         assert_eq!(stored.stored_after, 75);
-        assert_eq!(stored.resources.bq, 300);
+        assert_eq!(stored.resources.bq, 300.0);
 
         let mut next_state = stored.state;
         next_state.active_heart = None;
         let regenerated = apply_turn_end_bq(next_state, stored.resources);
         assert_eq!(regenerated.amount, 175);
-        assert_eq!(regenerated.resources.bq, 475);
+        assert_eq!(regenerated.resources.bq, 475.0);
         assert_eq!(regenerated.stored_after, 0);
     }
 
     #[test]
     fn converts_wp_to_initial_bq() {
         let converted = convert_wp_to_bq(ResourcePool {
-            ap: 12,
-            mp: 6,
-            wp: 6,
-            bq: 100,
+            ap: 12.0,
+            mp: 6.0,
+            wp: 6.0,
+            bq: 100.0,
         });
 
-        assert_eq!(converted.bq, 550);
-        assert_eq!(converted.wp, 6);
+        assert_eq!(converted.bq, 550.0);
+        assert_eq!(converted.wp, 6.0);
     }
 
     #[test]
@@ -9891,10 +10070,10 @@ mod tests {
         let result = apply_initial_passive_effects(
             BaseStats::default(),
             ResourcePool {
-                ap: 12,
-                mp: 6,
-                wp: 6,
-                bq: 500,
+                ap: 12.0,
+                mp: 6.0,
+                wp: 6.0,
+                bq: 500.0,
             },
             &[
                 PassiveEntry {
@@ -9927,7 +10106,7 @@ mod tests {
             ],
         );
 
-        assert_eq!(result.resources.ap, 13);
+        assert_eq!(result.resources.ap, 13.0);
         assert_eq!(result.stats.damage_inflicted_percent, 10.0);
         assert_eq!(result.stats.elemental_mastery.fire, 50.0);
         assert_eq!(result.stats.elemental_mastery.water, 0.0);
@@ -9971,10 +10150,10 @@ mod tests {
     fn applies_huppermage_bq_gain_passive_multipliers() {
         let mut state = create_huppermage_state(
             ResourcePool {
-                ap: 12,
-                mp: 6,
-                wp: 6,
-                bq: 500,
+                ap: 12.0,
+                mp: 6.0,
+                wp: 6.0,
+                bq: 500.0,
             },
             vec![
                 "transcendance-runique".to_string(),
@@ -9991,25 +10170,25 @@ mod tests {
         let turn_end = apply_turn_end_bq(
             state,
             ResourcePool {
-                ap: 0,
-                mp: 0,
-                wp: 6,
-                bq: 100,
+                ap: 0.0,
+                mp: 0.0,
+                wp: 6.0,
+                bq: 100.0,
             },
         );
 
         assert_eq!(turn_end.amount, 160);
-        assert_eq!(turn_end.resources.bq, 260);
+        assert_eq!(turn_end.resources.bq, 260.0);
     }
 
     #[test]
     fn applies_universalite_turn_end_bq_cost_per_active_rune() {
         let mut state = create_huppermage_state(
             ResourcePool {
-                ap: 12,
-                mp: 6,
-                wp: 6,
-                bq: 500,
+                ap: 12.0,
+                mp: 6.0,
+                wp: 6.0,
+                bq: 500.0,
             },
             vec!["universalite".to_string()],
         );
@@ -10023,25 +10202,25 @@ mod tests {
         let turn_end = apply_turn_end_bq(
             state,
             ResourcePool {
-                ap: 0,
-                mp: 0,
-                wp: 6,
-                bq: 20,
+                ap: 0.0,
+                mp: 0.0,
+                wp: 6.0,
+                bq: 20.0,
             },
         );
 
         assert_eq!(turn_end.amount, 100);
-        assert_eq!(turn_end.resources.bq, 20);
+        assert_eq!(turn_end.resources.bq, 20.0);
     }
 
     #[test]
     fn validates_cooldowns_and_ages_them_between_turns() {
         let mut state = create_huppermage_state(
             ResourcePool {
-                ap: 12,
-                mp: 6,
-                wp: 6,
-                bq: 500,
+                ap: 12.0,
+                mp: 6.0,
+                wp: 6.0,
+                bq: 500.0,
             },
             vec![],
         );
@@ -10071,10 +10250,10 @@ mod tests {
     fn validates_turn_and_target_cast_limits() {
         let state = create_huppermage_state(
             ResourcePool {
-                ap: 12,
-                mp: 6,
-                wp: 6,
-                bq: 500,
+                ap: 12.0,
+                mp: 6.0,
+                wp: 6.0,
+                bq: 500.0,
             },
             vec![],
         );
@@ -10133,10 +10312,10 @@ mod tests {
 
         let refraction_state = create_huppermage_state(
             ResourcePool {
-                ap: 12,
-                mp: 6,
-                wp: 6,
-                bq: 500,
+                ap: 12.0,
+                mp: 6.0,
+                wp: 6.0,
+                bq: 500.0,
             },
             vec!["refraction-elementaire".to_string()],
         );
@@ -10166,10 +10345,10 @@ mod tests {
     fn validates_required_targets() {
         let state = create_huppermage_state(
             ResourcePool {
-                ap: 12,
-                mp: 6,
-                wp: 6,
-                bq: 500,
+                ap: 12.0,
+                mp: 6.0,
+                wp: 6.0,
+                bq: 500.0,
             },
             vec![],
         );
@@ -10201,10 +10380,10 @@ mod tests {
     fn validates_deck_limits_and_temporary_unlocks() {
         let mut state = create_huppermage_state(
             ResourcePool {
-                ap: 12,
-                mp: 6,
-                wp: 6,
-                bq: 500,
+                ap: 12.0,
+                mp: 6.0,
+                wp: 6.0,
+                bq: 500.0,
             },
             vec![],
         );
@@ -10239,10 +10418,10 @@ mod tests {
     fn carries_resources_and_huppermage_state_to_next_turn() {
         let mut state = create_huppermage_state(
             ResourcePool {
-                ap: 12,
-                mp: 6,
-                wp: 6,
-                bq: 500,
+                ap: 12.0,
+                mp: 6.0,
+                wp: 6.0,
+                bq: 500.0,
             },
             vec![],
         );
@@ -10256,25 +10435,25 @@ mod tests {
 
         let next = create_next_turn_state(
             ResourcePool {
-                ap: 12,
-                mp: 6,
-                wp: 6,
-                bq: 500,
+                ap: 12.0,
+                mp: 6.0,
+                wp: 6.0,
+                bq: 500.0,
             },
             ResourcePool {
-                ap: 0,
-                mp: 1,
-                wp: 4,
-                bq: 725,
+                ap: 0.0,
+                mp: 1.0,
+                wp: 4.0,
+                bq: 725.0,
             },
             state,
             &casts,
         );
 
-        assert_eq!(next.resources.ap, 12);
-        assert_eq!(next.resources.mp, 6);
-        assert_eq!(next.resources.wp, 4);
-        assert_eq!(next.resources.bq, 725);
+        assert_eq!(next.resources.ap, 12.0);
+        assert_eq!(next.resources.mp, 6.0);
+        assert_eq!(next.resources.wp, 4.0);
+        assert_eq!(next.resources.bq, 725.0);
         assert!(next.huppermage.runes.active.incandescent);
         assert!(!next.huppermage.rune_ap_gains_this_turn.incandescent);
         assert_eq!(next.huppermage.active_heart, None);
@@ -10288,10 +10467,10 @@ mod tests {
     fn keeps_cast_cooldown_from_aging_on_the_cast_turn() {
         let mut state = create_huppermage_state(
             ResourcePool {
-                ap: 12,
-                mp: 6,
-                wp: 6,
-                bq: 500,
+                ap: 12.0,
+                mp: 6.0,
+                wp: 6.0,
+                bq: 500.0,
             },
             vec![],
         );
@@ -10303,16 +10482,16 @@ mod tests {
 
         let next = create_next_turn_state(
             ResourcePool {
-                ap: 12,
-                mp: 6,
-                wp: 6,
-                bq: 500,
+                ap: 12.0,
+                mp: 6.0,
+                wp: 6.0,
+                bq: 500.0,
             },
             ResourcePool {
-                ap: 0,
-                mp: 0,
-                wp: 6,
-                bq: 500,
+                ap: 0.0,
+                mp: 0.0,
+                wp: 6.0,
+                bq: 500.0,
             },
             state,
             &casts,
@@ -10365,16 +10544,16 @@ mod tests {
             total_damage: 175.13,
             damage_by_resolved_element: damage_by_element,
             initial_resources: ResourcePool {
-                ap: 12,
-                mp: 6,
-                wp: 6,
-                bq: 500,
+                ap: 12.0,
+                mp: 6.0,
+                wp: 6.0,
+                bq: 500.0,
             },
             final_resources: ResourcePool {
-                ap: 0,
-                mp: 6,
-                wp: 6,
-                bq: 500,
+                ap: 0.0,
+                mp: 6.0,
+                wp: 6.0,
+                bq: 500.0,
             },
         };
 
@@ -10399,16 +10578,16 @@ mod tests {
             total_damage: 100.0,
             damage_by_resolved_element: DamageByElement::default(),
             initial_resources: ResourcePool {
-                ap: 12,
-                mp: 6,
-                wp: 6,
-                bq: 500,
+                ap: 12.0,
+                mp: 6.0,
+                wp: 6.0,
+                bq: 500.0,
             },
             final_resources: ResourcePool {
-                ap: 0,
-                mp: 6,
-                wp: 4,
-                bq: 600,
+                ap: 0.0,
+                mp: 6.0,
+                wp: 4.0,
+                bq: 600.0,
             },
         };
         let replay = SimulationSummary {
@@ -10417,10 +10596,10 @@ mod tests {
             damage_by_resolved_element: DamageByElement::default(),
             initial_resources: first.final_resources,
             final_resources: ResourcePool {
-                ap: 0,
-                mp: 6,
-                wp: 4,
-                bq: 600,
+                ap: 0.0,
+                mp: 6.0,
+                wp: 4.0,
+                bq: 600.0,
             },
         };
 
@@ -10429,10 +10608,10 @@ mod tests {
 
         let failing_replay = SimulationSummary {
             final_resources: ResourcePool {
-                ap: 0,
-                mp: 6,
-                wp: 3,
-                bq: 600,
+                ap: 0.0,
+                mp: 6.0,
+                wp: 3.0,
+                bq: 600.0,
             },
             ..replay
         };
