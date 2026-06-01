@@ -99,6 +99,13 @@ pub enum HuppermageHeart {
     Air,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum HuppermageWaterHeartSpellKind {
+    Light,
+    Elemental,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RuneTracker {
@@ -136,6 +143,8 @@ pub struct HuppermageState {
     pub active_passives: Vec<String>,
     #[serde(default)]
     pub active_heart: Option<HuppermageHeart>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub water_heart_last_spell_kind: Option<HuppermageWaterHeartSpellKind>,
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub halo_chatoyant_marks: u32,
     pub bq_max: i32,
@@ -2473,6 +2482,149 @@ fn collect_search_delayed_damage(
     .collect()
 }
 
+fn count_search_removal_events(
+    effects: &[Value],
+    state: &HuppermageState,
+    action: &CandidateAction,
+) -> i32 {
+    let mut count = 0;
+    for effect in effects {
+        match read_string_field(effect, "type").as_deref() {
+            Some("resourceDelta")
+                if read_string_field(effect, "target").as_deref() == Some("target")
+                    && read_i32_field(Some(effect), "amount") < 0
+                    && matches!(
+                        read_string_field(effect, "resource").as_deref(),
+                        Some("ap") | Some("mp")
+                    ) =>
+            {
+                count += 1;
+            }
+            Some("statModifier")
+                if read_string_field(effect, "target").as_deref() == Some("target")
+                    && read_string_field(effect, "stat").as_deref() == Some("range")
+                    && read_f64_field(Some(effect), "amount") < 0.0 =>
+            {
+                count += 1;
+            }
+            Some("conditional")
+                if is_search_condition_met(effect.get("condition"), state, action) =>
+            {
+                if let Some(nested) = effect.get("effects").and_then(Value::as_array) {
+                    count += count_search_removal_events(nested, state, action);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    count
+}
+
+fn count_search_movement_events(effects: &[Value], state: &HuppermageState) -> i32 {
+    let mut count = 0;
+    for effect in effects {
+        match read_string_field(effect, "type").as_deref() {
+            Some("movement") => count += 1,
+            Some("conditional")
+                if is_search_condition_met(
+                    effect.get("condition"),
+                    state,
+                    &CandidateAction {
+                        spell_id: String::new(),
+                        target: None,
+                    },
+                ) =>
+            {
+                if let Some(nested) = effect.get("effects").and_then(Value::as_array) {
+                    count += count_search_movement_events(nested, state);
+                }
+            }
+            Some("trigger") => {
+                if let Some(nested) = effect.get("effects").and_then(Value::as_array) {
+                    count += count_search_movement_events(nested, state);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    count
+}
+
+fn apply_absorption_quadramentale_bq_gain(
+    spell: &SearchCatalogEntry,
+    state: &HuppermageState,
+    action: &CandidateAction,
+    resources: &mut ResourcePool,
+) {
+    if !has_passive(state, "absorption-quadramentale") {
+        return;
+    }
+
+    let trigger_count = count_search_removal_events(&spell.effects, state, action);
+    if trigger_count > 0 {
+        resources.bq += apply_bq_gain_multiplier(trigger_count * 20, state);
+    }
+}
+
+fn apply_extension_des_sens_bq_regeneration(
+    spell: &SearchCatalogEntry,
+    effective_cost: SpellCost,
+    state: &mut HuppermageState,
+    resources: &mut ResourcePool,
+) {
+    if !has_passive(state, "extension-des-sens") {
+        return;
+    }
+
+    let Some(heart) = state.active_heart.clone() else {
+        return;
+    };
+
+    let ap_cost = effective_cost.ap.max(0);
+    let mut water_heart_last_spell_kind = state.water_heart_last_spell_kind.clone();
+    let trigger_count = match heart {
+        HuppermageHeart::Fire => {
+            if spell
+                .element
+                .as_ref()
+                .is_some_and(|element| is_elemental_spell_element(element))
+            {
+                1
+            } else {
+                0
+            }
+        }
+        HuppermageHeart::Earth => i32::from(ap_cost > 0),
+        HuppermageHeart::Air => count_search_movement_events(&spell.effects, state),
+        HuppermageHeart::Water => {
+            let current_spell_kind = get_water_heart_spell_kind(spell.element.as_ref());
+            let triggers = current_spell_kind.is_some()
+                && water_heart_last_spell_kind.is_some()
+                && current_spell_kind != water_heart_last_spell_kind;
+            water_heart_last_spell_kind = current_spell_kind;
+            i32::from(triggers)
+        }
+    };
+    state.water_heart_last_spell_kind = water_heart_last_spell_kind;
+
+    let amount = trigger_count * ap_cost * 20;
+    if amount > 0 {
+        resources.bq += apply_bq_gain_multiplier(amount, state);
+    }
+}
+
+fn get_water_heart_spell_kind(element: Option<&Element>) -> Option<HuppermageWaterHeartSpellKind> {
+    match element {
+        Some(Element::Light) => Some(HuppermageWaterHeartSpellKind::Light),
+        Some(element) if is_elemental_spell_element(element) => {
+            Some(HuppermageWaterHeartSpellKind::Elemental)
+        }
+        _ => None,
+    }
+}
+
 fn apply_search_resource_deltas(
     spell: &SearchCatalogEntry,
     state: &HuppermageState,
@@ -3140,6 +3292,7 @@ pub fn create_huppermage_state(
         used_spell_ids: vec![],
         active_passives,
         active_heart: None,
+        water_heart_last_spell_kind: None,
         halo_chatoyant_marks: 0,
         bq_max: resources.bq.max(resources.wp * 75),
         stored_bq: 0,
@@ -3475,20 +3628,22 @@ pub fn validate_spell_rules(
         }
     }
 
-    let max_casts_per_turn =
-        effective_max_casts_per_turn(spell.max_casts_per_turn, &spell.id, huppermage_state);
-    if let Some(max_casts) = max_casts_per_turn {
-        let current = casts_by_spell_id.get(&spell.id).copied().unwrap_or(0);
-        if current >= max_casts {
-            return Some(SimulationViolation {
-                violation_type: "castLimitExceeded".to_string(),
-                action_index,
-                spell_id: Some(spell.id.clone()),
-                required: Some(max_casts as i32),
-                available: Some(current as i32),
-                scope: Some("turn".to_string()),
-                message: format!("Spell '{}' exceeds max casts per turn.", spell.id),
-            });
+    if spell.max_casts_per_target.is_none() {
+        let max_casts_per_turn =
+            effective_max_casts_per_turn(spell.max_casts_per_turn, &spell.id, huppermage_state);
+        if let Some(max_casts) = max_casts_per_turn {
+            let current = casts_by_spell_id.get(&spell.id).copied().unwrap_or(0);
+            if current >= max_casts {
+                return Some(SimulationViolation {
+                    violation_type: "castLimitExceeded".to_string(),
+                    action_index,
+                    spell_id: Some(spell.id.clone()),
+                    required: Some(max_casts as i32),
+                    available: Some(current as i32),
+                    scope: Some("turn".to_string()),
+                    message: format!("Spell '{}' exceeds max casts per turn.", spell.id),
+                });
+            }
         }
     }
 
@@ -3724,6 +3879,7 @@ pub fn create_next_turn_state(
 ) -> CarriedTurnState {
     previous_huppermage.rune_ap_gains_this_turn = RuneTracker::default();
     previous_huppermage.active_heart = None;
+    previous_huppermage.water_heart_last_spell_kind = None;
     previous_huppermage.cooldowns_by_spell_id = age_cooldowns(
         &previous_huppermage.cooldowns_by_spell_id,
         casts_by_spell_id,
@@ -4670,6 +4826,9 @@ pub fn evaluate_candidate(
                 if let Some(heart) = heart {
                     turn_stats = apply_heart_stats(turn_stats, &heart, &huppermage);
                     huppermage.active_heart = Some(heart);
+                    if action_index == 0 && has_passive(&huppermage, "initiative-de-lame") {
+                        resources.ap += 2;
+                    }
                 }
             }
 
@@ -4744,6 +4903,14 @@ pub fn evaluate_candidate(
                 huppermage = consume_runes(huppermage, &consumed_runes);
                 huppermage = add_abundance(huppermage, (consumed_count as i32) * 15).state;
             }
+
+            apply_absorption_quadramentale_bq_gain(spell, &huppermage, action, &mut resources);
+            apply_extension_des_sens_bq_regeneration(
+                spell,
+                effective_cost,
+                &mut huppermage,
+                &mut resources,
+            );
 
             casts_by_spell_id.insert(
                 spell.id.clone(),
@@ -5605,6 +5772,60 @@ mod tests {
                 },
             })
         );
+    }
+
+    #[test]
+    fn candidate_evaluation_applies_absorption_quadramentale_removal_bq_gain() {
+        let request = parse_optimizer_request(
+            r#"{
+              "schemaVersion":1,
+              "engine":"hybrid",
+              "seed":"absorption-removal",
+              "duration":1,
+              "iterations":10,
+              "maxActionsPerTurn":1,
+              "maxPassiveCount":1,
+              "availableSpellIds":["removal"],
+              "availablePassiveIds":["absorption-quadramentale"],
+              "catalog":[
+                {
+                  "kind":"spell",
+                  "id":"removal",
+                  "element":"earth",
+                  "cost":{},
+                  "effects":[
+                    {"type":"resourceDelta","resource":"ap","amount":-1,"target":"target"},
+                    {"type":"statModifier","stat":"range","amount":-1,"target":"target"}
+                  ],
+                  "constraints":[],
+                  "tags":[]
+                },
+                {
+                  "kind":"passive",
+                  "id":"absorption-quadramentale",
+                  "effects":[],
+                  "constraints":[],
+                  "tags":["passive"]
+                }
+              ],
+              "character":{"id":"test","resources":{"ap":6,"mp":3,"wp":2,"bq":100}}
+            }"#,
+        )
+        .expect("request should parse");
+        let candidate = OptimizerCandidateInput {
+            passive_ids: vec!["absorption-quadramentale".to_string()],
+            plan: CandidatePlan {
+                turns: vec![CandidateTurn {
+                    actions: vec![action("removal")],
+                }],
+            },
+        };
+
+        let evaluation = evaluate_candidate(&request, &candidate, "candidate:absorption-removal")
+            .expect("candidate should evaluate");
+
+        assert!(evaluation.valid);
+        assert_eq!(evaluation.final_resources.bq, 240);
     }
 
     #[test]
@@ -6724,6 +6945,146 @@ mod tests {
     }
 
     #[test]
+    fn candidate_evaluation_applies_extension_des_sens_earth_heart_bq_regeneration() {
+        let request = parse_optimizer_request(
+            r#"{
+              "schemaVersion":1,
+              "engine":"hybrid",
+              "seed":"extension-earth",
+              "duration":1,
+              "iterations":10,
+              "maxActionsPerTurn":3,
+              "maxPassiveCount":1,
+              "availableSpellIds":["earth-rune","coeur-de-lumiere","ap-spell"],
+              "availablePassiveIds":["extension-des-sens"],
+              "catalog":[
+                {
+                  "kind":"spell",
+                  "id":"earth-rune",
+                  "element":"earth",
+                  "cost":{},
+                  "effects":[],
+                  "constraints":[],
+                  "tags":[]
+                },
+                {
+                  "kind":"spell",
+                  "id":"coeur-de-lumiere",
+                  "cost":{},
+                  "effects":[],
+                  "constraints":[],
+                  "tags":[]
+                },
+                {
+                  "kind":"spell",
+                  "id":"ap-spell",
+                  "cost":{"ap":2},
+                  "effects":[],
+                  "constraints":[],
+                  "tags":[]
+                },
+                {
+                  "kind":"passive",
+                  "id":"extension-des-sens",
+                  "effects":[],
+                  "constraints":[],
+                  "tags":["passive"]
+                }
+              ],
+              "character":{"id":"test","resources":{"ap":6,"mp":3,"wp":2,"bq":100}}
+            }"#,
+        )
+        .expect("request should parse");
+        let candidate = OptimizerCandidateInput {
+            passive_ids: vec!["extension-des-sens".to_string()],
+            plan: CandidatePlan {
+                turns: vec![CandidateTurn {
+                    actions: vec![
+                        action("earth-rune"),
+                        action("coeur-de-lumiere"),
+                        action("ap-spell"),
+                    ],
+                }],
+            },
+        };
+
+        let evaluation = evaluate_candidate(&request, &candidate, "candidate:extension-earth")
+            .expect("candidate should evaluate");
+
+        assert!(evaluation.valid);
+        assert_eq!(evaluation.final_resources.bq, 140);
+        assert_eq!(evaluation.final_huppermage.stored_bq, 75);
+    }
+
+    #[test]
+    fn candidate_evaluation_applies_initiative_de_lame_first_spell_heart_ap_gain() {
+        let request = parse_optimizer_request(
+            r#"{
+              "schemaVersion":1,
+              "engine":"hybrid",
+              "seed":"initiative-heart",
+              "duration":2,
+              "iterations":10,
+              "maxActionsPerTurn":1,
+              "maxPassiveCount":1,
+              "availableSpellIds":["earth-rune","coeur-de-lumiere"],
+              "availablePassiveIds":["initiative-de-lame"],
+              "catalog":[
+                {
+                  "kind":"spell",
+                  "id":"earth-rune",
+                  "element":"earth",
+                  "cost":{},
+                  "effects":[],
+                  "constraints":[],
+                  "tags":[]
+                },
+                {
+                  "kind":"spell",
+                  "id":"coeur-de-lumiere",
+                  "cost":{},
+                  "effects":[],
+                  "constraints":[],
+                  "tags":[]
+                },
+                {
+                  "kind":"passive",
+                  "id":"initiative-de-lame",
+                  "effects":[],
+                  "constraints":[],
+                  "tags":["passive"]
+                }
+              ],
+              "character":{"id":"test","resources":{"ap":6,"mp":3,"wp":2,"bq":100}}
+            }"#,
+        )
+        .expect("request should parse");
+        let candidate = OptimizerCandidateInput {
+            passive_ids: vec!["initiative-de-lame".to_string()],
+            plan: CandidatePlan {
+                turns: vec![
+                    CandidateTurn {
+                        actions: vec![action("earth-rune")],
+                    },
+                    CandidateTurn {
+                        actions: vec![action("coeur-de-lumiere")],
+                    },
+                ],
+            },
+        };
+
+        let evaluation = evaluate_candidate(&request, &candidate, "candidate:initiative-heart")
+            .expect("candidate should evaluate");
+
+        assert!(evaluation.valid);
+        assert_eq!(evaluation.final_resources.ap, 8);
+        assert_eq!(
+            evaluation.final_huppermage.active_heart,
+            Some(HuppermageHeart::Earth)
+        );
+    }
+
+    #[test]
     fn cycle_elementaire_restores_opposite_active_last_rune() {
         let mut state = create_huppermage_state(
             ResourcePool {
@@ -7061,9 +7422,28 @@ mod tests {
         )
         .is_none());
 
-        let turn_violation =
-            validate_spell_rules(&spell, 1, None, &casts, &BTreeMap::new(), &state)
-                .expect("turn limit should block");
+        assert!(validate_spell_rules(&spell, 1, None, &casts, &BTreeMap::new(), &state).is_none());
+
+        let turn_limited_spell = SpellRules {
+            id: "turn-limited".to_string(),
+            element: Some(Element::Fire),
+            is_deck_tracked: false,
+            max_casts_per_turn: Some(2),
+            max_casts_per_target: None,
+            cooldown_turns: None,
+            required_target: None,
+        };
+        let mut turn_limited_casts = BTreeMap::new();
+        turn_limited_casts.insert("turn-limited".to_string(), 2);
+        let turn_violation = validate_spell_rules(
+            &turn_limited_spell,
+            1,
+            None,
+            &turn_limited_casts,
+            &BTreeMap::new(),
+            &state,
+        )
+        .expect("turn limit should block");
         assert_eq!(turn_violation.scope, Some("turn".to_string()));
 
         let refraction_state = create_huppermage_state(
