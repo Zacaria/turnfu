@@ -2309,7 +2309,11 @@ struct SearchCatalogEntry {
     cost: SpellCost,
     constraints: Vec<Value>,
     effects: Vec<Value>,
-    tags: Vec<String>,
+    rules: SpellRules,
+    damage_effects: Vec<DamageEffect>,
+    passive_effects: Vec<PassiveEffect>,
+    action_weight: f64,
+    passive_weight: f64,
 }
 
 fn read_search_catalog(request: &OptimizerRequest) -> Result<Vec<SearchCatalogEntry>, String> {
@@ -2320,25 +2324,25 @@ fn read_search_catalog(request: &OptimizerRequest) -> Result<Vec<SearchCatalogEn
 
     Ok(entries
         .iter()
-        .map(|entry| SearchCatalogEntry {
-            id: read_string_field(entry, "id").unwrap_or_default(),
-            kind: read_string_field(entry, "kind").unwrap_or_default(),
-            element: entry
+        .map(|entry| {
+            let id = read_string_field(entry, "id").unwrap_or_default();
+            let kind = read_string_field(entry, "kind").unwrap_or_default();
+            let element = entry
                 .get("element")
                 .cloned()
-                .and_then(|value| serde_json::from_value::<Element>(value).ok()),
-            cost: read_spell_cost(entry.get("cost")),
-            constraints: entry
+                .and_then(|value| serde_json::from_value::<Element>(value).ok());
+            let cost = read_spell_cost(entry.get("cost"));
+            let constraints = entry
                 .get("constraints")
                 .and_then(Value::as_array)
                 .cloned()
-                .unwrap_or_default(),
-            effects: entry
+                .unwrap_or_default();
+            let effects = entry
                 .get("effects")
                 .and_then(Value::as_array)
                 .cloned()
-                .unwrap_or_default(),
-            tags: entry
+                .unwrap_or_default();
+            let tags: Vec<String> = entry
                 .get("tags")
                 .and_then(Value::as_array)
                 .map(|tags| {
@@ -2347,7 +2351,29 @@ fn read_search_catalog(request: &OptimizerRequest) -> Result<Vec<SearchCatalogEn
                         .map(str::to_string)
                         .collect()
                 })
-                .unwrap_or_default(),
+                .unwrap_or_default();
+            let rules = create_spell_rules_from_parts(&id, element.clone(), &constraints);
+            let damage_effects = collect_damage_effects_from_values(&effects);
+            let passive_effects = effects
+                .iter()
+                .filter_map(|effect| serde_json::from_value::<PassiveEffect>(effect.clone()).ok())
+                .collect::<Vec<_>>();
+            let action_weight = compute_action_search_weight_from_parts(&effects, &tags);
+            let passive_weight = compute_passive_search_weight_from_parts(&effects, &tags);
+
+            SearchCatalogEntry {
+                id,
+                kind,
+                element,
+                cost,
+                constraints,
+                effects,
+                rules,
+                damage_effects,
+                passive_effects,
+                action_weight,
+                passive_weight,
+            }
         })
         .collect())
 }
@@ -2409,11 +2435,7 @@ fn read_passive_entries_from_catalog(
         })
         .map(|entry| PassiveEntry {
             id: entry.id.clone(),
-            effects: entry
-                .effects
-                .iter()
-                .filter_map(|effect| serde_json::from_value::<PassiveEffect>(effect.clone()).ok())
-                .collect(),
+            effects: entry.passive_effects.clone(),
         })
         .collect()
 }
@@ -2437,17 +2459,24 @@ fn read_spell_cost(value: Option<&Value>) -> SpellCost {
 }
 
 fn create_spell_rules_from_search_entry(spell: &SearchCatalogEntry) -> SpellRules {
+    spell.rules.clone()
+}
+
+fn create_spell_rules_from_parts(
+    id: &str,
+    element: Option<Element>,
+    constraints: &[Value],
+) -> SpellRules {
     SpellRules {
-        id: spell.id.clone(),
-        element: read_element_from_search_entry(spell),
-        is_deck_tracked: spell.id != "coeur-de-lumiere"
-            && spell.id != "cycle-elementaire"
-            && spell.id != "feu-follet",
-        max_casts_per_turn: read_constraint_u32(&spell.constraints, "maxCastsPerTurn"),
-        max_casts_per_target: read_constraint_u32(&spell.constraints, "maxCastsPerTarget"),
-        cooldown_turns: read_constraint_u32(&spell.constraints, "cooldownTurns"),
-        required_target: spell
-            .constraints
+        id: id.to_string(),
+        element,
+        is_deck_tracked: id != "coeur-de-lumiere"
+            && id != "cycle-elementaire"
+            && id != "feu-follet",
+        max_casts_per_turn: read_constraint_u32(constraints, "maxCastsPerTurn"),
+        max_casts_per_target: read_constraint_u32(constraints, "maxCastsPerTarget"),
+        cooldown_turns: read_constraint_u32(constraints, "cooldownTurns"),
+        required_target: constraints
             .iter()
             .find(|constraint| {
                 read_string_field(constraint, "type").as_deref() == Some("requiresTarget")
@@ -2465,13 +2494,12 @@ fn read_constraint_u32(constraints: &[Value], constraint_type: &str) -> Option<u
         .map(|constraint| read_u32_field(Some(constraint), "value"))
 }
 
-fn read_element_from_search_entry(entry: &SearchCatalogEntry) -> Option<Element> {
-    entry.element.clone()
+fn collect_search_damage_effects(spell: &SearchCatalogEntry) -> Vec<DamageEffect> {
+    spell.damage_effects.clone()
 }
 
-fn collect_search_damage_effects(spell: &SearchCatalogEntry) -> Vec<DamageEffect> {
-    spell
-        .effects
+fn collect_damage_effects_from_values(effects: &[Value]) -> Vec<DamageEffect> {
+    effects
         .iter()
         .filter_map(|effect| {
             if read_string_field(effect, "type").as_deref() == Some("damage") {
@@ -3121,8 +3149,12 @@ fn get_passive_search_weight(
         return 1.0;
     };
 
+    passive.passive_weight
+}
+
+fn compute_passive_search_weight_from_parts(effects: &[Value], tags: &[String]) -> f64 {
     let mut weight = 1.0;
-    for effect in &passive.effects {
+    for effect in effects {
         if read_string_field(effect, "type").as_deref() == Some("statModifier")
             && read_string_field(effect, "stat").as_deref() == Some("damageInflictedPercent")
         {
@@ -3133,7 +3165,7 @@ fn get_passive_search_weight(
         }
     }
 
-    for tag in &passive.tags {
+    for tag in tags {
         if ["damage", "abondance", "bq", "heart"].contains(&tag.as_str()) {
             weight += 2.0;
         }
@@ -3253,8 +3285,12 @@ fn pick_weighted_action<'a>(
 }
 
 fn get_action_search_weight(spell: &SearchCatalogEntry) -> f64 {
+    spell.action_weight
+}
+
+fn compute_action_search_weight_from_parts(effects: &[Value], tags: &[String]) -> f64 {
     let mut weight = 1.0;
-    for effect in &spell.effects {
+    for effect in effects {
         if read_string_field(effect, "type").as_deref() == Some("damage") {
             weight += (read_f64_field(Some(effect), "base")
                 * read_f64_field(Some(effect), "times").max(1.0))
@@ -3270,7 +3306,7 @@ fn get_action_search_weight(spell: &SearchCatalogEntry) -> f64 {
         }
     }
 
-    for tag in &spell.tags {
+    for tag in tags {
         if ["light", "burst", "rune-consumer", "mark", "scales-with-bq"].contains(&tag.as_str()) {
             weight += 2.0;
         }
