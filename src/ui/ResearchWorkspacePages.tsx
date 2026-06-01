@@ -1454,6 +1454,21 @@ function PassiveMiniIcon({ label, passiveId }: { label: string; passiveId: strin
   );
 }
 
+function SavedComboNameCell({ combo }: { combo: SavedComboReference }) {
+  const sublimationItems = createSublimationPreviewItems(combo.sublimations);
+
+  return (
+    <div className="saved-combo-name-cell">
+      <b>{combo.name}</b>
+      {sublimationItems.length > 0 ? (
+        <div className="candidate-sublimation-row saved-combo-sublimations" aria-label="Sublimations sauvegardées">
+          {sublimationItems.map((item) => <SublimationMiniCard item={item} key={item.id} />)}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function SavedComboExactDurationTable({
   duration,
   onDeleteCombo,
@@ -1482,7 +1497,7 @@ function SavedComboExactDurationTable({
       </div>
       {rows.map((row) => (
         <div className="comparison-row" role="row" key={row.combo.id}>
-          <span>{row.combo.name}</span>
+          <SavedComboNameCell combo={row.combo} />
           <span>{row.totalDamage}</span>
           <span>{row.damagePerTurn}</span>
           <span>{row.actionCount}</span>
@@ -1543,7 +1558,7 @@ function SavedComboDurationGroups({
               </div>
               {groups[duration].map((row) => (
                 <div className="comparison-row" role="row" key={row.combo.id}>
-                  <span>{row.combo.name}</span>
+                  <SavedComboNameCell combo={row.combo} />
                   <span>{row.totalDamage}</span>
                   <span>{row.damagePerTurn}</span>
                   <span>{row.actionCount}</span>
