@@ -17,11 +17,14 @@ import {
   type RustWasmCandidateEvaluationResult,
   type RustWasmOptimizerCandidateBatchResponse,
   type RustWasmOptimizerRequest,
+  type RustWasmOptimizerSearchResponse,
+  type RustWasmOptimizerScoredCandidate,
   type RustWasmOptimizerWasmExports,
 } from "./rustWasmBackendTypes.ts";
 
 export type OptimizerExperimentEngineKind = "random" | "mcts" | "novelty" | "annealing" | "genetic" | "hybrid";
 export type OptimizerExperimentBackendKind = "typescript" | "rustWasm";
+export type RustWasmOracleMode = "perCandidate" | "finalTopCandidates" | "disabled";
 
 export type OptimizerExperimentBudget = {
   iterations: number;
@@ -58,6 +61,7 @@ export type OptimizerExperimentProgress = {
 export type OptimizerExperimentEngineResult = {
   engine: OptimizerExperimentEngineKind;
   backend?: OptimizerExperimentBackendKind;
+  rustWasmOracle?: RustWasmOracleMode;
   budget: OptimizerExperimentBudget;
   attempts: number;
   validCandidates: number;
@@ -81,6 +85,7 @@ export type OptimizerExperimentOptions = {
   duration: number;
   engines: OptimizerExperimentEngineKind[];
   backend?: OptimizerExperimentBackendKind;
+  rustWasmOracle?: RustWasmOracleMode;
   budget: OptimizerExperimentBudget;
   seed?: string;
   availableSpellIds?: string[];
@@ -137,8 +142,8 @@ type EngineContext = {
 
 type NormalizedExperimentOptions = Required<Pick<
   OptimizerExperimentOptions,
-  "duration" | "engines" | "backend" | "budget" | "seed" | "maxPassiveCount" | "maxSublimationCount" | "maxActionsPerTurn" | "progressInterval"
->> & Omit<OptimizerExperimentOptions, "duration" | "engines" | "backend" | "budget" | "seed" | "maxPassiveCount" | "maxSublimationCount" | "maxActionsPerTurn" | "progressInterval">;
+  "duration" | "engines" | "backend" | "rustWasmOracle" | "budget" | "seed" | "maxPassiveCount" | "maxSublimationCount" | "maxActionsPerTurn" | "progressInterval"
+>> & Omit<OptimizerExperimentOptions, "duration" | "engines" | "backend" | "rustWasmOracle" | "budget" | "seed" | "maxPassiveCount" | "maxSublimationCount" | "maxActionsPerTurn" | "progressInterval">;
 
 type OptimizerExperimentBackend = {
   kind: OptimizerExperimentBackendKind;
@@ -154,9 +159,15 @@ type EngineAccumulator = {
   invalidCandidates: number;
   bestCandidate?: OptimizerExperimentCandidate;
   topCandidates: Map<string, OptimizerExperimentCandidate>;
+  rustWasmUnverifiedBestCandidate?: RustWasmUnverifiedCandidate;
+  rustWasmUnverifiedTopCandidates?: Map<string, RustWasmUnverifiedCandidate>;
   progress: OptimizerExperimentProgress[];
   metrics: Record<string, number>;
 };
+
+type RankedCandidate = Pick<OptimizerExperimentCandidate, "id" | "passiveIds" | "sublimationIds" | "plan" | "score">;
+
+type RustWasmUnverifiedCandidate = RankedCandidate;
 
 type CandidateSampler = {
   next(): OptimizerExperimentCandidateInput;
@@ -300,7 +311,10 @@ function runRustWasmOptimizerExperiment(normalized: NormalizedExperimentOptions)
     throw createUnsupportedOptimizerBackendError("rustWasm", normalized);
   }
 
-  const engineResult = withBackendMetadata(runRustWasmHybridOptimizerEngine(normalized), "rustWasm");
+  const engineResult = {
+    ...withBackendMetadata(runRustWasmHybridOptimizerEngine(normalized), "rustWasm"),
+    rustWasmOracle: normalized.rustWasmOracle,
+  };
   return {
     seed: normalized.seed,
     duration: normalized.duration,
@@ -319,6 +333,10 @@ function runRustWasmHybridOptimizerEngine(normalized: NormalizedExperimentOption
     sampler: createUnavailableCandidateSampler(),
   };
   const accumulator = createEngineAccumulator("hybrid", normalized.budget);
+  if (normalized.rustWasmOracle !== "perCandidate" && wasm.run_hybrid_search_json) {
+    return runRustWasmHybridSearchEngine(wasm, normalized, context, accumulator);
+  }
+
   let batchIndex = 0;
 
   while (accumulator.attempts < normalized.budget.iterations) {
@@ -344,12 +362,54 @@ function runRustWasmHybridOptimizerEngine(normalized: NormalizedExperimentOption
 
     const candidates = response.candidates.slice(0, Math.max(0, normalized.budget.iterations - accumulator.attempts));
     const evaluations = evaluateRustWasmCandidateBatch(wasm, request, candidates, batchIndex);
-    recordRustWasmCandidateEvaluations(context, accumulator, candidates, evaluations);
+    if (normalized.rustWasmOracle === "perCandidate") {
+      recordRustWasmCandidateEvaluationsWithOracle(context, accumulator, candidates, evaluations);
+    } else {
+      recordRustWasmCandidateEvaluationsWithoutOracle(context, accumulator, candidates, evaluations);
+    }
 
     if (response.candidates.length === 0) {
       break;
     }
     batchIndex += 1;
+  }
+
+  if (normalized.rustWasmOracle === "finalTopCandidates") {
+    verifyRustWasmUnverifiedTopCandidates(context, accumulator);
+  }
+
+  return finalizeEngineResult(context, accumulator);
+}
+
+function runRustWasmHybridSearchEngine(
+  wasm: RustWasmOptimizerWasmExports,
+  normalized: NormalizedExperimentOptions,
+  context: EngineContext,
+  accumulator: EngineAccumulator,
+): OptimizerExperimentEngineResult {
+  const request = createRustWasmOptimizerRequest({
+    ...normalized,
+    engines: ["hybrid"],
+    budget: normalized.budget,
+  });
+  const response = parseRustWasmSearchResponse(wasm.run_hybrid_search_json!(JSON.stringify(request)));
+  if (!response.supported) {
+    throw createUnsupportedOptimizerBackendError("rustWasm", normalized);
+  }
+
+  accumulator.attempts = Math.min(response.attempts, normalized.budget.iterations);
+  accumulator.validCandidates = response.validCandidates;
+  accumulator.invalidCandidates = response.invalidCandidates;
+  accumulator.rustWasmUnverifiedTopCandidates = new Map();
+  mergeNumericMetrics(accumulator.metrics, response.metrics);
+  accumulator.metrics.rustWasmBackendSearchCalls = (accumulator.metrics.rustWasmBackendSearchCalls ?? 0) + 1;
+
+  for (const candidate of response.topCandidates) {
+    recordRustWasmUnverifiedTopCandidate(context, accumulator, candidate);
+  }
+
+  if (normalized.rustWasmOracle === "finalTopCandidates") {
+    verifyRustWasmUnverifiedTopCandidates(context, accumulator);
   }
 
   return finalizeEngineResult(context, accumulator);
@@ -370,15 +430,24 @@ function parseRustWasmCandidateBatchResponse(responseJson: string): RustWasmOpti
   return parsed;
 }
 
+function parseRustWasmSearchResponse(responseJson: string): RustWasmOptimizerSearchResponse {
+  const parsed = JSON.parse(responseJson) as RustWasmOptimizerSearchResponse;
+  if (!Array.isArray(parsed.topCandidates)) {
+    throw new Error("Rust/WASM optimizer backend returned an invalid search response.");
+  }
+  return parsed;
+}
+
 function evaluateRustWasmCandidateBatch(
   wasm: RustWasmOptimizerWasmExports,
   request: RustWasmOptimizerRequest,
-  candidates: Array<{ passiveIds?: string[]; plan: ComboPlan }>,
+  candidates: Array<{ passiveIds?: string[]; sublimationIds?: string[]; plan: ComboPlan }>,
   batchIndex: number,
 ): RustWasmCandidateEvaluationResult[] {
   const inputs: RustWasmCandidateEvaluationInput[] = candidates.map((candidate, candidateIndex) => ({
     id: `batch:${batchIndex}:candidate:${candidateIndex}`,
     passiveIds: candidate.passiveIds,
+    sublimationIds: candidate.sublimationIds,
     plan: candidate.plan,
   }));
   const parsed = JSON.parse(wasm.evaluate_candidate_batch_json(
@@ -394,10 +463,10 @@ function evaluateRustWasmCandidateBatch(
   return parsed;
 }
 
-function recordRustWasmCandidateEvaluations(
+function recordRustWasmCandidateEvaluationsWithOracle(
   context: EngineContext,
   accumulator: EngineAccumulator,
-  candidates: Array<{ passiveIds?: string[]; plan: ComboPlan }>,
+  candidates: Array<{ passiveIds?: string[]; sublimationIds?: string[]; plan: ComboPlan }>,
   rustEvaluations: RustWasmCandidateEvaluationResult[],
 ) {
   for (const [candidateIndex, candidate] of candidates.entries()) {
@@ -407,6 +476,7 @@ function recordRustWasmCandidateEvaluations(
 
     accumulator.attempts += 1;
     accumulator.metrics.rustWasmCandidateEvaluations = (accumulator.metrics.rustWasmCandidateEvaluations ?? 0) + 1;
+    accumulator.metrics.rustWasmOracleCandidateChecks = (accumulator.metrics.rustWasmOracleCandidateChecks ?? 0) + 1;
 
     const rustEvaluation = rustEvaluations[candidateIndex];
     const oracleEvaluation = context.evaluator.evaluateDetailed(candidate);
@@ -429,6 +499,103 @@ function recordRustWasmCandidateEvaluations(
 
     if (accumulator.attempts % context.options.progressInterval === 0) {
       recordProgress(context, accumulator);
+    }
+  }
+}
+
+function recordRustWasmCandidateEvaluationsWithoutOracle(
+  context: EngineContext,
+  accumulator: EngineAccumulator,
+  candidates: Array<{ passiveIds?: string[]; sublimationIds?: string[]; plan: ComboPlan }>,
+  rustEvaluations: RustWasmCandidateEvaluationResult[],
+) {
+  accumulator.rustWasmUnverifiedTopCandidates ??= new Map();
+
+  for (const [candidateIndex, candidate] of candidates.entries()) {
+    if (accumulator.attempts >= context.options.budget.iterations || context.options.signal?.aborted) {
+      break;
+    }
+
+    accumulator.attempts += 1;
+    accumulator.metrics.rustWasmCandidateEvaluations = (accumulator.metrics.rustWasmCandidateEvaluations ?? 0) + 1;
+
+    const rustEvaluation = rustEvaluations[candidateIndex];
+    if (rustEvaluation.valid && rustEvaluation.score) {
+      const normalizedCandidate = normalizeCandidate(candidate);
+      recordRustWasmUnverifiedTopCandidate(context, accumulator, {
+        id: serializeExperimentCandidate(normalizedCandidate),
+        passiveIds: normalizedCandidate.passiveIds,
+        sublimationIds: normalizedCandidate.sublimationIds,
+        plan: normalizedCandidate.plan,
+        score: rustEvaluation.score,
+      });
+      accumulator.validCandidates += 1;
+      accumulator.metrics.rustWasmUnverifiedValidCandidates = (accumulator.metrics.rustWasmUnverifiedValidCandidates ?? 0) + 1;
+    } else {
+      accumulator.invalidCandidates += 1;
+    }
+
+    if (accumulator.attempts % context.options.progressInterval === 0) {
+      recordProgress(context, accumulator);
+    }
+  }
+}
+
+function recordRustWasmUnverifiedTopCandidate(
+  context: EngineContext,
+  accumulator: EngineAccumulator,
+  candidate: RustWasmOptimizerScoredCandidate,
+) {
+  accumulator.rustWasmUnverifiedTopCandidates ??= new Map();
+  const result = {
+    id: candidate.id,
+    passiveIds: [...candidate.passiveIds].sort(),
+    sublimationIds: [...(candidate.sublimationIds ?? [])].sort(),
+    plan: {
+      turns: candidate.plan.turns.map(cloneTurn),
+    },
+    score: candidate.score,
+  };
+  addRustWasmUnverifiedTopCandidate(context, accumulator, result);
+  if (!accumulator.rustWasmUnverifiedBestCandidate || compareRankedCandidates(result, accumulator.rustWasmUnverifiedBestCandidate) < 0) {
+    accumulator.rustWasmUnverifiedBestCandidate = result;
+    accumulator.metrics.rustWasmUnverifiedBestScore = result.score.score;
+    recordProgress(context, accumulator);
+  }
+}
+
+function verifyRustWasmUnverifiedTopCandidates(
+  context: EngineContext,
+  accumulator: EngineAccumulator,
+) {
+  const candidates = [...(accumulator.rustWasmUnverifiedTopCandidates?.values() ?? [])].sort(compareRankedCandidates);
+  accumulator.metrics.rustWasmFinalOracleCandidates = candidates.length;
+
+  for (const candidate of candidates) {
+    const oracleEvaluation = context.evaluator.evaluateDetailed({
+      passiveIds: candidate.passiveIds,
+      sublimationIds: candidate.sublimationIds,
+      plan: candidate.plan,
+    });
+
+    if (!oracleEvaluation.result) {
+      accumulator.metrics.rustWasmFinalOracleInvalid = (accumulator.metrics.rustWasmFinalOracleInvalid ?? 0) + 1;
+      continue;
+    }
+
+    accumulator.metrics.rustWasmFinalOracleValid = (accumulator.metrics.rustWasmFinalOracleValid ?? 0) + 1;
+    accumulator.metrics.rustWasmFinalOracleMaxScoreDelta = Math.max(
+      accumulator.metrics.rustWasmFinalOracleMaxScoreDelta ?? 0,
+      Math.abs(candidate.score.score - oracleEvaluation.result.score.score),
+    );
+    accumulator.metrics.rustWasmFinalOracleMaxTotalDamageDelta = Math.max(
+      accumulator.metrics.rustWasmFinalOracleMaxTotalDamageDelta ?? 0,
+      Math.abs(candidate.score.totalDamage - oracleEvaluation.result.score.totalDamage),
+    );
+
+    addTopCandidate(context, accumulator, oracleEvaluation.result);
+    if (!accumulator.bestCandidate || compareCandidates(oracleEvaluation.result, accumulator.bestCandidate) < 0) {
+      accumulator.bestCandidate = oracleEvaluation.result;
     }
   }
 }
@@ -1922,7 +2089,7 @@ function recordProgress(context: EngineContext, accumulator: EngineAccumulator) 
     attempts: accumulator.attempts,
     validCandidates: accumulator.validCandidates,
     invalidCandidates: accumulator.invalidCandidates,
-    bestScore: accumulator.bestCandidate?.score.score,
+    bestScore: accumulator.bestCandidate?.score.score ?? accumulator.rustWasmUnverifiedBestCandidate?.score.score,
     bestCandidate: accumulator.bestCandidate,
     topCandidates: [...accumulator.topCandidates.values()].sort(compareCandidates),
     metrics: {
@@ -3094,6 +3261,36 @@ function addTopCandidate(
   }
 }
 
+function addRustWasmUnverifiedTopCandidate(
+  context: EngineContext,
+  accumulator: EngineAccumulator,
+  candidate: RustWasmUnverifiedCandidate,
+) {
+  const topCandidates = accumulator.rustWasmUnverifiedTopCandidates;
+  if (!topCandidates) {
+    return;
+  }
+
+  const maxCandidates = clampInteger(context.options.maxCandidates ?? 20, 1, 200);
+  const existing = topCandidates.get(candidate.id);
+  if (existing && compareRankedCandidates(candidate, existing) >= 0) {
+    return;
+  }
+
+  let candidateToRemove: RustWasmUnverifiedCandidate | undefined;
+  if (!existing && topCandidates.size >= maxCandidates) {
+    candidateToRemove = findWorstRankedCandidate(topCandidates);
+    if (candidateToRemove && compareRankedCandidates(candidate, candidateToRemove) >= 0) {
+      return;
+    }
+  }
+
+  topCandidates.set(candidate.id, candidate);
+  if (candidateToRemove) {
+    topCandidates.delete(candidateToRemove.id);
+  }
+}
+
 function findWorstTopCandidate(
   candidates: Map<string, OptimizerExperimentCandidate>,
 ): OptimizerExperimentCandidate | undefined {
@@ -3106,13 +3303,26 @@ function findWorstTopCandidate(
   return worst;
 }
 
+function findWorstRankedCandidate<T extends RankedCandidate>(candidates: Map<string, T>): T | undefined {
+  let worst: T | undefined;
+  for (const candidate of candidates.values()) {
+    if (!worst || compareRankedCandidates(candidate, worst) > 0) {
+      worst = candidate;
+    }
+  }
+  return worst;
+}
+
 function normalizeExperimentOptions(options: OptimizerExperimentOptions): NormalizedExperimentOptions {
+  const backend = options.backend ?? "typescript";
+  const maxIterations = backend === "rustWasm" ? 1_000_000_000 : 1_000_000;
   return {
     ...options,
     duration: clampInteger(options.duration, 1, 3),
     engines: options.engines.length > 0 ? options.engines : ["random"],
-    backend: options.backend ?? "typescript",
-    budget: { iterations: clampInteger(options.budget.iterations, 1, 1_000_000) },
+    backend,
+    rustWasmOracle: options.rustWasmOracle ?? "perCandidate",
+    budget: { iterations: clampInteger(options.budget.iterations, 1, maxIterations) },
     seed: options.seed ?? "optimizer-experiment",
     maxPassiveCount: clampInteger(options.maxPassiveCount ?? 0, 0, 6),
     maxSublimationCount: clampInteger(options.maxSublimationCount ?? 0, 0, 12),
@@ -3538,6 +3748,10 @@ function pickBestCandidate(candidates: OptimizerExperimentCandidate[]): Optimize
 }
 
 function compareCandidates(left: OptimizerExperimentCandidate, right: OptimizerExperimentCandidate): number {
+  return compareRankedCandidates(left, right);
+}
+
+function compareRankedCandidates(left: RankedCandidate, right: RankedCandidate): number {
   const scoreDifference = right.score.score - left.score.score;
   if (scoreDifference !== 0) {
     return scoreDifference;
@@ -3553,7 +3767,7 @@ function compareCandidates(left: OptimizerExperimentCandidate, right: OptimizerE
     return sublimationCountDifference;
   }
 
-  const actionCountDifference = countCandidateActions(left) - countCandidateActions(right);
+  const actionCountDifference = countRankedCandidateActions(left) - countRankedCandidateActions(right);
   if (actionCountDifference !== 0) {
     return actionCountDifference;
   }
@@ -3562,6 +3776,10 @@ function compareCandidates(left: OptimizerExperimentCandidate, right: OptimizerE
 }
 
 function countCandidateActions(candidate: OptimizerExperimentCandidate): number {
+  return countRankedCandidateActions(candidate);
+}
+
+function countRankedCandidateActions(candidate: RankedCandidate): number {
   return candidate.plan.turns.reduce((total, turn) => total + turn.actions.length, 0);
 }
 

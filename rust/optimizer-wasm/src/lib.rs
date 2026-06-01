@@ -504,6 +504,21 @@ pub struct HybridCandidateBatchResponse {
     pub metrics: BTreeMap<String, u32>,
 }
 
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HybridSearchResponse {
+    pub schema_version: u32,
+    pub backend: String,
+    pub supported: bool,
+    pub engine: String,
+    pub seed: String,
+    pub attempts: u32,
+    pub valid_candidates: u32,
+    pub invalid_candidates: u32,
+    pub top_candidates: Vec<ScoredTopCandidateEntry>,
+    pub metrics: BTreeMap<String, u32>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CandidateEvaluationViolation {
@@ -542,6 +557,15 @@ pub struct CandidateScoreBreakdown {
     pub score: f64,
     pub total_damage: f64,
     pub damage_by_resolved_element: DamageByElement,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ScoredTopCandidateEntry {
+    pub id: String,
+    pub passive_ids: Vec<String>,
+    pub plan: CandidatePlan,
+    pub score: CandidateScoreBreakdown,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -2210,32 +2234,22 @@ fn read_request_huppermage(
     state
 }
 
-fn read_passive_entries(request: &OptimizerRequest, passive_ids: &[String]) -> Vec<PassiveEntry> {
-    let Some(entries) = request.catalog.as_array() else {
-        return vec![];
-    };
-
-    entries
+fn read_passive_entries_from_catalog(
+    catalog: &[SearchCatalogEntry],
+    passive_ids: &[String],
+) -> Vec<PassiveEntry> {
+    catalog
         .iter()
         .filter(|entry| {
-            read_string_field(entry, "kind").as_deref() == Some("passive")
-                && read_string_field(entry, "id")
-                    .is_some_and(|id| passive_ids.iter().any(|passive_id| passive_id == &id))
+            entry.kind == "passive" && passive_ids.iter().any(|passive_id| passive_id == &entry.id)
         })
         .map(|entry| PassiveEntry {
-            id: read_string_field(entry, "id").unwrap_or_default(),
+            id: entry.id.clone(),
             effects: entry
-                .get("effects")
-                .and_then(Value::as_array)
-                .map(|effects| {
-                    effects
-                        .iter()
-                        .filter_map(|effect| {
-                            serde_json::from_value::<PassiveEffect>(effect.clone()).ok()
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
+                .effects
+                .iter()
+                .filter_map(|effect| serde_json::from_value::<PassiveEffect>(effect.clone()).ok())
+                .collect(),
         })
         .collect()
 }
@@ -4707,6 +4721,148 @@ pub fn generate_hybrid_candidates(
     })
 }
 
+pub fn run_hybrid_search(request: &OptimizerRequest) -> Result<HybridSearchResponse, String> {
+    let mut metrics = BTreeMap::new();
+    let supported = request.engine == "hybrid";
+    if !supported {
+        return Ok(HybridSearchResponse {
+            schema_version: request.schema_version,
+            backend: "rustWasm".to_string(),
+            supported,
+            engine: request.engine.clone(),
+            seed: request.seed.clone(),
+            attempts: 0,
+            valid_candidates: 0,
+            invalid_candidates: 0,
+            top_candidates: vec![],
+            metrics,
+        });
+    }
+
+    let catalog = read_search_catalog(request)?;
+    let actions = get_search_actions(request, &catalog);
+    if actions.is_empty() {
+        return Err("Cannot run Rust hybrid search without available spells.".to_string());
+    }
+    let spells_by_id = catalog
+        .iter()
+        .filter(|entry| entry.kind == "spell")
+        .map(|entry| (entry.id.as_str(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let max_candidates = request.max_candidates.unwrap_or(20).clamp(1, 200) as usize;
+    let mut rng = SeededRandom::new(&format!("{}:hybrid:run", request.seed));
+    let mut attempts = 0;
+    let mut valid_candidates = 0;
+    let mut invalid_candidates = 0;
+    let mut top_candidates = Vec::new();
+
+    for _ in 0..request.iterations {
+        let use_resource_aware = rng.chance(0.12);
+        let candidate = if use_resource_aware {
+            *metrics
+                .entry("hybridResourceAwareCandidates".to_string())
+                .or_insert(0) += 1;
+            create_resource_aware_candidate(request, &catalog, &actions, &mut rng)
+        } else {
+            create_random_candidate(request, &catalog, &actions, &mut rng)
+        };
+        let candidate = normalize_candidate(candidate);
+        let id = encode_candidate(&candidate);
+        attempts += 1;
+
+        let evaluation =
+            evaluate_candidate_with_catalog(request, &candidate, &id, &catalog, &spells_by_id)?;
+        if evaluation.valid {
+            valid_candidates += 1;
+            if let Some(score) = evaluation.score {
+                add_scored_top_candidate(
+                    &mut top_candidates,
+                    max_candidates,
+                    ScoredTopCandidateEntry {
+                        id,
+                        passive_ids: candidate.passive_ids,
+                        plan: candidate.plan,
+                        score,
+                    },
+                );
+            }
+        } else {
+            invalid_candidates += 1;
+        }
+    }
+
+    metrics.insert("rustWasmGeneratedCandidates".to_string(), attempts);
+    metrics.insert("rustWasmCandidateEvaluations".to_string(), attempts);
+
+    Ok(HybridSearchResponse {
+        schema_version: request.schema_version,
+        backend: "rustWasm".to_string(),
+        supported,
+        engine: request.engine.clone(),
+        seed: request.seed.clone(),
+        attempts,
+        valid_candidates,
+        invalid_candidates,
+        top_candidates,
+        metrics,
+    })
+}
+
+fn add_scored_top_candidate(
+    top_candidates: &mut Vec<ScoredTopCandidateEntry>,
+    max_candidates: usize,
+    candidate: ScoredTopCandidateEntry,
+) {
+    if let Some(existing_index) = top_candidates
+        .iter()
+        .position(|existing| existing.id == candidate.id)
+    {
+        if compare_scored_top_candidates(&candidate, &top_candidates[existing_index])
+            != std::cmp::Ordering::Less
+        {
+            return;
+        }
+        top_candidates[existing_index] = candidate;
+        top_candidates.sort_by(compare_scored_top_candidates);
+        return;
+    }
+
+    if top_candidates.len() < max_candidates {
+        top_candidates.push(candidate);
+        top_candidates.sort_by(compare_scored_top_candidates);
+        return;
+    }
+
+    let Some(worst) = top_candidates.last() else {
+        return;
+    };
+    if compare_scored_top_candidates(&candidate, worst) != std::cmp::Ordering::Less {
+        return;
+    }
+
+    top_candidates.pop();
+    top_candidates.push(candidate);
+    top_candidates.sort_by(compare_scored_top_candidates);
+}
+
+fn compare_scored_top_candidates(
+    left: &ScoredTopCandidateEntry,
+    right: &ScoredTopCandidateEntry,
+) -> std::cmp::Ordering {
+    right
+        .score
+        .score
+        .partial_cmp(&left.score.score)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then_with(|| left.passive_ids.len().cmp(&right.passive_ids.len()))
+        .then_with(|| count_plan_actions(&left.plan).cmp(&count_plan_actions(&right.plan)))
+        .then_with(|| left.id.cmp(&right.id))
+}
+
+fn count_plan_actions(plan: &CandidatePlan) -> usize {
+    plan.turns.iter().map(|turn| turn.actions.len()).sum()
+}
+
 pub fn evaluate_candidate(
     request: &OptimizerRequest,
     candidate: &OptimizerCandidateInput,
@@ -4718,10 +4874,20 @@ pub fn evaluate_candidate(
         .filter(|entry| entry.kind == "spell")
         .map(|entry| (entry.id.as_str(), entry))
         .collect::<BTreeMap<_, _>>();
+    evaluate_candidate_with_catalog(request, candidate, candidate_id, &catalog, &spells_by_id)
+}
+
+fn evaluate_candidate_with_catalog<'a>(
+    request: &OptimizerRequest,
+    candidate: &OptimizerCandidateInput,
+    candidate_id: &str,
+    catalog: &'a [SearchCatalogEntry],
+    spells_by_id: &BTreeMap<&'a str, &'a SearchCatalogEntry>,
+) -> Result<CandidateEvaluationResult, String> {
     let mut base_resources = read_request_resources(&request.character);
     let mut base_stats = read_request_stats(&request.character);
     let active_passive_ids = candidate.passive_ids.clone();
-    let passives = read_passive_entries(request, &active_passive_ids);
+    let passives = read_passive_entries_from_catalog(catalog, &active_passive_ids);
     let mut huppermage =
         read_request_huppermage(&request.character, base_resources, active_passive_ids);
     let initial_passives =
@@ -4978,16 +5144,25 @@ pub fn evaluate_candidate_batch(
     request: &OptimizerRequest,
     candidates: &[CandidateEvaluationInput],
 ) -> Result<Vec<CandidateEvaluationResult>, String> {
+    let catalog = read_search_catalog(request)?;
+    let spells_by_id = catalog
+        .iter()
+        .filter(|entry| entry.kind == "spell")
+        .map(|entry| (entry.id.as_str(), entry))
+        .collect::<BTreeMap<_, _>>();
+
     candidates
         .iter()
         .map(|candidate| {
-            evaluate_candidate(
+            evaluate_candidate_with_catalog(
                 request,
                 &OptimizerCandidateInput {
                     passive_ids: candidate.passive_ids.clone(),
                     plan: candidate.plan.clone(),
                 },
                 &candidate.id,
+                &catalog,
+                &spells_by_id,
             )
         })
         .collect()
@@ -5081,6 +5256,18 @@ pub fn generate_hybrid_candidates_json(request_json: &str) -> Result<String, JsV
     serde_json::to_string(&result).map_err(|error| {
         JsValue::from_str(&format!(
             "Failed to serialize Rust hybrid candidates: {error}"
+        ))
+    })
+}
+
+#[wasm_bindgen]
+pub fn run_hybrid_search_json(request_json: &str) -> Result<String, JsValue> {
+    let request = parse_optimizer_request(request_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid optimizer request JSON: {error}")))?;
+    let result = run_hybrid_search(&request).map_err(|error| JsValue::from_str(&error))?;
+    serde_json::to_string(&result).map_err(|error| {
+        JsValue::from_str(&format!(
+            "Failed to serialize Rust hybrid search response: {error}"
         ))
     })
 }
@@ -6399,6 +6586,30 @@ mod tests {
             .queue
             .iter()
             .all(|neighbor| neighbor.plan.turns.len() == candidate.plan.turns.len()));
+    }
+
+    #[test]
+    fn runs_hybrid_search_and_returns_scored_top_candidates() {
+        let mut request = transformation_request();
+        request.iterations = 100;
+        request.max_candidates = Some(3);
+
+        let result = run_hybrid_search(&request).expect("hybrid search should run");
+
+        assert!(result.supported);
+        assert_eq!(result.attempts, 100);
+        assert_eq!(result.valid_candidates + result.invalid_candidates, 100);
+        assert!(!result.top_candidates.is_empty());
+        assert!(result.top_candidates.len() <= 3);
+        assert!(result
+            .top_candidates
+            .windows(2)
+            .all(|pair| compare_scored_top_candidates(&pair[0], &pair[1])
+                != std::cmp::Ordering::Greater));
+        assert_eq!(
+            result.metrics.get("rustWasmCandidateEvaluations"),
+            Some(&100)
+        );
     }
 
     #[test]

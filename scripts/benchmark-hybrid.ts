@@ -8,6 +8,7 @@ import {
   configureRustWasmOptimizerBackend,
   runOptimizerExperiment,
   type OptimizerExperimentBackendKind,
+  type RustWasmOracleMode,
 } from "../src/core/optimizer/index.ts";
 import { createResources } from "../src/core/simulation/index.ts";
 import type { ComboSimulationOptions, SimulatedCharacter } from "../src/core/simulation/types.ts";
@@ -81,6 +82,7 @@ const requestedScenarioIds = new Set(readOptionValues("--scenario"));
 const requestedBudgets = readOptionValues("--budget").map((value) => Number.parseInt(value, 10));
 const requestedSeeds = readOptionValues("--seed");
 const requestedBackends = readBackendOptions();
+const requestedRustWasmOracle = readRustWasmOracleOption();
 const budgets = requestedBudgets.length > 0 ? requestedBudgets : [16, 100, 1_000];
 const seeds = requestedSeeds.length > 0 ? requestedSeeds : ["a", "b", "c"];
 const selectedScenarios = requestedScenarioIds.size > 0
@@ -104,6 +106,7 @@ for (const scenario of selectedScenarios) {
           duration: scenario.duration,
           engines: ["hybrid"],
           backend,
+          rustWasmOracle: backend === "rustWasm" ? requestedRustWasmOracle : undefined,
           seed: `bench-${scenario.id}-${seed}`,
           budget: { iterations: budget },
           maxActionsPerTurn: scenario.maxActionsPerTurn,
@@ -118,9 +121,12 @@ for (const scenario of selectedScenarios) {
         return {
           seed,
           backend: engine.backend,
+          rustWasmOracle: backend === "rustWasm" ? requestedRustWasmOracle : undefined,
           elapsedMs: round(elapsedMs),
           attemptsPerSecond: round(engine.attempts / Math.max(0.001, elapsedMs / 1_000)),
-          score: round(result.bestCandidate?.score.score ?? 0),
+          score: round(result.bestCandidate?.score.score ?? engine.metrics.rustWasmUnverifiedBestScore ?? 0),
+          tsVerifiedScore: result.bestCandidate ? round(result.bestCandidate.score.score) : undefined,
+          rustUnverifiedScore: engine.metrics.rustWasmUnverifiedBestScore === undefined ? undefined : round(engine.metrics.rustWasmUnverifiedBestScore),
           validRate: round(engine.validCandidates / Math.max(1, engine.attempts), 4),
           attempts: engine.attempts,
           valid: engine.validCandidates,
@@ -134,6 +140,7 @@ for (const scenario of selectedScenarios) {
       console.log(JSON.stringify({
         scenario: scenario.id,
         backend,
+        rustWasmOracle: backend === "rustWasm" ? requestedRustWasmOracle : undefined,
         budget,
         elapsedMs: round(elapsedMs),
         attemptsPerSecond: round(rows.reduce((total, row) => total + row.attempts, 0) / Math.max(0.001, elapsedMs / 1_000)),
@@ -145,6 +152,24 @@ for (const scenario of selectedScenarios) {
       }));
     }
   }
+}
+
+function readRustWasmOracleOption(): RustWasmOracleMode {
+  if (process.argv.includes("--no-oracle")) {
+    return "finalTopCandidates";
+  }
+
+  const values = readOptionValues("--rust-wasm-oracle");
+  if (values.length === 0) {
+    return "perCandidate";
+  }
+
+  const value = values.at(-1);
+  if (value === "perCandidate" || value === "finalTopCandidates" || value === "disabled") {
+    return value;
+  }
+
+  throw new Error(`Unknown Rust/WASM oracle mode '${value}'. Expected 'perCandidate', 'finalTopCandidates', or 'disabled'.`);
 }
 
 function readOptionValues(name: string): string[] {

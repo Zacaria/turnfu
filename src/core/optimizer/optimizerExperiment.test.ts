@@ -214,6 +214,110 @@ test("runs configured Rust/WASM hybrid backend through the Rust batch evaluator 
   }
 });
 
+test("can skip per-candidate Rust/WASM oracle checks and verify final top candidates through TypeScript", () => {
+  configureRustWasmOptimizerBackend({
+    generate_hybrid_candidates_json() {
+      throw new Error("direct Rust/WASM search should not request candidate batches");
+    },
+    run_hybrid_search_json(requestJson) {
+      const request = JSON.parse(requestJson);
+      return JSON.stringify({
+        schemaVersion: 1,
+        backend: "rustWasm",
+        supported: request.engine === "hybrid",
+        engine: request.engine,
+        seed: request.seed,
+        attempts: 2,
+        validCandidates: 2,
+        invalidCandidates: 0,
+        topCandidates: [
+          {
+            id: "::burst|",
+            passiveIds: [],
+            plan: {
+              turns: [
+                { actions: [{ spellId: "burst" }] },
+                { actions: [] },
+              ],
+            },
+            score: {
+              score: 999,
+              totalDamage: 999,
+              damageByResolvedElement: {
+                fire: 999,
+                water: 0,
+                earth: 0,
+                air: 0,
+                light: 0,
+                neutral: 0,
+              },
+            },
+          },
+          {
+            id: "::hit|hit",
+            passiveIds: [],
+            plan: {
+              turns: [
+                { actions: [{ spellId: "hit" }] },
+                { actions: [{ spellId: "hit" }] },
+              ],
+            },
+            score: {
+              score: 40,
+              totalDamage: 40,
+              damageByResolvedElement: {
+                fire: 40,
+                water: 0,
+                earth: 0,
+                air: 0,
+                light: 0,
+                neutral: 0,
+              },
+            },
+          },
+        ],
+        metrics: {
+          rustWasmGeneratedCandidates: 2,
+          rustWasmCandidateEvaluations: 2,
+        },
+      });
+    },
+    evaluate_candidate_batch_json() {
+      throw new Error("direct Rust/WASM search should not request candidate evaluations");
+    },
+  });
+
+  try {
+    const result = runOptimizerExperiment({
+      catalog,
+      character,
+      duration: 2,
+      availableSpellIds: ["setup", "hit", "burst"],
+      engines: ["hybrid"],
+      backend: "rustWasm",
+      rustWasmOracle: "finalTopCandidates",
+      seed: "rust-backend-no-candidate-oracle",
+      budget: { iterations: 2 },
+      maxActionsPerTurn: 1,
+    });
+
+    const engine = result.engineResults[0];
+    assert.equal(engine?.backend, "rustWasm");
+    assert.equal(engine?.attempts, 2);
+    assert.equal(engine?.validCandidates, 2);
+    assert.equal(engine?.metrics.rustWasmOracleCandidateChecks ?? 0, 0);
+    assert.equal(engine?.metrics.rustWasmBackendSearchCalls, 1);
+    assert.equal(engine?.metrics.rustWasmFinalOracleCandidates, 2);
+    assert.equal(engine?.metrics.rustWasmFinalOracleValid, 1);
+    assert.equal(engine?.metrics.rustWasmFinalOracleInvalid, 1);
+    assert.equal(engine?.metrics.rustWasmUnverifiedBestScore, 999);
+    assert.equal(result.bestCandidate?.score.score, 40);
+    assert.equal(result.bestCandidate?.plan.turns[0]?.actions[0]?.spellId, "hit");
+  } finally {
+    configureRustWasmOptimizerBackend(undefined);
+  }
+});
+
 test("evaluates complete plans so a weak setup turn can produce the best final score", () => {
   const result = runOptimizerExperiment({
     catalog,

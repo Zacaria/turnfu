@@ -1,6 +1,6 @@
 import type { CatalogEntry } from "../catalog/types.ts";
 import type { ComboPlan, ComboSimulationOptions, SimulatedCharacter } from "../simulation/types.ts";
-import type { ComboOptimizationCriterion, ComboSustainability } from "./comboOptimizer.ts";
+import type { ComboOptimizationCriterion, ComboScoreBreakdown, ComboSustainability } from "./comboOptimizer.ts";
 import type { OptimizerExperimentBackendKind, OptimizerExperimentEngineKind, OptimizerExperimentOptions } from "./optimizerExperiment.ts";
 
 export const RUST_WASM_OPTIMIZER_SCHEMA_VERSION = 1;
@@ -44,14 +44,37 @@ export type RustWasmOptimizerCandidateBatchResponse = {
   attempts: number;
   candidates: Array<{
     passiveIds?: string[];
+    sublimationIds?: string[];
     plan: ComboPlan;
   }>;
+  metrics: Record<string, number>;
+};
+
+export type RustWasmOptimizerScoredCandidate = {
+  id: string;
+  passiveIds: string[];
+  sublimationIds: string[];
+  plan: ComboPlan;
+  score: ComboScoreBreakdown;
+};
+
+export type RustWasmOptimizerSearchResponse = {
+  schemaVersion: typeof RUST_WASM_OPTIMIZER_SCHEMA_VERSION;
+  backend: OptimizerExperimentBackendKind;
+  supported: boolean;
+  engine: OptimizerExperimentEngineKind;
+  seed: string;
+  attempts: number;
+  validCandidates: number;
+  invalidCandidates: number;
+  topCandidates: RustWasmOptimizerScoredCandidate[];
   metrics: Record<string, number>;
 };
 
 export type RustWasmCandidateEvaluationInput = {
   id: string;
   passiveIds?: string[];
+  sublimationIds?: string[];
   plan: ComboPlan;
 };
 
@@ -64,6 +87,7 @@ export type RustWasmCandidateEvaluationResult = {
 
 export type RustWasmOptimizerWasmExports = {
   generate_hybrid_candidates_json: (requestJson: string) => string;
+  run_hybrid_search_json?: (requestJson: string) => string;
   evaluate_candidate_batch_json: (requestJson: string, candidatesJson: string) => string;
 };
 
