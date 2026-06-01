@@ -2291,6 +2291,35 @@ test("applies supported sublimation flat stats and action conditions", () => {
   assert.equal(result.breakdown[0].appliedEffects.some((effect) => effect.type === "sublimationEffect" && effect.status === "applied"), true);
 });
 
+test("evaluates initial sublimation conditions from combat-start resources", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      resources: createResources({ ap: 10, mp: 3, wp: 1, bq: 0 }),
+      stats: {
+        ...character.stats,
+        generalMastery: 0,
+        elementalMastery: { fire: 0 },
+        damageInflictedPercent: 0,
+      },
+      sublimations: {
+        selections: [
+          { sublimationId: "force-vitale-ii" },
+          { sublimationId: "inflexibilite" },
+        ],
+        hpAssumption: "healthy90",
+      },
+    },
+    sequence: { actions: [{ spellId: "distance-damage-test" }] },
+  });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.breakdown[0].resourceBefore.ap, 11);
+  assert.equal(result.breakdown[0].statsBefore.damageInflictedPercent, 15);
+  assert.equal(result.breakdown[0].statsBefore.willpower, 10);
+});
+
 test("keeps HP-threshold sublimations valid but inactive when the assumption does not match", () => {
   const normalResult = simulateTurn({
     catalog: testCatalog,

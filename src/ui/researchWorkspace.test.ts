@@ -8,7 +8,6 @@ import {
   createMemoryWorkspaceStorage,
   createOptimizerRunReference,
   createSeedResearchWorkspace,
-  createSetupSnapshotWithSublimations,
   deleteSavedCombo,
   deleteSavedCombos,
   deleteSetupSnapshot,
@@ -147,22 +146,27 @@ test("creates a versioned setup snapshot when sublimations change", () => {
   const setup = workspace.setupSnapshots[0];
   assert.ok(setup);
 
-  const nextWorkspace = createSetupSnapshotWithSublimations(workspace, {
+  const result = saveSetupVersion(workspace, {
     buildId: setup.buildId,
-    sourceSetupSnapshotId: setup.id,
-    sublimations: {
-      selections: [
-        { sublimationId: "influence-6" },
-        { sublimationId: "sauvegarde-6" },
-      ],
-      hpAssumption: "healthy90",
-      nearbyAlliesAssumption: "twoPlus",
-      contactEnemiesAssumption: "one",
+    character: {
+      ...setup.character,
+      sublimations: {
+        selections: [
+          { sublimationId: "influence-6" },
+          { sublimationId: "sauvegarde-6" },
+        ],
+        hpAssumption: "healthy90",
+        nearbyAlliesAssumption: "twoPlus",
+        contactEnemiesAssumption: "one",
+      },
     },
+    sourceSetupSnapshotId: setup.id,
     now: "2026-05-26T10:20:00.000Z",
   });
+  const nextWorkspace = result.workspace;
   const nextSetup = nextWorkspace.setupSnapshots.at(-1);
 
+  assert.equal(result.created, true);
   assert.ok(nextSetup);
   assert.notEqual(nextSetup.id, setup.id);
   assert.equal(nextSetup.version, setup.version + 1);

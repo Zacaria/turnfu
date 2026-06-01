@@ -1,4 +1,5 @@
 import type { CatalogEntry, DamageEffect, Effect, Element, Resource, Rune, SpellCost, StatModifierEffect } from "../catalog/types.ts";
+import { isSublimationInitialConditionMet } from "../sublimations/initialConditions.ts";
 import { isSublimationHpRequirementSatisfied, validateSublimationBuild } from "../sublimations/validation.ts";
 import { computeRawDamage, resolveActionContext, resolveDamageElement, roundDamage } from "./damage.ts";
 import {
@@ -625,6 +626,8 @@ function applyInitialSublimations(
 ): { stats: BaseStats; resources: TurnState["remainingResources"] } {
   let nextStats = stats;
   let nextResources = resources;
+  const conditionStats = stats;
+  const conditionResources = resources;
 
   for (const stack of sublimationStacks) {
     for (const effect of getStackEffects(stack)) {
@@ -640,7 +643,7 @@ function applyInitialSublimations(
         nextStats = applyElementalMasteryPercentModifier(nextStats, effect);
       }
 
-      if (effect.type === "conditionalInitialStatModifier" && isSublimationInitialConditionMet(effect.condition, nextStats, nextResources)) {
+      if (effect.type === "conditionalInitialStatModifier" && isSublimationInitialConditionMet(effect.condition, conditionStats, conditionResources)) {
         nextStats = applyNumericSublimationStat(nextStats, effect.stat, effect.amount);
       }
     }
@@ -670,34 +673,6 @@ function applyElementalMasteryPercentModifier(
     ...stats,
     elementalMastery: nextElementalMastery,
   };
-}
-
-function isSublimationInitialConditionMet(
-  condition: Extract<SublimationEffect, { type: "conditionalInitialStatModifier" }>["condition"],
-  stats: BaseStats,
-  resources: TurnState["remainingResources"],
-): boolean {
-  if (condition.type === "resourceAtMost") {
-    return resources[condition.resource] <= condition.value;
-  }
-
-  if (condition.type === "secondaryMasteriesAtMost") {
-    return getSecondaryMasteryValues(stats).every((value) => value <= condition.value);
-  }
-
-  const value = stats[condition.stat];
-  return (typeof value === "number" ? value : 0) <= condition.value;
-}
-
-function getSecondaryMasteryValues(stats: BaseStats): number[] {
-  return [
-    stats.meleeMastery ?? 0,
-    stats.distanceMastery ?? 0,
-    stats.berserkMastery ?? 0,
-    stats.rearMastery ?? 0,
-    stats.criticalMastery ?? 0,
-    stats.healingMastery ?? 0,
-  ];
 }
 
 function applyNumericSublimationStat(stats: BaseStats, stat: SublimationEffect & { type: "statModifier" }["stat"], amount: number): BaseStats {

@@ -2544,7 +2544,7 @@ input.setup-name-input::selection {
 
 .setup-detail-passive {
   display: grid;
-  grid-template-columns: 22px minmax(0, 1fr);
+  grid-template-columns: 40px minmax(0, 1fr);
   align-items: center;
   gap: 8px;
   min-width: 0;
@@ -2946,12 +2946,12 @@ button.setup-summary-open:focus-visible {
 
 .candidate-spell-icon-rows {
   display: grid;
-  gap: 4px;
-  margin-top: 6px;
+  gap: 2px;
+  margin-top: 2px;
 }
 
 .candidate-passive-icons {
-  margin-top: 4px;
+  margin-top: 2px;
 }
 
 .candidate-passive-icons small {
@@ -2966,8 +2966,8 @@ button.setup-summary-open:focus-visible {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 4px;
-  min-height: 22px;
+  gap: 6px;
+  min-height: 40px;
 }
 
 .candidate-sublimation-row {
@@ -3024,6 +3024,10 @@ button.setup-summary-open:focus-visible {
   white-space: nowrap;
 }
 
+.sublimation-preview-card .sublimation-preview-name {
+  color: inherit;
+}
+
 .sublimation-title-normal,
 .sublimation-preview-tone-level-3,
 .sublimation-title-level-3 {
@@ -3051,8 +3055,8 @@ button.setup-summary-open:focus-visible {
 }
 
 .candidate-spell-icon {
-  width: 20px;
-  height: 20px;
+  width: 40px;
+  height: 40px;
   border: 1px solid #2e3f43;
   border-radius: 3px;
   background: #172124;
@@ -3063,7 +3067,7 @@ button.setup-summary-open:focus-visible {
   display: inline-grid;
   place-items: center;
   color: #d7e2dc;
-  font-size: 0.68rem;
+  font-size: 1.1rem;
   font-weight: 900;
 }
 
@@ -3830,7 +3834,7 @@ button.setup-summary-open:focus-visible {
 
 .library-sublimation-row {
   display: grid;
-  grid-template-columns: 32px minmax(0, 1fr) auto auto;
+  grid-template-columns: 32px minmax(0, 1fr) auto;
   gap: 6px;
   align-items: center;
   min-width: 0;
@@ -3898,17 +3902,6 @@ button.setup-summary-open:focus-visible {
   color: #8fa09b;
   font-size: 0.66rem;
   font-weight: 800;
-}
-
-.library-sublimation-level {
-  min-width: 24px;
-  padding: 3px 5px;
-  border-radius: 4px;
-  background: #1b2229;
-  color: #9fe7c3;
-  font-size: 0.72rem;
-  font-weight: 900;
-  text-align: center;
 }
 
 .library-sublimation-stepper {

@@ -1089,6 +1089,8 @@ export function App() {
             <PanelHeader title={t("panel.stateTracker")} />
             <HuppermageStateTracker
               activeSublimations={character.sublimations}
+              initialConditionResources={character.resources}
+              initialConditionStats={character.stats}
               resources={currentSnapshot?.resources ?? character.resources}
               snapshot={currentSnapshot}
             />
@@ -2359,10 +2361,9 @@ function SublimationCatalogChoice({
           <SublimationCatalogIcon sublimation={sublimation} />
         </span>
         <span className="library-sublimation-main">
-          <strong className={`sublimation-title-${sublimation.category}`}>{sublimation.name}</strong>
+          <strong className={`sublimation-title-${previewItem.tone}`}>{sublimation.name}</strong>
           {disabledReason ? <small>{disabledReason}</small> : null}
         </span>
-        {sublimation.displayLevel ? <span className="library-sublimation-level">{sublimation.displayLevel}</span> : null}
         <span className="library-sublimation-stepper">
           <IconButton
             className="library-sublimation-step"
@@ -3095,10 +3096,14 @@ function EquipmentExtraStatsEditor({
 
 function HuppermageStateTracker({
   activeSublimations,
+  initialConditionResources,
+  initialConditionStats,
   resources,
   snapshot,
 }: {
   activeSublimations: SublimationBuild | undefined;
+  initialConditionResources: SimulatedCharacter["resources"];
+  initialConditionStats: SimulatedCharacter["stats"];
   resources: SimulatedCharacter["resources"];
   snapshot: TimelineSnapshot | undefined;
 }) {
@@ -3106,6 +3111,8 @@ function HuppermageStateTracker({
   const sublimationStateItems = createSublimationStateItems({
     appliedEffects: snapshot?.appliedEffects ?? [],
     build: activeSublimations,
+    initialConditionResources,
+    initialConditionStats,
   });
 
   return (

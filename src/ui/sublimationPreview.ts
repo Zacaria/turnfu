@@ -1,7 +1,8 @@
 import { findSublimation } from "../core/sublimations/catalog.ts";
+import { isSublimationInitialConditionMet } from "../core/sublimations/initialConditions.ts";
 import { aggregateSublimationStacks } from "../core/sublimations/validation.ts";
 import type { Resource } from "../core/catalog/types.ts";
-import type { AppliedEffect, BaseStats } from "../core/simulation/types.ts";
+import type { AppliedEffect, BaseStats, ResourcePool } from "../core/simulation/types.ts";
 import type { SublimationBuild, SublimationCatalogEntry, SublimationEffect } from "../core/sublimations/types.ts";
 import { formatResourceLabel } from "./i18n.ts";
 import { getWakfuliSublimationIconSrc } from "./sublimationIcons.ts";
@@ -86,6 +87,8 @@ function getSublimationPreviewIconSrc(entry: SublimationCatalogEntry): string | 
 export function createSublimationStateItems(input: {
   build: SublimationBuild | undefined;
   appliedEffects: AppliedEffect[];
+  initialConditionStats?: BaseStats;
+  initialConditionResources?: ResourcePool;
 }): SublimationStateItem[] {
   const entries = (input.build?.selections ?? [])
     .map((selection) => findSublimation(selection.sublimationId))
@@ -96,16 +99,36 @@ export function createSublimationStateItems(input: {
       (effect.type === "sublimationEffect" || effect.type === "resourceCarryover")
       && (effect.sublimationId === entry.id || effect.sublimationId.startsWith(entry.familyId))
     );
-    const waiting = appliedEffect?.type === "sublimationEffect" && appliedEffect.status === "skipped";
+    const initialConditionWaiting = isSublimationInitialConditionWaiting(
+      entry,
+      input.initialConditionStats,
+      input.initialConditionResources,
+    );
+    const waiting = initialConditionWaiting || (appliedEffect?.type === "sublimationEffect" && appliedEffect.status === "skipped");
 
     return {
       id: entry.familyId,
       name: entry.name,
       status: waiting ? "waiting" : "active",
       statusLabel: waiting ? "En attente" : "Actif",
-      detail: describeSublimationStateDetail(appliedEffect),
+      detail: initialConditionWaiting ? "Condition non remplie" : describeSublimationStateDetail(appliedEffect),
     };
   });
+}
+
+function isSublimationInitialConditionWaiting(
+  entry: SublimationCatalogEntry,
+  stats: BaseStats | undefined,
+  resources: ResourcePool | undefined,
+): boolean {
+  const initialEffects = entry.effects.filter((effect): effect is Extract<SublimationEffect, { type: "conditionalInitialStatModifier" }> =>
+    effect.type === "conditionalInitialStatModifier"
+  );
+  if (initialEffects.length === 0 || !stats || !resources) {
+    return false;
+  }
+
+  return initialEffects.some((effect) => !isSublimationInitialConditionMet(effect.condition, stats, resources));
 }
 
 function describeSublimationStateDetail(effect: AppliedEffect | undefined): string {

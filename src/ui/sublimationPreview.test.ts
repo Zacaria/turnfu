@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
+import { createResources } from "../core/simulation/index.ts";
 import { createSublimationPreviewItems, createSublimationStateItems } from "./sublimationPreview.ts";
 
 test("creates Wakfuli-style sublimation preview items with capped levels", () => {
@@ -140,4 +142,58 @@ test("creates state tracker items for active sublimations and current action eff
       },
     ],
   );
+});
+
+test("marks combat-start sublimation conditions waiting when initial resources do not match", () => {
+  const items = createSublimationStateItems({
+    build: {
+      selections: [{ sublimationId: "inflexibilite" }],
+      hpAssumption: "normal",
+    },
+    appliedEffects: [],
+    initialConditionResources: createResources({ ap: 13, mp: 3, wp: 6, bq: 500 }),
+    initialConditionStats: {
+      generalMastery: 0,
+      elementalMastery: {},
+      damageInflictedPercent: 0,
+    },
+  });
+
+  assert.deepEqual(items.map((item) => ({
+    name: item.name,
+    status: item.status,
+    statusLabel: item.statusLabel,
+    detail: item.detail,
+  })), [
+    {
+      name: "Inflexibilité",
+      status: "waiting",
+      statusLabel: "En attente",
+      detail: "Condition non remplie",
+    },
+  ]);
+});
+
+test("keeps sublimation preview labels colored by the card tone inside muted rows", () => {
+  const styles = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
+
+  assert.match(
+    styles,
+    /\.sublimation-preview-card\s+\.sublimation-preview-name\s*\{[^}]*color:\s*inherit;/s,
+  );
+});
+
+test("builder sublimation choices color labels by Wakfuli tone without a rank badge", () => {
+  const appSource = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+
+  assert.match(appSource, /className=\{`sublimation-title-\$\{previewItem\.tone\}`\}/);
+  assert.doesNotMatch(appSource, /library-sublimation-level/);
+});
+
+test("candidate spell and passive icons are large while icon rows stay compact", () => {
+  const styles = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
+
+  assert.match(styles, /\.candidate-spell-icon\s*\{[^}]*width:\s*40px;[^}]*height:\s*40px;/s);
+  assert.match(styles, /\.candidate-spell-icon-rows\s*\{[^}]*gap:\s*2px;[^}]*margin-top:\s*2px;/s);
+  assert.match(styles, /\.candidate-spell-icon-row\s*\{[^}]*gap:\s*6px;[^}]*min-height:\s*40px;/s);
 });
