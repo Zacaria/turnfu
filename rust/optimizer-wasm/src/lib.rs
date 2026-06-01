@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use wasm_bindgen::prelude::*;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -451,7 +451,7 @@ pub struct ResourceValidationResult {
     pub violation: Option<ResourceViolation>,
 }
 
-#[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct OptimizerRequest {
     pub schema_version: u32,
@@ -1453,6 +1453,25 @@ impl EvaluatorCache {
             value,
             cache: self.snapshot(),
         }
+    }
+
+    pub fn get(&mut self, key: &str) -> Option<Value> {
+        if let Some(cached) = self.entries.get(key).cloned() {
+            self.metrics.cache_hits += 1;
+            self.refresh_key(key);
+            Some(cached)
+        } else {
+            self.metrics.cache_misses += 1;
+            None
+        }
+    }
+
+    pub fn insert(&mut self, key: String, value: Value) {
+        self.insert_with_eviction(key, value);
+    }
+
+    pub fn metrics(&self) -> EvaluatorCacheMetrics {
+        self.metrics.clone()
     }
 
     pub fn snapshot(&self) -> EvaluatorCacheSnapshot {
@@ -4729,6 +4748,642 @@ pub fn generate_hybrid_candidates(
     })
 }
 
+const DEFAULT_RUST_EVALUATION_CACHE_LIMIT: usize = 20_000;
+
+struct HybridSearchAccumulator {
+    attempts: u32,
+    valid_candidates: u32,
+    invalid_candidates: u32,
+    top_candidates: Vec<ScoredTopCandidateEntry>,
+    metrics: BTreeMap<String, u32>,
+}
+
+struct HybridTrackedEvaluation {
+    population_entry: Option<HybridPopulationEntry>,
+    improved: bool,
+    repair_candidate: Option<OptimizerCandidateInput>,
+}
+
+struct DirectEvaluatorCache {
+    limit: usize,
+    entries: HashMap<String, CandidateEvaluationResult>,
+    order: VecDeque<String>,
+    metrics: EvaluatorCacheMetrics,
+}
+
+impl DirectEvaluatorCache {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            metrics: EvaluatorCacheMetrics::default(),
+        }
+    }
+
+    fn get(&mut self, key: &str) -> Option<CandidateEvaluationResult> {
+        if let Some(cached) = self.entries.get(key).cloned() {
+            self.metrics.cache_hits += 1;
+            Some(cached)
+        } else {
+            self.metrics.cache_misses += 1;
+            None
+        }
+    }
+
+    fn insert(&mut self, key: String, value: CandidateEvaluationResult) {
+        if self.limit == 0 {
+            return;
+        }
+        if self.entries.len() >= self.limit {
+            while self.entries.len() >= self.limit {
+                if let Some(oldest_key) = self.order.pop_front() {
+                    if self.entries.remove(&oldest_key).is_some() {
+                        self.metrics.cache_evictions += 1;
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+        self.entries.insert(key.clone(), value);
+        self.order.push_back(key);
+    }
+
+    fn metrics(&self) -> EvaluatorCacheMetrics {
+        self.metrics.clone()
+    }
+}
+
+fn create_rust_evaluation_cache_prefix(request: &OptimizerRequest) -> String {
+    let character_id = request
+        .character
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let criterion = request
+        .criterion
+        .as_ref()
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({"type":"totalDamage"}));
+    let criterion_key = serde_json::to_string(&criterion).unwrap_or_else(|_| "{}".to_string());
+    let sustainability_key = if request.require_sustainable_cycle {
+        "sustainable"
+    } else {
+        "single"
+    };
+
+    format!(
+        "{}::{}::{}::{}::",
+        character_id, request.duration, criterion_key, sustainability_key
+    )
+}
+
+fn increment_metric(metrics: &mut BTreeMap<String, u32>, key: &str, amount: u32) {
+    if amount == 0 {
+        return;
+    }
+    *metrics.entry(key.to_string()).or_insert(0) += amount;
+}
+
+fn merge_metric_maps(target: &mut BTreeMap<String, u32>, source: BTreeMap<String, u32>) {
+    for (key, value) in source {
+        increment_metric(target, &key, value);
+    }
+}
+
+fn create_hybrid_fresh_candidate(
+    request: &OptimizerRequest,
+    catalog: &[SearchCatalogEntry],
+    actions: &[CandidateAction],
+    rng: &mut SeededRandom,
+    warmup_candidates: &[OptimizerCandidateInput],
+    warmup_index: &mut usize,
+    metrics: &mut BTreeMap<String, u32>,
+) -> OptimizerCandidateInput {
+    if let Some(candidate) = warmup_candidates.get(*warmup_index) {
+        *warmup_index += 1;
+        increment_metric(metrics, "hybridDomainWarmupCandidates", 1);
+        return candidate.clone();
+    }
+
+    if rng.chance(0.12) {
+        increment_metric(metrics, "hybridResourceAwareCandidates", 1);
+        create_resource_aware_candidate(request, catalog, actions, rng)
+    } else {
+        create_random_candidate(request, catalog, actions, rng)
+    }
+}
+
+fn tournament_select_population<'a>(
+    population: &'a [HybridPopulationEntry],
+    rng: &mut SeededRandom,
+) -> &'a HybridPopulationEntry {
+    let left = rng.pick(population);
+    let right = rng.pick(population);
+    if compare_population_entries(left, right) != std::cmp::Ordering::Greater {
+        left
+    } else {
+        right
+    }
+}
+
+fn create_hybrid_offspring_candidate(
+    request: &OptimizerRequest,
+    catalog: &[SearchCatalogEntry],
+    actions: &[CandidateAction],
+    population: &[HybridPopulationEntry],
+    rng: &mut SeededRandom,
+    warmup_candidates: &[OptimizerCandidateInput],
+    warmup_index: &mut usize,
+    metrics: &mut BTreeMap<String, u32>,
+) -> Result<OptimizerCandidateInput, String> {
+    if rng.chance(0.18) {
+        return Ok(create_hybrid_fresh_candidate(
+            request,
+            catalog,
+            actions,
+            rng,
+            warmup_candidates,
+            warmup_index,
+            metrics,
+        ));
+    }
+
+    let parent_a = tournament_select_population(population, rng);
+    let parent_b = tournament_select_population(population, rng);
+    let child = crossover_candidates(request, &parent_a.candidate, &parent_b.candidate, rng)?;
+    mutate_candidate(request, &child, rng)
+}
+
+fn should_skip_hybrid_elite_neighbor(
+    request: &OptimizerRequest,
+    elite_neighbor_queue_len: usize,
+    population_size: u32,
+    consecutive_elite_neighbor_attempts: u32,
+) -> bool {
+    request.iterations >= 160
+        && request.iterations < 240
+        && (request.duration >= 3 || request.max_actions_per_turn >= 8)
+        && !(request.duration == 3 && request.max_passive_count == 3)
+        && elite_neighbor_queue_len > population_size as usize
+        && consecutive_elite_neighbor_attempts >= 3
+}
+
+fn evaluate_candidate_with_cache(
+    request: &OptimizerRequest,
+    candidate: &OptimizerCandidateInput,
+    candidate_id: &str,
+    catalog: &[SearchCatalogEntry],
+    spells_by_id: &BTreeMap<&str, &SearchCatalogEntry>,
+    cache: &mut DirectEvaluatorCache,
+    cache_key_prefix: &str,
+) -> Result<CandidateEvaluationResult, String> {
+    let cache_key = create_evaluation_cache_key(cache_key_prefix, candidate);
+    if let Some(evaluation) = cache.get(&cache_key) {
+        return Ok(evaluation);
+    }
+
+    let evaluation =
+        evaluate_candidate_with_catalog(request, candidate, candidate_id, catalog, spells_by_id)?;
+    cache.insert(cache_key, evaluation.clone());
+    Ok(evaluation)
+}
+
+fn create_repair_candidate_from_evaluation(
+    candidate: &OptimizerCandidateInput,
+    evaluation: &CandidateEvaluationResult,
+) -> Option<OptimizerCandidateInput> {
+    let violation = evaluation.first_violation.as_ref()?;
+    create_hybrid_repair_candidate(
+        candidate,
+        &HybridViolationInput {
+            violation_type: violation.violation_type.clone(),
+            turn_index: violation.turn_index,
+            action_index: violation.action_index,
+        },
+    )
+}
+
+fn evaluate_and_track_hybrid_candidate(
+    request: &OptimizerRequest,
+    candidate: OptimizerCandidateInput,
+    accumulator: &mut HybridSearchAccumulator,
+    max_candidates: usize,
+    catalog: &[SearchCatalogEntry],
+    spells_by_id: &BTreeMap<&str, &SearchCatalogEntry>,
+    cache: &mut DirectEvaluatorCache,
+    cache_key_prefix: &str,
+) -> Result<HybridTrackedEvaluation, String> {
+    let candidate = normalize_candidate(candidate);
+    let id = encode_candidate(&candidate);
+    let previous_best = accumulator.top_candidates.first().cloned();
+
+    accumulator.attempts += 1;
+    increment_metric(&mut accumulator.metrics, "rustWasmGeneratedCandidates", 1);
+    increment_metric(&mut accumulator.metrics, "rustWasmCandidateEvaluations", 1);
+
+    let evaluation = evaluate_candidate_with_cache(
+        request,
+        &candidate,
+        &id,
+        catalog,
+        spells_by_id,
+        cache,
+        cache_key_prefix,
+    )?;
+
+    if evaluation.valid {
+        accumulator.valid_candidates += 1;
+        if let Some(score) = evaluation.score.clone() {
+            add_scored_top_candidate(
+                &mut accumulator.top_candidates,
+                max_candidates,
+                ScoredTopCandidateEntry {
+                    id: id.clone(),
+                    passive_ids: candidate.passive_ids.clone(),
+                    plan: candidate.plan.clone(),
+                    score: score.clone(),
+                },
+            );
+            let improved = match (&previous_best, accumulator.top_candidates.first()) {
+                (None, Some(_)) => true,
+                (Some(previous), Some(current)) => {
+                    compare_scored_top_candidates(current, previous) == std::cmp::Ordering::Less
+                }
+                _ => false,
+            };
+            return Ok(HybridTrackedEvaluation {
+                population_entry: Some(HybridPopulationEntry {
+                    id,
+                    candidate,
+                    score: score.score,
+                    valid: true,
+                }),
+                improved,
+                repair_candidate: None,
+            });
+        }
+    } else {
+        accumulator.invalid_candidates += 1;
+    }
+
+    let repair_candidate = create_repair_candidate_from_evaluation(&candidate, &evaluation);
+    Ok(HybridTrackedEvaluation {
+        population_entry: None,
+        improved: false,
+        repair_candidate,
+    })
+}
+
+fn enqueue_repair_candidate_for_search(
+    request: &OptimizerRequest,
+    repair_queue: &mut VecDeque<OptimizerCandidateInput>,
+    repair_queue_keys: &mut HashSet<String>,
+    repair_candidate: Option<OptimizerCandidateInput>,
+    metrics: &mut BTreeMap<String, u32>,
+) {
+    let Some(candidate) = repair_candidate else {
+        return;
+    };
+    if repair_queue.len() >= 512 || (request.duration < 3 && request.iterations < 80) {
+        return;
+    }
+
+    let normalized = normalize_candidate(candidate);
+    let key = encode_candidate(&normalized);
+    if !repair_queue_keys.insert(key) {
+        return;
+    }
+
+    repair_queue.push_back(normalized);
+    increment_metric(metrics, "hybridRepairQueueCandidates", 1);
+}
+
+fn enqueue_elite_neighbors_for_search(
+    request: &OptimizerRequest,
+    elite_neighbor_queue: &mut Vec<OptimizerCandidateInput>,
+    candidate: &OptimizerCandidateInput,
+    metrics: &mut BTreeMap<String, u32>,
+) -> Result<(), String> {
+    let result =
+        enqueue_hybrid_elite_neighbors(request, std::mem::take(elite_neighbor_queue), candidate)?;
+    *elite_neighbor_queue = result.queue;
+    merge_metric_maps(metrics, result.metrics);
+    Ok(())
+}
+
+fn run_hybrid_island_search(
+    request: &OptimizerRequest,
+    max_candidates: usize,
+    catalog: &[SearchCatalogEntry],
+    actions: &[CandidateAction],
+    spells_by_id: &BTreeMap<&str, &SearchCatalogEntry>,
+    cache: &mut DirectEvaluatorCache,
+    cache_key_prefix: &str,
+    restart_index_offset: u32,
+) -> Result<HybridSearchAccumulator, String> {
+    let config = create_hybrid_population_config(request.iterations);
+    let mut accumulator = HybridSearchAccumulator {
+        attempts: 0,
+        valid_candidates: 0,
+        invalid_candidates: 0,
+        top_candidates: Vec::new(),
+        metrics: BTreeMap::new(),
+    };
+    let mut rng = SeededRandom::new(&format!("{}:hybrid:run", request.seed));
+    let warmup_candidates = create_domain_warmup_candidates(request, catalog, actions);
+    let mut warmup_index = 0_usize;
+    let mut population: Vec<HybridPopulationEntry> = Vec::new();
+    let mut elite_neighbor_queue: Vec<OptimizerCandidateInput> = Vec::new();
+    let mut repair_queue: VecDeque<OptimizerCandidateInput> = VecDeque::new();
+    let mut repair_queue_keys: HashSet<String> = HashSet::new();
+    let mut attempts_since_improvement = 0_u32;
+    let mut consecutive_repair_attempts = 0_u32;
+    let mut consecutive_elite_neighbor_attempts = 0_u32;
+    let mut restart_index = restart_index_offset;
+
+    while accumulator.attempts < request.iterations
+        && population.len() < config.population_size as usize
+    {
+        let input = create_hybrid_fresh_candidate(
+            request,
+            catalog,
+            actions,
+            &mut rng,
+            &warmup_candidates,
+            &mut warmup_index,
+            &mut accumulator.metrics,
+        );
+        let tracked = evaluate_and_track_hybrid_candidate(
+            request,
+            input,
+            &mut accumulator,
+            max_candidates,
+            catalog,
+            spells_by_id,
+            cache,
+            cache_key_prefix,
+        )?;
+        attempts_since_improvement = if tracked.improved {
+            0
+        } else {
+            attempts_since_improvement + 1
+        };
+        if let Some(entry) = tracked.population_entry {
+            if tracked.improved {
+                enqueue_elite_neighbors_for_search(
+                    request,
+                    &mut elite_neighbor_queue,
+                    &entry.candidate,
+                    &mut accumulator.metrics,
+                )?;
+            }
+            population.push(entry);
+        } else {
+            enqueue_repair_candidate_for_search(
+                request,
+                &mut repair_queue,
+                &mut repair_queue_keys,
+                tracked.repair_candidate,
+                &mut accumulator.metrics,
+            );
+        }
+    }
+
+    population = truncate_population(population, config.population_size);
+
+    while accumulator.attempts < request.iterations {
+        if population.len() < 2 {
+            consecutive_repair_attempts = 0;
+            consecutive_elite_neighbor_attempts = 0;
+            let input = create_hybrid_fresh_candidate(
+                request,
+                catalog,
+                actions,
+                &mut rng,
+                &warmup_candidates,
+                &mut warmup_index,
+                &mut accumulator.metrics,
+            );
+            let tracked = evaluate_and_track_hybrid_candidate(
+                request,
+                input,
+                &mut accumulator,
+                max_candidates,
+                catalog,
+                spells_by_id,
+                cache,
+                cache_key_prefix,
+            )?;
+            attempts_since_improvement = if tracked.improved {
+                0
+            } else {
+                attempts_since_improvement + 1
+            };
+            if let Some(entry) = tracked.population_entry {
+                if tracked.improved {
+                    enqueue_elite_neighbors_for_search(
+                        request,
+                        &mut elite_neighbor_queue,
+                        &entry.candidate,
+                        &mut accumulator.metrics,
+                    )?;
+                }
+                population.push(entry);
+                population = truncate_population(population, config.population_size);
+            } else {
+                enqueue_repair_candidate_for_search(
+                    request,
+                    &mut repair_queue,
+                    &mut repair_queue_keys,
+                    tracked.repair_candidate,
+                    &mut accumulator.metrics,
+                );
+            }
+            continue;
+        }
+
+        if attempts_since_improvement >= config.stagnation_limit {
+            let restart = inject_hybrid_immigrants(request, population, restart_index)?;
+            restart_index += 1;
+            merge_metric_maps(&mut accumulator.metrics, restart.metrics);
+            population = restart.retained_elites;
+            let mut improved = false;
+            for immigrant in restart.immigrants {
+                if accumulator.attempts >= request.iterations {
+                    break;
+                }
+                let tracked = evaluate_and_track_hybrid_candidate(
+                    request,
+                    immigrant.candidate,
+                    &mut accumulator,
+                    max_candidates,
+                    catalog,
+                    spells_by_id,
+                    cache,
+                    cache_key_prefix,
+                )?;
+                improved = improved || tracked.improved;
+                if let Some(entry) = tracked.population_entry {
+                    if tracked.improved {
+                        enqueue_elite_neighbors_for_search(
+                            request,
+                            &mut elite_neighbor_queue,
+                            &entry.candidate,
+                            &mut accumulator.metrics,
+                        )?;
+                    }
+                    population.push(entry);
+                } else {
+                    enqueue_repair_candidate_for_search(
+                        request,
+                        &mut repair_queue,
+                        &mut repair_queue_keys,
+                        tracked.repair_candidate,
+                        &mut accumulator.metrics,
+                    );
+                }
+            }
+            population = truncate_population(population, config.population_size);
+            attempts_since_improvement = if improved {
+                0
+            } else {
+                restart.attempts_since_improvement
+            };
+            consecutive_repair_attempts = 0;
+            consecutive_elite_neighbor_attempts = 0;
+            continue;
+        }
+
+        let can_process_repair =
+            !repair_queue.is_empty() && consecutive_repair_attempts < config.repair_burst_limit;
+        if !repair_queue.is_empty() && !can_process_repair {
+            increment_metric(&mut accumulator.metrics, "hybridRepairDeferrals", 1);
+        }
+        let repair_candidate = if can_process_repair {
+            repair_queue.pop_front()
+        } else {
+            None
+        };
+        let should_refine_locally = repair_candidate.is_none()
+            && request.iterations >= config.local_refinement_preemption_budget
+            && (accumulator.attempts % config.local_refinement_interval == 0
+                || (request.iterations >= config.stagnation_refinement_budget
+                    && (request.duration >= 3 || request.max_actions_per_turn >= 8)
+                    && attempts_since_improvement >= config.stagnation_limit / 2
+                    && accumulator.attempts % config.stagnation_refinement_interval == 0));
+        let skip_elite_neighbor = repair_candidate.is_none()
+            && !should_refine_locally
+            && should_skip_hybrid_elite_neighbor(
+                request,
+                elite_neighbor_queue.len(),
+                config.population_size,
+                consecutive_elite_neighbor_attempts,
+            );
+        let elite_neighbor = if repair_candidate.is_none()
+            && !should_refine_locally
+            && !skip_elite_neighbor
+            && !elite_neighbor_queue.is_empty()
+        {
+            Some(elite_neighbor_queue.remove(0))
+        } else {
+            None
+        };
+
+        let input = if let Some(candidate) = repair_candidate.clone() {
+            increment_metric(&mut accumulator.metrics, "hybridRepairCandidates", 1);
+            consecutive_repair_attempts += 1;
+            candidate
+        } else if should_refine_locally {
+            consecutive_repair_attempts = 0;
+            increment_metric(&mut accumulator.metrics, "hybridLocalRefinements", 1);
+            create_hybrid_local_refinement(request, population.clone(), &mut rng)?
+        } else if let Some(candidate) = elite_neighbor.clone() {
+            consecutive_repair_attempts = 0;
+            increment_metric(&mut accumulator.metrics, "hybridEliteNeighborCandidates", 1);
+            candidate
+        } else {
+            consecutive_repair_attempts = 0;
+            if skip_elite_neighbor {
+                increment_metric(&mut accumulator.metrics, "hybridEliteNeighborDeferrals", 1);
+            }
+            create_hybrid_offspring_candidate(
+                request,
+                catalog,
+                actions,
+                &population,
+                &mut rng,
+                &warmup_candidates,
+                &mut warmup_index,
+                &mut accumulator.metrics,
+            )?
+        };
+
+        let used_elite_neighbor = elite_neighbor.is_some();
+        let tracked = evaluate_and_track_hybrid_candidate(
+            request,
+            input,
+            &mut accumulator,
+            max_candidates,
+            catalog,
+            spells_by_id,
+            cache,
+            cache_key_prefix,
+        )?;
+        attempts_since_improvement = if tracked.improved {
+            0
+        } else {
+            attempts_since_improvement + 1
+        };
+        consecutive_elite_neighbor_attempts = if used_elite_neighbor && !tracked.improved {
+            consecutive_elite_neighbor_attempts + 1
+        } else {
+            0
+        };
+
+        if let Some(entry) = tracked.population_entry {
+            if tracked.improved {
+                enqueue_elite_neighbors_for_search(
+                    request,
+                    &mut elite_neighbor_queue,
+                    &entry.candidate,
+                    &mut accumulator.metrics,
+                )?;
+            }
+            population.push(entry);
+            population = truncate_population(population, config.population_size);
+        } else {
+            enqueue_repair_candidate_for_search(
+                request,
+                &mut repair_queue,
+                &mut repair_queue_keys,
+                tracked.repair_candidate,
+                &mut accumulator.metrics,
+            );
+        }
+    }
+
+    increment_metric(
+        &mut accumulator.metrics,
+        "populationSize",
+        population.len() as u32,
+    );
+    increment_metric(
+        &mut accumulator.metrics,
+        "hybridEliteCount",
+        std::cmp::min(config.elite_count, population.len() as u32),
+    );
+    increment_metric(
+        &mut accumulator.metrics,
+        "hybridStagnationLimit",
+        config.stagnation_limit,
+    );
+
+    Ok(accumulator)
+}
+
 fn create_domain_warmup_candidates(
     request: &OptimizerRequest,
     catalog: &[SearchCatalogEntry],
@@ -5270,56 +5925,56 @@ pub fn run_hybrid_search(request: &OptimizerRequest) -> Result<HybridSearchRespo
         .map(|entry| (entry.id.as_str(), entry))
         .collect::<BTreeMap<_, _>>();
     let max_candidates = request.max_candidates.unwrap_or(20).clamp(1, 200) as usize;
-    let mut rng = SeededRandom::new(&format!("{}:hybrid:run", request.seed));
-    let warmup_candidates = create_domain_warmup_candidates(request, &catalog, &actions);
-    let mut warmup_index = 0_usize;
-    let mut attempts = 0;
-    let mut valid_candidates = 0;
-    let mut invalid_candidates = 0;
+    let schedule = create_hybrid_schedule(request);
+    let cache_key_prefix = create_rust_evaluation_cache_prefix(request);
+    let mut cache = DirectEvaluatorCache::new(DEFAULT_RUST_EVALUATION_CACHE_LIMIT);
+    let mut attempts = 0_u32;
+    let mut valid_candidates = 0_u32;
+    let mut invalid_candidates = 0_u32;
     let mut top_candidates = Vec::new();
 
-    while attempts < request.iterations {
-        let candidate = if let Some(candidate) = warmup_candidates.get(warmup_index) {
-            warmup_index += 1;
-            *metrics
-                .entry("hybridDomainWarmupCandidates".to_string())
-                .or_insert(0) += 1;
-            candidate.clone()
-        } else if rng.chance(0.12) {
-            *metrics
-                .entry("hybridResourceAwareCandidates".to_string())
-                .or_insert(0) += 1;
-            create_resource_aware_candidate(request, &catalog, &actions, &mut rng)
-        } else {
-            create_random_candidate(request, &catalog, &actions, &mut rng)
-        };
-        let candidate = normalize_candidate(candidate);
-        let id = encode_candidate(&candidate);
-        attempts += 1;
+    for island in &schedule.islands {
+        let mut island_request = request.clone();
+        island_request.iterations = island.iterations;
+        island_request.seed = island.rng_seed.clone();
+        let island_result = run_hybrid_island_search(
+            &island_request,
+            max_candidates,
+            &catalog,
+            &actions,
+            &spells_by_id,
+            &mut cache,
+            &cache_key_prefix,
+            island.island_index,
+        )?;
 
-        let evaluation =
-            evaluate_candidate_with_catalog(request, &candidate, &id, &catalog, &spells_by_id)?;
-        if evaluation.valid {
-            valid_candidates += 1;
-            if let Some(score) = evaluation.score {
-                add_scored_top_candidate(
-                    &mut top_candidates,
-                    max_candidates,
-                    ScoredTopCandidateEntry {
-                        id,
-                        passive_ids: candidate.passive_ids,
-                        plan: candidate.plan,
-                        score,
-                    },
-                );
-            }
-        } else {
-            invalid_candidates += 1;
+        attempts += island_result.attempts;
+        valid_candidates += island_result.valid_candidates;
+        invalid_candidates += island_result.invalid_candidates;
+        merge_metric_maps(&mut metrics, island_result.metrics);
+        for candidate in island_result.top_candidates {
+            add_scored_top_candidate(&mut top_candidates, max_candidates, candidate);
         }
     }
 
-    metrics.insert("rustWasmGeneratedCandidates".to_string(), attempts);
-    metrics.insert("rustWasmCandidateEvaluations".to_string(), attempts);
+    metrics.insert("hybridIslands".to_string(), schedule.island_count);
+    let cache_metrics = cache.metrics();
+    metrics.insert("cacheHits".to_string(), cache_metrics.cache_hits);
+    metrics.insert("cacheMisses".to_string(), cache_metrics.cache_misses);
+    metrics.insert("cacheEvictions".to_string(), cache_metrics.cache_evictions);
+    metrics.insert("rustWasmCacheHits".to_string(), cache_metrics.cache_hits);
+    metrics.insert(
+        "rustWasmCacheMisses".to_string(),
+        cache_metrics.cache_misses,
+    );
+    metrics.insert(
+        "rustWasmCacheEvictions".to_string(),
+        cache_metrics.cache_evictions,
+    );
+    metrics.insert(
+        "rustWasmEvaluationCacheLimit".to_string(),
+        DEFAULT_RUST_EVALUATION_CACHE_LIMIT as u32,
+    );
 
     Ok(HybridSearchResponse {
         schema_version: request.schema_version,
@@ -7137,6 +7792,10 @@ mod tests {
             result.metrics.get("rustWasmCandidateEvaluations"),
             Some(&100)
         );
+        assert_eq!(result.metrics.get("hybridIslands"), Some(&1));
+        assert!(result.metrics.contains_key("hybridEliteCount"));
+        assert!(result.metrics.contains_key("cacheHits"));
+        assert!(result.metrics.contains_key("cacheMisses"));
     }
 
     #[test]
