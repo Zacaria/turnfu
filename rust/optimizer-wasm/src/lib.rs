@@ -1009,6 +1009,21 @@ pub fn inject_hybrid_immigrants(
     population: Vec<HybridPopulationEntry>,
     restart_index: u32,
 ) -> Result<HybridRestartResult, String> {
+    let catalog = read_search_catalog(request)?;
+    let actions = get_search_actions(request, &catalog);
+    if actions.is_empty() {
+        return Err("Cannot inject Rust hybrid immigrants without available spells.".to_string());
+    }
+    inject_hybrid_immigrants_with_catalog(request, &catalog, &actions, population, restart_index)
+}
+
+fn inject_hybrid_immigrants_with_catalog(
+    request: &OptimizerRequest,
+    catalog: &[SearchCatalogEntry],
+    actions: &[CandidateAction],
+    population: Vec<HybridPopulationEntry>,
+    restart_index: u32,
+) -> Result<HybridRestartResult, String> {
     let config = create_hybrid_population_config(request.iterations);
     let retained_elites = truncate_population(population, config.elite_count);
     let mut next_population = retained_elites.clone();
@@ -1029,7 +1044,13 @@ pub fn inject_hybrid_immigrants(
                 .or_insert(0) += 1;
             (
                 "diverseRandom".to_string(),
-                create_hybrid_diverse_immigrant(request, &next_population, &mut rng)?,
+                create_hybrid_diverse_immigrant_with_catalog(
+                    request,
+                    catalog,
+                    actions,
+                    &next_population,
+                    &mut rng,
+                )?,
             )
         } else if rng.chance(0.12) {
             *metrics
@@ -1037,12 +1058,20 @@ pub fn inject_hybrid_immigrants(
                 .or_insert(0) += 1;
             (
                 "resourceAware".to_string(),
-                sample_candidate_with_rng(request, "resourceAware", &mut rng)?,
+                sample_candidate_with_rng_from_catalog(
+                    request,
+                    catalog,
+                    actions,
+                    "resourceAware",
+                    &mut rng,
+                )?,
             )
         } else {
             (
                 "random".to_string(),
-                sample_candidate_with_rng(request, "random", &mut rng)?,
+                sample_candidate_with_rng_from_catalog(
+                    request, catalog, actions, "random", &mut rng,
+                )?,
             )
         };
 
@@ -1075,6 +1104,16 @@ pub fn crossover_candidates(
     rng: &mut SeededRandom,
 ) -> Result<OptimizerCandidateInput, String> {
     let catalog = read_search_catalog(request)?;
+    crossover_candidates_with_catalog(request, &catalog, parent_a, parent_b, rng)
+}
+
+fn crossover_candidates_with_catalog(
+    request: &OptimizerRequest,
+    catalog: &[SearchCatalogEntry],
+    parent_a: &OptimizerCandidateInput,
+    parent_b: &OptimizerCandidateInput,
+    rng: &mut SeededRandom,
+) -> Result<OptimizerCandidateInput, String> {
     let turns = parent_a
         .plan
         .turns
@@ -1097,7 +1136,7 @@ pub fn crossover_candidates(
         &parent_a.passive_ids,
         &parent_b.passive_ids,
         request,
-        &catalog,
+        catalog,
         rng,
     );
 
@@ -1117,17 +1156,26 @@ pub fn mutate_candidate(
     if actions.is_empty() {
         return Err("Cannot mutate Rust candidate without available spells.".to_string());
     }
+    mutate_candidate_with_catalog(request, &catalog, &actions, candidate, rng)
+}
 
+fn mutate_candidate_with_catalog(
+    request: &OptimizerRequest,
+    catalog: &[SearchCatalogEntry],
+    actions: &[CandidateAction],
+    candidate: &OptimizerCandidateInput,
+    rng: &mut SeededRandom,
+) -> Result<OptimizerCandidateInput, String> {
     let mut next = candidate.clone();
     if rng.chance(0.35) {
-        next.passive_ids = mutate_passive_ids(&next.passive_ids, request, &catalog, rng);
+        next.passive_ids = mutate_passive_ids(&next.passive_ids, request, catalog, rng);
     }
 
     let Some(turn_index) = select_mutation_turn_index(request, &next, rng) else {
-        return Ok(create_random_candidate(request, &catalog, &actions, rng));
+        return Ok(create_random_candidate(request, catalog, actions, rng));
     };
     if next.plan.turns.get(turn_index).is_none() {
-        return Ok(create_random_candidate(request, &catalog, &actions, rng));
+        return Ok(create_random_candidate(request, catalog, actions, rng));
     }
 
     if request.duration >= 2 && request.iterations >= 80 {
@@ -1185,7 +1233,7 @@ pub fn mutate_candidate(
         .get_mut(turn_index)
         .expect("turn should exist after index check");
     if rng.chance(0.25) && turn.actions.len() < request.max_actions_per_turn as usize {
-        turn.actions.push(rng.pick(&actions).clone());
+        turn.actions.push(rng.pick(actions).clone());
         return Ok(next);
     }
 
@@ -1204,7 +1252,7 @@ pub fn mutate_candidate(
 
     if !turn.actions.is_empty() {
         let index = rng.integer(0, (turn.actions.len() - 1) as u32) as usize;
-        turn.actions[index] = rng.pick(&actions).clone();
+        turn.actions[index] = rng.pick(actions).clone();
     }
     Ok(next)
 }
@@ -1214,16 +1262,31 @@ pub fn create_hybrid_local_refinement(
     population: Vec<HybridPopulationEntry>,
     rng: &mut SeededRandom,
 ) -> Result<OptimizerCandidateInput, String> {
+    let catalog = read_search_catalog(request)?;
+    let actions = get_search_actions(request, &catalog);
+    if actions.is_empty() {
+        return Err("Cannot refine Rust candidate without available spells.".to_string());
+    }
+    create_hybrid_local_refinement_with_catalog(request, &catalog, &actions, &population, rng)
+}
+
+fn create_hybrid_local_refinement_with_catalog(
+    request: &OptimizerRequest,
+    catalog: &[SearchCatalogEntry],
+    actions: &[CandidateAction],
+    population: &[HybridPopulationEntry],
+    rng: &mut SeededRandom,
+) -> Result<OptimizerCandidateInput, String> {
     if population.is_empty() {
-        return sample_candidate_with_rng(request, "random", rng);
+        return sample_candidate_with_rng_from_catalog(request, catalog, actions, "random", rng);
     }
 
-    let ranked = rank_population(population);
+    let ranked = rank_population(population.to_vec());
     let parent_index = rng.integer(0, std::cmp::min(4, ranked.len() as u32 - 1)) as usize;
     let mut candidate = ranked[parent_index].candidate.clone();
     let mutation_count = rng.integer(1, 3);
     for _index in 0..mutation_count {
-        candidate = mutate_candidate(request, &candidate, rng)?;
+        candidate = mutate_candidate_with_catalog(request, catalog, actions, &candidate, rng)?;
     }
     Ok(candidate)
 }
@@ -1707,8 +1770,28 @@ fn sample_candidate_with_rng(
     }
 }
 
-fn create_hybrid_diverse_immigrant(
+fn sample_candidate_with_rng_from_catalog(
     request: &OptimizerRequest,
+    catalog: &[SearchCatalogEntry],
+    actions: &[CandidateAction],
+    mode: &str,
+    rng: &mut SeededRandom,
+) -> Result<OptimizerCandidateInput, String> {
+    match mode {
+        "random" => Ok(create_random_candidate(request, catalog, actions, rng)),
+        "resourceAware" => Ok(create_resource_aware_candidate(
+            request, catalog, actions, rng,
+        )),
+        _ => Err(format!(
+            "Unknown Rust candidate sampler mode '{mode}'. Expected 'random' or 'resourceAware'."
+        )),
+    }
+}
+
+fn create_hybrid_diverse_immigrant_with_catalog(
+    request: &OptimizerRequest,
+    catalog: &[SearchCatalogEntry],
+    actions: &[CandidateAction],
     population: &[HybridPopulationEntry],
     rng: &mut SeededRandom,
 ) -> Result<OptimizerCandidateInput, String> {
@@ -1716,14 +1799,16 @@ fn create_hybrid_diverse_immigrant(
         .iter()
         .map(|entry| create_hybrid_input_descriptor(&entry.candidate))
         .collect::<Vec<_>>();
-    let mut selected = sample_candidate_with_rng(request, "random", rng)?;
+    let mut selected =
+        sample_candidate_with_rng_from_catalog(request, catalog, actions, "random", rng)?;
     let mut selected_distance = distance_to_nearest_hybrid_descriptor(
         &create_hybrid_input_descriptor(&selected),
         &reference_descriptors,
     );
 
     for _index in 1..4 {
-        let candidate = sample_candidate_with_rng(request, "random", rng)?;
+        let candidate =
+            sample_candidate_with_rng_from_catalog(request, catalog, actions, "random", rng)?;
         let distance = distance_to_nearest_hybrid_descriptor(
             &create_hybrid_input_descriptor(&candidate),
             &reference_descriptors,
@@ -4913,8 +4998,14 @@ fn create_hybrid_offspring_candidate(
 
     let parent_a = tournament_select_population(population, rng);
     let parent_b = tournament_select_population(population, rng);
-    let child = crossover_candidates(request, &parent_a.candidate, &parent_b.candidate, rng)?;
-    mutate_candidate(request, &child, rng)
+    let child = crossover_candidates_with_catalog(
+        request,
+        catalog,
+        &parent_a.candidate,
+        &parent_b.candidate,
+        rng,
+    )?;
+    mutate_candidate_with_catalog(request, catalog, actions, &child, rng)
 }
 
 fn should_skip_hybrid_elite_neighbor(
@@ -5206,7 +5297,13 @@ fn run_hybrid_island_search(
         }
 
         if attempts_since_improvement >= config.stagnation_limit {
-            let restart = inject_hybrid_immigrants(request, population, restart_index)?;
+            let restart = inject_hybrid_immigrants_with_catalog(
+                request,
+                catalog,
+                actions,
+                population,
+                restart_index,
+            )?;
             restart_index += 1;
             merge_metric_maps(&mut accumulator.metrics, restart.metrics);
             population = restart.retained_elites;
@@ -5299,7 +5396,13 @@ fn run_hybrid_island_search(
         } else if should_refine_locally {
             consecutive_repair_attempts = 0;
             increment_metric(&mut accumulator.metrics, "hybridLocalRefinements", 1);
-            create_hybrid_local_refinement(request, population.clone(), &mut rng)?
+            create_hybrid_local_refinement_with_catalog(
+                request,
+                catalog,
+                actions,
+                &population,
+                &mut rng,
+            )?
         } else if let Some(candidate) = elite_neighbor.clone() {
             consecutive_repair_attempts = 0;
             increment_metric(&mut accumulator.metrics, "hybridEliteNeighborCandidates", 1);
