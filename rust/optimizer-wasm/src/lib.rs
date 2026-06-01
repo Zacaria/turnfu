@@ -875,6 +875,48 @@ pub fn create_evaluation_cache_key(prefix: &str, candidate: &OptimizerCandidateI
     format!("{prefix}{}", encode_candidate(candidate))
 }
 
+fn hash_candidate(candidate: &OptimizerCandidateInput) -> u128 {
+    let mut hash = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d_u128;
+    for passive_id in &candidate.passive_ids {
+        hash_candidate_bytes(&mut hash, passive_id.as_bytes());
+        hash_candidate_byte(&mut hash, b'+');
+    }
+    hash_candidate_byte(&mut hash, b':');
+    for turn in &candidate.plan.turns {
+        for action in &turn.actions {
+            hash_candidate_bytes(&mut hash, action.spell_id.as_bytes());
+            if let Some(target) = &action.target {
+                hash_candidate_byte(&mut hash, b'@');
+                hash_candidate_byte(&mut hash, action_target_hash_byte(&target.kind));
+            }
+            hash_candidate_byte(&mut hash, b',');
+        }
+        hash_candidate_byte(&mut hash, b'|');
+    }
+    hash
+}
+
+fn hash_candidate_bytes(hash: &mut u128, bytes: &[u8]) {
+    for byte in bytes {
+        hash_candidate_byte(hash, *byte);
+    }
+}
+
+fn hash_candidate_byte(hash: &mut u128, byte: u8) {
+    *hash ^= byte as u128;
+    *hash = hash.wrapping_mul(0x0000_0000_0100_0000_0000_0000_0000_013b_u128);
+}
+
+fn action_target_hash_byte(kind: &ActionTargetKind) -> u8 {
+    match kind {
+        ActionTargetKind::EmptyCell => 1,
+        ActionTargetKind::FeuFollet => 2,
+        ActionTargetKind::Fighter => 3,
+        ActionTargetKind::Ally => 4,
+        ActionTargetKind::Enemy => 5,
+    }
+}
+
 fn encode_candidate_turn(turn: &CandidateTurn) -> String {
     turn.actions
         .iter()
@@ -4861,8 +4903,8 @@ struct HybridTrackedEvaluation {
 
 struct DirectEvaluatorCache {
     limit: usize,
-    entries: HashMap<String, CandidateEvaluationResult>,
-    order: VecDeque<String>,
+    entries: HashMap<u128, CandidateEvaluationResult>,
+    order: VecDeque<u128>,
     metrics: EvaluatorCacheMetrics,
 }
 
@@ -4876,8 +4918,8 @@ impl DirectEvaluatorCache {
         }
     }
 
-    fn get(&mut self, key: &str) -> Option<CandidateEvaluationResult> {
-        if let Some(cached) = self.entries.get(key).cloned() {
+    fn get(&mut self, key: u128) -> Option<CandidateEvaluationResult> {
+        if let Some(cached) = self.entries.get(&key).cloned() {
             self.metrics.cache_hits += 1;
             Some(cached)
         } else {
@@ -4886,7 +4928,7 @@ impl DirectEvaluatorCache {
         }
     }
 
-    fn insert(&mut self, key: String, value: CandidateEvaluationResult) {
+    fn insert(&mut self, key: u128, value: CandidateEvaluationResult) {
         if self.limit == 0 {
             return;
         }
@@ -4902,37 +4944,13 @@ impl DirectEvaluatorCache {
                 }
             }
         }
-        self.entries.insert(key.clone(), value);
+        self.entries.insert(key, value);
         self.order.push_back(key);
     }
 
     fn metrics(&self) -> EvaluatorCacheMetrics {
         self.metrics.clone()
     }
-}
-
-fn create_rust_evaluation_cache_prefix(request: &OptimizerRequest) -> String {
-    let character_id = request
-        .character
-        .get("id")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let criterion = request
-        .criterion
-        .as_ref()
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!({"type":"totalDamage"}));
-    let criterion_key = serde_json::to_string(&criterion).unwrap_or_else(|_| "{}".to_string());
-    let sustainability_key = if request.require_sustainable_cycle {
-        "sustainable"
-    } else {
-        "single"
-    };
-
-    format!(
-        "{}::{}::{}::{}::",
-        character_id, request.duration, criterion_key, sustainability_key
-    )
 }
 
 fn increment_metric(metrics: &mut BTreeMap<String, u32>, key: &str, amount: u32) {
@@ -5035,20 +5053,18 @@ fn should_skip_hybrid_elite_neighbor(
 fn evaluate_candidate_with_cache(
     request: &OptimizerRequest,
     candidate: &OptimizerCandidateInput,
-    candidate_id: &str,
+    candidate_hash: u128,
     catalog: &[SearchCatalogEntry],
     spells_by_id: &BTreeMap<&str, &SearchCatalogEntry>,
     cache: &mut DirectEvaluatorCache,
-    cache_key_prefix: &str,
 ) -> Result<CandidateEvaluationResult, String> {
-    let cache_key = create_evaluation_cache_key(cache_key_prefix, candidate);
-    if let Some(evaluation) = cache.get(&cache_key) {
+    if let Some(evaluation) = cache.get(candidate_hash) {
         return Ok(evaluation);
     }
 
     let evaluation =
-        evaluate_candidate_with_catalog(request, candidate, candidate_id, catalog, spells_by_id)?;
-    cache.insert(cache_key, evaluation.clone());
+        evaluate_candidate_with_catalog(request, candidate, "", catalog, spells_by_id)?;
+    cache.insert(candidate_hash, evaluation.clone());
     Ok(evaluation)
 }
 
@@ -5075,10 +5091,9 @@ fn evaluate_and_track_hybrid_candidate(
     catalog: &[SearchCatalogEntry],
     spells_by_id: &BTreeMap<&str, &SearchCatalogEntry>,
     cache: &mut DirectEvaluatorCache,
-    cache_key_prefix: &str,
 ) -> Result<HybridTrackedEvaluation, String> {
     let candidate = normalize_candidate(candidate);
-    let id = encode_candidate(&candidate);
+    let candidate_hash = hash_candidate(&candidate);
     let previous_best = accumulator.top_candidates.first().cloned();
 
     accumulator.attempts += 1;
@@ -5088,16 +5103,16 @@ fn evaluate_and_track_hybrid_candidate(
     let evaluation = evaluate_candidate_with_cache(
         request,
         &candidate,
-        &id,
+        candidate_hash,
         catalog,
         spells_by_id,
         cache,
-        cache_key_prefix,
     )?;
 
     if evaluation.valid {
         accumulator.valid_candidates += 1;
         if let Some(score) = evaluation.score.clone() {
+            let id = encode_candidate(&candidate);
             add_scored_top_candidate(
                 &mut accumulator.top_candidates,
                 max_candidates,
@@ -5141,7 +5156,7 @@ fn evaluate_and_track_hybrid_candidate(
 fn enqueue_repair_candidate_for_search(
     request: &OptimizerRequest,
     repair_queue: &mut VecDeque<OptimizerCandidateInput>,
-    repair_queue_keys: &mut HashSet<String>,
+    repair_queue_keys: &mut HashSet<u128>,
     repair_candidate: Option<OptimizerCandidateInput>,
     metrics: &mut BTreeMap<String, u32>,
 ) {
@@ -5153,7 +5168,7 @@ fn enqueue_repair_candidate_for_search(
     }
 
     let normalized = normalize_candidate(candidate);
-    let key = encode_candidate(&normalized);
+    let key = hash_candidate(&normalized);
     if !repair_queue_keys.insert(key) {
         return;
     }
@@ -5187,7 +5202,6 @@ fn run_hybrid_island_search(
     actions: &[CandidateAction],
     spells_by_id: &BTreeMap<&str, &SearchCatalogEntry>,
     cache: &mut DirectEvaluatorCache,
-    cache_key_prefix: &str,
     restart_index_offset: u32,
 ) -> Result<HybridSearchAccumulator, String> {
     let config = create_hybrid_population_config(request.iterations);
@@ -5204,7 +5218,7 @@ fn run_hybrid_island_search(
     let mut population: Vec<HybridPopulationEntry> = Vec::new();
     let mut elite_neighbor_queue: Vec<OptimizerCandidateInput> = Vec::new();
     let mut repair_queue: VecDeque<OptimizerCandidateInput> = VecDeque::new();
-    let mut repair_queue_keys: HashSet<String> = HashSet::new();
+    let mut repair_queue_keys: HashSet<u128> = HashSet::new();
     let mut attempts_since_improvement = 0_u32;
     let mut consecutive_repair_attempts = 0_u32;
     let mut consecutive_elite_neighbor_attempts = 0_u32;
@@ -5230,7 +5244,6 @@ fn run_hybrid_island_search(
             catalog,
             spells_by_id,
             cache,
-            cache_key_prefix,
         )?;
         attempts_since_improvement = if tracked.improved {
             0
@@ -5282,7 +5295,6 @@ fn run_hybrid_island_search(
                 catalog,
                 spells_by_id,
                 cache,
-                cache_key_prefix,
             )?;
             attempts_since_improvement = if tracked.improved {
                 0
@@ -5337,7 +5349,6 @@ fn run_hybrid_island_search(
                     catalog,
                     spells_by_id,
                     cache,
-                    cache_key_prefix,
                 )?;
                 improved = improved || tracked.improved;
                 if let Some(entry) = tracked.population_entry {
@@ -5451,7 +5462,6 @@ fn run_hybrid_island_search(
             catalog,
             spells_by_id,
             cache,
-            cache_key_prefix,
         )?;
         attempts_since_improvement = if tracked.improved {
             0
@@ -6048,7 +6058,6 @@ pub fn run_hybrid_search(request: &OptimizerRequest) -> Result<HybridSearchRespo
         .collect::<BTreeMap<_, _>>();
     let max_candidates = request.max_candidates.unwrap_or(20).clamp(1, 200) as usize;
     let schedule = create_hybrid_schedule(request);
-    let cache_key_prefix = create_rust_evaluation_cache_prefix(request);
     let mut cache = DirectEvaluatorCache::new(DEFAULT_RUST_EVALUATION_CACHE_LIMIT);
     let mut attempts = 0_u32;
     let mut valid_candidates = 0_u32;
@@ -6066,7 +6075,6 @@ pub fn run_hybrid_search(request: &OptimizerRequest) -> Result<HybridSearchRespo
             &actions,
             &spells_by_id,
             &mut cache,
-            &cache_key_prefix,
             island.island_index,
         )?;
 
