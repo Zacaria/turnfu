@@ -2494,8 +2494,8 @@ fn read_constraint_u32(constraints: &[Value], constraint_type: &str) -> Option<u
         .map(|constraint| read_u32_field(Some(constraint), "value"))
 }
 
-fn collect_search_damage_effects(spell: &SearchCatalogEntry) -> Vec<DamageEffect> {
-    spell.damage_effects.clone()
+fn collect_search_damage_effects(spell: &SearchCatalogEntry) -> &[DamageEffect] {
+    &spell.damage_effects
 }
 
 fn collect_damage_effects_from_values(effects: &[Value]) -> Vec<DamageEffect> {
@@ -2606,7 +2606,7 @@ fn collect_search_consumed_runes(
 ) -> Vec<Rune> {
     let mut runes = collect_search_tag_values(&spell.effects, "consumeRune", state, action)
         .into_iter()
-        .filter_map(|value| serde_json::from_value::<Rune>(value).ok())
+        .filter_map(|value| serde_json::from_value::<Rune>(value.clone()).ok())
         .collect::<Vec<_>>();
     if collect_search_tag_values(&spell.effects, "consumeAllRunes", state, action)
         .into_iter()
@@ -2914,16 +2914,16 @@ fn is_elemental_spell_element(element: &Element) -> bool {
     )
 }
 
-fn collect_search_effects_by_type(
-    effects: &[Value],
+fn collect_search_effects_by_type<'a>(
+    effects: &'a [Value],
     effect_type: &str,
     state: &HuppermageState,
     action: &CandidateAction,
-) -> Vec<Value> {
+) -> Vec<&'a Value> {
     let mut values = vec![];
     for effect in effects {
         match read_string_field(effect, "type").as_deref() {
-            Some(current_type) if current_type == effect_type => values.push(effect.clone()),
+            Some(current_type) if current_type == effect_type => values.push(effect),
             Some("conditional") => {
                 if is_search_condition_met(effect.get("condition"), state, action) {
                     let nested_values = effect
@@ -2942,18 +2942,18 @@ fn collect_search_effects_by_type(
     values
 }
 
-fn collect_search_tag_values(
-    effects: &[Value],
+fn collect_search_tag_values<'a>(
+    effects: &'a [Value],
     tag_name: &str,
     state: &HuppermageState,
     action: &CandidateAction,
-) -> Vec<Value> {
+) -> Vec<&'a Value> {
     let mut values = vec![];
     for effect in effects {
         match read_string_field(effect, "type").as_deref() {
             Some("tag") if read_string_field(effect, "tag").as_deref() == Some(tag_name) => {
                 if let Some(value) = effect.get("value") {
-                    values.push(value.clone());
+                    values.push(value);
                 }
             }
             Some("conditional") => {
