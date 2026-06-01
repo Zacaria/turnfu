@@ -9,6 +9,7 @@
     "build": "vite build",
     "test": "node --test --experimental-strip-types \"src/**/*.test.ts\"",
     "bench:hybrid": "node --experimental-strip-types scripts/benchmark-hybrid.ts",
+    "bench:rust-wasm:parallel": "node --experimental-strip-types scripts/benchmark-rust-wasm-parallel.ts",
     "bench:wasm": "node --experimental-strip-types scripts/benchmark-rust-wasm.ts",
     "wasm:build": "wasm-pack build rust/optimizer-wasm --target nodejs --out-dir ../../src/wasm/optimizer_wasm_pkg",
     "wasm:test": "cargo test --manifest-path rust/optimizer-wasm/Cargo.toml",
