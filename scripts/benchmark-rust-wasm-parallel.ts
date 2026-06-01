@@ -38,6 +38,8 @@ const scenarioId = readOption("--scenario") ?? "t3-full";
 const budget = readIntegerOption("--budget", 1_000_000);
 const seed = readOption("--seed") ?? "smoke";
 const workerCount = readIntegerOption("--workers", Math.min(6, availableParallelism()));
+const timeboxMs = readIntegerOption("--timebox-ms", 0);
+const chunkSize = readIntegerOption("--chunk-size", 100_000);
 const scenario = scenarios.find((entry) => entry.id === scenarioId);
 if (!scenario) {
   throw new Error(`Unknown scenario '${scenarioId}'. Expected one of: ${scenarios.map((entry) => entry.id).join(", ")}.`);
@@ -108,34 +110,15 @@ const baseRequest = createRustWasmOptimizerRequest({
   maxCandidates: 5,
 });
 
-const baseIterations = Math.floor(budget / workerCount);
-const remainder = budget % workerCount;
 const workerSource = `
   const { parentPort, workerData } = require("node:worker_threads");
   const wasm = require(workerData.wasmPackagePath);
   parentPort.postMessage(JSON.parse(wasm.run_hybrid_search_json(workerData.requestJson)));
 `;
 const start = performance.now();
-const results = await Promise.all(Array.from({ length: workerCount }, (_, workerIndex) => {
-  const request: RustWasmOptimizerRequest = {
-    ...baseRequest,
-    seed: `${baseRequest.seed}:parallel:${workerIndex}`,
-    iterations: baseIterations + (workerIndex < remainder ? 1 : 0),
-  };
-  return new Promise<WorkerSearchResponse>((resolveResult, reject) => {
-    const worker = new Worker(workerSource, {
-      eval: true,
-      workerData: { wasmPackagePath, requestJson: JSON.stringify(request) },
-    });
-    worker.once("message", resolveResult);
-    worker.once("error", reject);
-    worker.once("exit", (code) => {
-      if (code !== 0) {
-        reject(new Error(`Rust/WASM worker exited with ${code}`));
-      }
-    });
-  });
-}));
+const results = timeboxMs > 0
+  ? await runTimeboxedWorkers()
+  : await runFixedBudgetWorkers();
 const elapsedMs = performance.now() - start;
 const attempts = results.reduce((total, result) => total + result.attempts, 0);
 const validCandidates = results.reduce((total, result) => total + result.validCandidates, 0);
@@ -175,6 +158,7 @@ console.log(JSON.stringify({
   budget,
   seed,
   workerCount,
+  ...(timeboxMs > 0 ? { timeboxMs, chunkSize, completedBudget: attempts } : {}),
   elapsedMs: round(elapsedMs),
   attemptsPerSecond: round(attempts / Math.max(0.001, elapsedMs / 1_000)),
   score: round(topCandidates[0]?.score.score ?? 0),
@@ -189,6 +173,55 @@ console.log(JSON.stringify({
   finalOracleMaxTotalDamageDelta: round(maxTotalDamageDelta),
   metrics,
 }));
+
+async function runFixedBudgetWorkers(): Promise<WorkerSearchResponse[]> {
+  const baseIterations = Math.floor(budget / workerCount);
+  const remainder = budget % workerCount;
+  return Promise.all(Array.from({ length: workerCount }, (_, workerIndex) => runWorker({
+    ...baseRequest,
+    seed: `${baseRequest.seed}:parallel:${workerIndex}`,
+    iterations: baseIterations + (workerIndex < remainder ? 1 : 0),
+  })));
+}
+
+async function runTimeboxedWorkers(): Promise<WorkerSearchResponse[]> {
+  const results: WorkerSearchResponse[] = [];
+  let scheduledAttempts = 0;
+  let roundIndex = 0;
+
+  while (scheduledAttempts < budget && performance.now() - start < timeboxMs) {
+    const requests: RustWasmOptimizerRequest[] = [];
+    for (let workerIndex = 0; workerIndex < workerCount && scheduledAttempts < budget; workerIndex += 1) {
+      const iterations = Math.min(chunkSize, budget - scheduledAttempts);
+      scheduledAttempts += iterations;
+      requests.push({
+        ...baseRequest,
+        seed: `${baseRequest.seed}:parallel:${roundIndex}:${workerIndex}`,
+        iterations,
+      });
+    }
+    results.push(...await Promise.all(requests.map(runWorker)));
+    roundIndex += 1;
+  }
+
+  return results;
+}
+
+function runWorker(request: RustWasmOptimizerRequest): Promise<WorkerSearchResponse> {
+  return new Promise<WorkerSearchResponse>((resolveResult, reject) => {
+    const worker = new Worker(workerSource, {
+      eval: true,
+      workerData: { wasmPackagePath, requestJson: JSON.stringify(request) },
+    });
+    worker.once("message", resolveResult);
+    worker.once("error", reject);
+    worker.once("exit", (code) => {
+      if (code !== 0) {
+        reject(new Error(`Rust/WASM worker exited with ${code}`));
+      }
+    });
+  });
+}
 
 function compareRustCandidates(
   left: RustWasmOptimizerScoredCandidate,

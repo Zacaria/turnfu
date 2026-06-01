@@ -46,8 +46,8 @@
 - [x] 6.1 Extend hybrid benchmarks to compare TypeScript and Rust/WASM backends on the same scenarios.
 - [ ] 6.2 Benchmark 100k, 1M, and 10M budgets for `t2-a8-p2`, `t3-a12-p3`, and `t3-full`.
 - [ ] 6.3 Run at least one local 100M Rust/WASM benchmark and record throughput, score, valid rate, cache metrics, and memory behavior.
-- [ ] 6.4 Add documentation for backend selection, differential commands, benchmark commands, and expected trust levels.
-- [ ] 6.5 Enable Rust/WASM only as an experimental backend until differential tests and benchmark evidence justify a separate canonical-engine migration.
+- [x] 6.4 Add documentation for backend selection, differential commands, benchmark commands, and expected trust levels.
+- [x] 6.5 Enable Rust/WASM only as an experimental backend until differential tests and benchmark evidence justify a separate canonical-engine migration.
 
 ## 7. Verification
 
