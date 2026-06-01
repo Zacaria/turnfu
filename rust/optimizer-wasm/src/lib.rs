@@ -520,7 +520,17 @@ pub struct CandidateEvaluationResult {
     pub final_resources: ResourcePool,
     pub final_huppermage: HuppermageState,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub score: Option<CandidateScoreBreakdown>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub first_violation: Option<CandidateEvaluationViolation>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CandidateScoreBreakdown {
+    pub score: f64,
+    pub total_damage: f64,
+    pub damage_by_resolved_element: DamageByElement,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -2153,6 +2163,24 @@ fn read_request_stats(character: &Value) -> BaseStats {
         .cloned()
         .and_then(|value| serde_json::from_value::<BaseStats>(value).ok())
         .unwrap_or_default()
+}
+
+fn read_score_criterion(request: &OptimizerRequest) -> ScoreCriterion {
+    let Some(criterion) = request.criterion.as_ref() else {
+        return ScoreCriterion::TotalDamage;
+    };
+
+    match read_string_field(criterion, "type").as_deref() {
+        Some("elementDamage") => criterion
+            .get("element")
+            .cloned()
+            .and_then(|value| serde_json::from_value::<Element>(value).ok())
+            .map(|element| ScoreCriterion::TargetElementDamage { element })
+            .unwrap_or(ScoreCriterion::TotalDamage),
+        Some("targetElementDamage") => serde_json::from_value::<ScoreCriterion>(criterion.clone())
+            .unwrap_or(ScoreCriterion::TotalDamage),
+        _ => ScoreCriterion::TotalDamage,
+    }
 }
 
 fn read_request_huppermage(
@@ -4076,6 +4104,7 @@ pub fn evaluate_candidate(
         .and_then(|value| serde_json::from_value::<PartialActionContext>(value.clone()).ok());
     let mut resources = base_resources;
     let mut total_damage = 0.0;
+    let mut damage_by_resolved_element = DamageByElement::default();
 
     for (turn_index, turn) in candidate.plan.turns.iter().enumerate() {
         let mut turn_damage = 0.0;
@@ -4090,6 +4119,7 @@ pub fn evaluate_candidate(
                     round_damage(total_damage + turn_damage),
                     resources,
                     huppermage,
+                    None,
                     Some(violation_with_turn(
                         turn_index as u32,
                         &create_unknown_spell_violation(&action.spell_id, action_index as u32),
@@ -4122,6 +4152,7 @@ pub fn evaluate_candidate(
                     round_damage(total_damage + turn_damage),
                     resources,
                     huppermage,
+                    None,
                     Some(violation_with_turn(turn_index as u32, &violation)),
                 ));
             }
@@ -4140,6 +4171,7 @@ pub fn evaluate_candidate(
                     round_damage(total_damage + turn_damage),
                     resources,
                     huppermage,
+                    None,
                     Some(resource_violation_with_turn(turn_index as u32, &violation)),
                 ));
             }
@@ -4148,6 +4180,11 @@ pub fn evaluate_candidate(
             for effect in collect_search_damage_effects(spell) {
                 let damage = compute_raw_damage(&base_stats, &effect, default_context.clone());
                 turn_damage = round_damage(turn_damage + damage.result);
+                damage_by_resolved_element = add_resolved_element_damage(
+                    damage_by_resolved_element,
+                    &damage.resolved_element,
+                    damage.result,
+                );
             }
 
             casts_by_spell_id.insert(
@@ -4187,6 +4224,11 @@ pub fn evaluate_candidate(
         total_damage,
         resources,
         huppermage,
+        Some(create_candidate_score_breakdown(
+            total_damage,
+            damage_by_resolved_element,
+            read_score_criterion(request),
+        )),
         None,
     ))
 }
@@ -4216,6 +4258,7 @@ fn create_candidate_evaluation_result(
     total_damage: f64,
     final_resources: ResourcePool,
     final_huppermage: HuppermageState,
+    score: Option<CandidateScoreBreakdown>,
     first_violation: Option<CandidateEvaluationViolation>,
 ) -> CandidateEvaluationResult {
     CandidateEvaluationResult {
@@ -4224,7 +4267,27 @@ fn create_candidate_evaluation_result(
         total_damage,
         final_resources,
         final_huppermage,
+        score,
         first_violation,
+    }
+}
+
+fn create_candidate_score_breakdown(
+    total_damage: f64,
+    damage_by_resolved_element: DamageByElement,
+    criterion: ScoreCriterion,
+) -> CandidateScoreBreakdown {
+    let score = match criterion {
+        ScoreCriterion::TotalDamage => total_damage,
+        ScoreCriterion::TargetElementDamage { element } => {
+            get_damage_by_element(&damage_by_resolved_element, &element)
+        }
+    };
+
+    CandidateScoreBreakdown {
+        score,
+        total_damage,
+        damage_by_resolved_element,
     }
 }
 
@@ -4604,7 +4667,42 @@ mod tests {
         assert_eq!(evaluation.total_damage, 40.0);
         assert_eq!(evaluation.final_resources.ap, 5);
         assert_eq!(evaluation.final_resources.bq, 300);
+        assert_eq!(
+            evaluation.score,
+            Some(CandidateScoreBreakdown {
+                score: 40.0,
+                total_damage: 40.0,
+                damage_by_resolved_element: DamageByElement {
+                    fire: 40.0,
+                    ..DamageByElement::default()
+                },
+            })
+        );
         assert!(evaluation.first_violation.is_none());
+    }
+
+    #[test]
+    fn scores_candidate_evaluation_with_target_element_criterion() {
+        let mut request = transformation_request();
+        request.criterion = Some(serde_json::json!({
+            "type": "elementDamage",
+            "element": "water"
+        }));
+        let candidate = candidate_from_actions(vec!["hit"], vec![]);
+        let evaluation = evaluate_candidate(&request, &candidate, "candidate:hit")
+            .expect("candidate should evaluate");
+
+        assert_eq!(
+            evaluation.score,
+            Some(CandidateScoreBreakdown {
+                score: 0.0,
+                total_damage: 40.0,
+                damage_by_resolved_element: DamageByElement {
+                    fire: 40.0,
+                    ..DamageByElement::default()
+                },
+            })
+        );
     }
 
     #[test]

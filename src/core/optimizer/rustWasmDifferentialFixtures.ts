@@ -28,7 +28,7 @@ import {
   type SimulationViolation,
   type SimulatedCharacter,
 } from "../simulation/index.ts";
-import { evaluateSustainableCycle } from "./comboOptimizer.ts";
+import { evaluateSustainableCycle, scoreComboSimulation } from "./comboOptimizer.ts";
 import { createRustWasmOptimizerRequest, type RustWasmOptimizerRequest } from "./rustWasmBackendTypes.ts";
 
 export type RustWasmDifferentialFixture =
@@ -628,6 +628,7 @@ export function normalizeGeneratedCandidateResult(
     totalDamage: simulation.totalDamage,
     finalResources: simulation.finalState.remainingResources,
     finalHuppermage: normalizeHuppermageForRust(simulation.finalState.classState.huppermage),
+    score: simulation.valid ? scoreComboSimulation(simulation) : undefined,
     firstViolation: simulation.violations[0]
       ? {
         turnIndex: simulation.violations[0].turnIndex,
