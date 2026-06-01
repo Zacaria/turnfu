@@ -475,6 +475,8 @@ pub struct OptimizerRequest {
     pub default_action_context: Option<Value>,
     #[serde(default)]
     pub max_candidates: Option<u32>,
+    #[serde(default)]
+    pub resume_state: Option<HybridSearchResumeState>,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
@@ -517,6 +519,37 @@ pub struct HybridSearchResponse {
     pub invalid_candidates: u32,
     pub top_candidates: Vec<ScoredTopCandidateEntry>,
     pub metrics: BTreeMap<String, u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_state: Option<HybridSearchResumeState>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HybridSearchResumeState {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub total_attempts: u64,
+    #[serde(default)]
+    pub islands: Vec<HybridIslandResumeState>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HybridIslandResumeState {
+    pub island_index: u32,
+    pub seed: String,
+    pub rng_state: u32,
+    pub warmup_index: usize,
+    pub restart_index: u32,
+    pub attempts_since_improvement: u32,
+    pub consecutive_repair_attempts: u32,
+    pub consecutive_elite_neighbor_attempts: u32,
+    #[serde(default)]
+    pub population: Vec<HybridPopulationEntry>,
+    #[serde(default)]
+    pub repair_queue: Vec<OptimizerCandidateInput>,
+    #[serde(default)]
+    pub elite_neighbor_queue: Vec<OptimizerCandidateInput>,
 }
 
 #[derive(Clone, Debug)]
@@ -835,6 +868,14 @@ impl SeededRandom {
         Self {
             state: hash_seed(seed),
         }
+    }
+
+    pub fn from_state(state: u32) -> Self {
+        Self { state }
+    }
+
+    pub fn state_snapshot(&self) -> u32 {
+        self.state
     }
 
     pub fn next(&mut self) -> f64 {
@@ -4929,6 +4970,7 @@ struct HybridSearchAccumulator {
     invalid_candidates: u32,
     top_candidates: Vec<ScoredTopCandidateEntry>,
     metrics: BTreeMap<String, u32>,
+    resume_state: Option<HybridIslandResumeState>,
 }
 
 struct HybridTrackedEvaluation {
@@ -5239,6 +5281,7 @@ fn run_hybrid_island_search(
     spells_by_id: &BTreeMap<&str, &SearchCatalogEntry>,
     cache: &mut DirectEvaluatorCache,
     restart_index_offset: u32,
+    resume_state: Option<&HybridIslandResumeState>,
 ) -> Result<HybridSearchAccumulator, String> {
     let config = create_hybrid_population_config(request.iterations);
     let mut accumulator = HybridSearchAccumulator {
@@ -5247,18 +5290,38 @@ fn run_hybrid_island_search(
         invalid_candidates: 0,
         top_candidates: Vec::new(),
         metrics: BTreeMap::new(),
+        resume_state: None,
     };
-    let mut rng = SeededRandom::new(&format!("{}:hybrid:run", request.seed));
+    let mut rng = resume_state
+        .map(|state| SeededRandom::from_state(state.rng_state))
+        .unwrap_or_else(|| SeededRandom::new(&format!("{}:hybrid:run", request.seed)));
     let warmup_candidates = create_domain_warmup_candidates(request, catalog, actions);
-    let mut warmup_index = 0_usize;
-    let mut population: Vec<HybridPopulationEntry> = Vec::new();
-    let mut elite_neighbor_queue: Vec<OptimizerCandidateInput> = Vec::new();
-    let mut repair_queue: VecDeque<OptimizerCandidateInput> = VecDeque::new();
-    let mut repair_queue_keys: HashSet<u128> = HashSet::new();
-    let mut attempts_since_improvement = 0_u32;
-    let mut consecutive_repair_attempts = 0_u32;
-    let mut consecutive_elite_neighbor_attempts = 0_u32;
-    let mut restart_index = restart_index_offset;
+    let mut warmup_index = resume_state.map(|state| state.warmup_index).unwrap_or(0);
+    let mut population: Vec<HybridPopulationEntry> = resume_state
+        .map(|state| truncate_population(state.population.clone(), config.population_size))
+        .unwrap_or_default();
+    let mut elite_neighbor_queue: Vec<OptimizerCandidateInput> = resume_state
+        .map(|state| state.elite_neighbor_queue.clone())
+        .unwrap_or_default();
+    let mut repair_queue: VecDeque<OptimizerCandidateInput> = resume_state
+        .map(|state| VecDeque::from(state.repair_queue.clone()))
+        .unwrap_or_default();
+    let mut repair_queue_keys: HashSet<u128> = repair_queue
+        .iter()
+        .map(hash_candidate)
+        .collect::<HashSet<_>>();
+    let mut attempts_since_improvement = resume_state
+        .map(|state| state.attempts_since_improvement)
+        .unwrap_or(0);
+    let mut consecutive_repair_attempts = resume_state
+        .map(|state| state.consecutive_repair_attempts)
+        .unwrap_or(0);
+    let mut consecutive_elite_neighbor_attempts = resume_state
+        .map(|state| state.consecutive_elite_neighbor_attempts)
+        .unwrap_or(0);
+    let mut restart_index = resume_state
+        .map(|state| state.restart_index)
+        .unwrap_or(restart_index_offset);
 
     while accumulator.attempts < request.iterations
         && population.len() < config.population_size as usize
@@ -5548,6 +5611,20 @@ fn run_hybrid_island_search(
         "hybridStagnationLimit",
         config.stagnation_limit,
     );
+
+    accumulator.resume_state = Some(HybridIslandResumeState {
+        island_index: restart_index_offset,
+        seed: request.seed.clone(),
+        rng_state: rng.state_snapshot(),
+        warmup_index,
+        restart_index,
+        attempts_since_improvement,
+        consecutive_repair_attempts,
+        consecutive_elite_neighbor_attempts,
+        population,
+        repair_queue: repair_queue.into_iter().collect(),
+        elite_neighbor_queue,
+    });
 
     Ok(accumulator)
 }
@@ -6079,6 +6156,7 @@ pub fn run_hybrid_search(request: &OptimizerRequest) -> Result<HybridSearchRespo
             invalid_candidates: 0,
             top_candidates: vec![],
             metrics,
+            resume_state: None,
         });
     }
 
@@ -6099,11 +6177,15 @@ pub fn run_hybrid_search(request: &OptimizerRequest) -> Result<HybridSearchRespo
     let mut valid_candidates = 0_u32;
     let mut invalid_candidates = 0_u32;
     let mut top_candidates = Vec::new();
+    let mut resume_islands = Vec::new();
 
     for island in &schedule.islands {
         let mut island_request = request.clone();
         island_request.iterations = island.iterations;
         island_request.seed = island.rng_seed.clone();
+        let island_resume_state = request.resume_state.as_ref().and_then(|state| {
+            find_resume_island_state(state, island.island_index, &island.rng_seed)
+        });
         let island_result = run_hybrid_island_search(
             &island_request,
             max_candidates,
@@ -6112,12 +6194,16 @@ pub fn run_hybrid_search(request: &OptimizerRequest) -> Result<HybridSearchRespo
             &spells_by_id,
             &mut cache,
             island.island_index,
+            island_resume_state,
         )?;
 
         attempts += island_result.attempts;
         valid_candidates += island_result.valid_candidates;
         invalid_candidates += island_result.invalid_candidates;
         merge_metric_maps(&mut metrics, island_result.metrics);
+        if let Some(resume_state) = island_result.resume_state {
+            resume_islands.push(resume_state);
+        }
         for candidate in island_result.top_candidates {
             add_scored_top_candidate(&mut top_candidates, max_candidates, candidate);
         }
@@ -6153,7 +6239,34 @@ pub fn run_hybrid_search(request: &OptimizerRequest) -> Result<HybridSearchRespo
         invalid_candidates,
         top_candidates,
         metrics,
+        resume_state: Some(HybridSearchResumeState {
+            schema_version: request.schema_version,
+            total_attempts: request
+                .resume_state
+                .as_ref()
+                .map(|state| state.total_attempts)
+                .unwrap_or(0)
+                + attempts as u64,
+            islands: resume_islands,
+        }),
     })
+}
+
+fn find_resume_island_state<'a>(
+    resume_state: &'a HybridSearchResumeState,
+    island_index: u32,
+    seed: &str,
+) -> Option<&'a HybridIslandResumeState> {
+    resume_state
+        .islands
+        .iter()
+        .find(|state| state.seed == seed)
+        .or_else(|| {
+            resume_state
+                .islands
+                .iter()
+                .find(|state| state.island_index == island_index)
+        })
 }
 
 fn add_scored_top_candidate(
@@ -7962,6 +8075,25 @@ mod tests {
         assert!(result.metrics.contains_key("hybridEliteCount"));
         assert!(result.metrics.contains_key("cacheHits"));
         assert!(result.metrics.contains_key("cacheMisses"));
+        let resume_state = result
+            .resume_state
+            .clone()
+            .expect("hybrid search should return resume state");
+        assert_eq!(resume_state.total_attempts, 100);
+        assert_eq!(resume_state.islands.len(), 1);
+
+        let mut resumed_request = request.clone();
+        resumed_request.resume_state = Some(resume_state);
+        let resumed_result =
+            run_hybrid_search(&resumed_request).expect("resumed hybrid search should run");
+        assert_eq!(resumed_result.attempts, 100);
+        assert_eq!(
+            resumed_result
+                .resume_state
+                .expect("resumed search should return resume state")
+                .total_attempts,
+            200
+        );
     }
 
     #[test]

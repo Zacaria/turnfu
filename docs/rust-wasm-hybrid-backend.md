@@ -61,6 +61,19 @@ current worker chunk completes once `--timebox-ms` has elapsed. The JSON output
 includes `completedBudget` so partial 100M-target runs can be compared without
 pretending the full 100M budget completed.
 
+Persistent SQLite search session:
+
+```bash
+rtk pnpm search:rust-wasm -- --session hupper-t3-full --db .optimizer/rust-wasm-search.sqlite --scenario t3-full --seed continuous --workers 20 --chunk-size 100000
+```
+
+The persistent runner stores one resumable Rust/WASM state per worker in SQLite.
+When the command is started again with the same session and matching gameplay
+fingerprint, it resumes from the saved population, repair queue,
+elite-neighbor queue, restart/stagnation counters, and RNG state. Use `--reset`
+to discard a session after rules, catalog, character setup, or optimizer options
+change. For smoke tests, add `--max-rounds 1` or `--timebox-ms <milliseconds>`.
+
 ## Current Local Evidence
 
 Local timings are noisy and machine-dependent, but the latest validated
