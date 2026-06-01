@@ -34,6 +34,7 @@ Rust/WASM backend.
 ```bash
 rtk pnpm wasm:test
 rtk pnpm diff:rust-wasm
+rtk pnpm test
 rtk pnpm bench:hybrid -- --compare-backends --scenario t3-full --budget 100000 --seed smoke --no-build --no-oracle
 rtk pnpm bench:hybrid -- --compare-backends --scenario t3-full --budget 1000000 --seed smoke --no-build --no-oracle
 rtk openspec validate port-hybrid-engine-to-rust-wasm --strict --no-interactive
@@ -108,6 +109,28 @@ Raw file: `docs/benchmarks/rust-wasm-rollout-100k-1m-compare.jsonl`.
 | `t3-full` | 100k | 7,246.38 | 11,431.05 | 103,545.66 | top 5 valid, delta 0 |
 | `t3-full` | 1M | 7,356.78 | 12,244.11 | 103,545.66 | top 5 valid, delta 0 |
 
+Post-rebase sublimation smoke on 2026-06-02:
+
+- Command: `rtk pnpm bench:hybrid -- --compare-backends --scenario t3-full --budget 100000 --seed smoke --no-build --no-oracle`
+- TypeScript: `6,389.64 it/s`, score `103,545.66`, valid rate `0.4434`.
+- Rust/WASM direct: `11,478.01 it/s`, score `103,545.66`, valid rate
+  `0.3124`.
+- Rust final top-candidate TypeScript validation: top 5 valid, max score delta
+  `0`, max total damage delta `0`.
+
+The same post-rebase validation pass ran:
+
+- `rtk pnpm diff:rust-wasm`: 91 fixtures, 32 generated candidates, 0
+  mismatches.
+- `rtk pnpm diff:rust-wasm:soak`: 98 fixtures, 1088 generated candidates, 0
+  mismatches.
+
+The generated differential batches now include targeted candidates for
+supported sublimation rules: initial stat/resource effects, action damage,
+elemental carryover, Alternance, Exces, Puissance Brute, elemental mastery
+percentage modifiers, action-level `criticalMode`, and invalid sublimation
+violations.
+
 ### 10M Parallel Rust/WASM Matrix
 
 Raw files:
@@ -150,9 +173,11 @@ TypeScript gameplay oracle.
 ## Merge Guardrails
 
 - Keep TypeScript as the default backend and gameplay oracle.
-- Keep Rust/WASM marked experimental until the remaining benchmark matrix and a
-  full 100M run are archived.
+- Keep Rust/WASM marked experimental until a separate promotion change makes
+  Rust canonical.
 - Trusted long-run Rust/WASM results must use final top-candidate TypeScript
   validation.
-- Do not mark OpenSpec benchmark tasks 6.2 or 6.3 complete until the full
-  requested evidence exists.
+- Reset incompatible persistent search sessions after gameplay rules, catalog
+  entries, sublimation support, character setup, or optimizer options change.
+- Re-run differential validation after TypeScript gameplay changes before
+  trusting Rust/WASM long-run results.

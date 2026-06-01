@@ -29,7 +29,7 @@ pub struct SpellCost {
     pub bq: i32,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PartialActionContext {
     #[serde(default)]
@@ -38,6 +38,8 @@ pub struct PartialActionContext {
     pub range_mode: Option<RangeMode>,
     #[serde(default)]
     pub is_critical: Option<bool>,
+    #[serde(default)]
+    pub critical_mode: Option<CriticalEvaluationMode>,
     #[serde(default)]
     pub is_berserk: Option<bool>,
     #[serde(default)]
@@ -51,11 +53,20 @@ pub struct ActionContext {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub range_mode: Option<RangeMode>,
     pub is_critical: bool,
+    pub critical_mode: CriticalEvaluationMode,
     pub is_berserk: bool,
     pub is_blocked: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum CriticalEvaluationMode {
+    Expected,
+    ForcedCritical,
+    ForcedNonCritical,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum AttackPosition {
     Face,
@@ -63,14 +74,14 @@ pub enum AttackPosition {
     Rear,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum RangeMode {
     Melee,
     Distance,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "camelCase")]
 pub enum Element {
     Fire,
@@ -423,6 +434,10 @@ pub struct DamageFormulaBreakdown {
     pub elemental_mastery: f64,
     pub extra_mastery: f64,
     pub mastery_multiplier: f64,
+    pub critical_mode: CriticalEvaluationMode,
+    pub effective_critical_hit_percent: f64,
+    pub non_critical_result: f64,
+    pub critical_result: f64,
     pub critical_multiplier: f64,
     pub position_multiplier: f64,
     pub final_multiplier: f64,
@@ -569,7 +584,7 @@ struct DomainSeedCandidate {
 pub struct CandidateEvaluationViolation {
     pub turn_index: u32,
     pub violation_type: String,
-    pub action_index: u32,
+    pub action_index: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spell_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -849,6 +864,8 @@ pub struct CandidateAction {
     pub spell_id: String,
     #[serde(default)]
     pub target: Option<CandidateActionTarget>,
+    #[serde(default)]
+    pub context: Option<PartialActionContext>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -1507,7 +1524,14 @@ fn enqueue_hybrid_elite_neighbors_with_catalog(
         &mut metrics,
         &mut generated,
     );
-    add_sublimation_neighbors(request, &mut queue, input, &mut seen, &mut metrics, &mut generated);
+    add_sublimation_neighbors(
+        request,
+        &mut queue,
+        input,
+        &mut seen,
+        &mut metrics,
+        &mut generated,
+    );
 
     for turn_index in (0..input.plan.turns.len()).rev() {
         let turn = &input.plan.turns[turn_index];
@@ -2996,6 +3020,7 @@ fn count_search_movement_events(effects: &[Value], state: &HuppermageState) -> i
                     &CandidateAction {
                         spell_id: String::new(),
                         target: None,
+                        context: None,
                     },
                 ) =>
             {
@@ -3297,6 +3322,7 @@ fn get_search_actions(
         actions.push(CandidateAction {
             spell_id: spell_id.clone(),
             target: None,
+            context: None,
         });
 
         if entry.constraints.iter().any(|constraint| {
@@ -3312,6 +3338,7 @@ fn get_search_actions(
                 target: Some(CandidateActionTarget {
                     kind: ActionTargetKind::EmptyCell,
                 }),
+                context: None,
             });
         }
     }
@@ -3400,10 +3427,15 @@ fn pick_random_sublimations(request: &OptimizerRequest, rng: &mut SeededRandom) 
         return Vec::new();
     }
 
-    let sublimation_limit =
-        std::cmp::min(request.max_sublimation_count as usize, sublimation_ids.len());
+    let sublimation_limit = std::cmp::min(
+        request.max_sublimation_count as usize,
+        sublimation_ids.len(),
+    );
     let target_count = if request.iterations >= 80 {
-        rng.integer(std::cmp::min(1, sublimation_limit) as u32, sublimation_limit as u32) as usize
+        rng.integer(
+            std::cmp::min(1, sublimation_limit) as u32,
+            sublimation_limit as u32,
+        ) as usize
     } else {
         rng.integer(0, sublimation_limit as u32) as usize
     };
@@ -3462,10 +3494,7 @@ fn get_available_sublimation_ids(request: &OptimizerRequest) -> Vec<String> {
     sublimation_ids
 }
 
-fn pick_weighted_sublimation_id(
-    sublimation_ids: &[String],
-    rng: &mut SeededRandom,
-) -> String {
+fn pick_weighted_sublimation_id(sublimation_ids: &[String], rng: &mut SeededRandom) -> String {
     let total_weight = sublimation_ids
         .iter()
         .map(|sublimation_id| get_sublimation_search_weight(sublimation_id))
@@ -3536,6 +3565,443 @@ fn get_sublimation_search_weight(sublimation_id: &str) -> f64 {
         "force-vitale-2" | "agilite-vitale-2" | "vivacite-2" | "velocite-2" => 2.0,
         _ => 1.0,
     }
+}
+
+fn validate_candidate_sublimations(candidate: &OptimizerCandidateInput) -> Option<String> {
+    candidate
+        .sublimation_ids
+        .iter()
+        .find(|sublimation_id| !is_supported_sublimation_id(sublimation_id))
+        .cloned()
+}
+
+fn apply_initial_sublimations(
+    candidate: &OptimizerCandidateInput,
+    character: &Value,
+    stats: &mut BaseStats,
+    resources: &mut ResourcePool,
+) {
+    let hp_assumption = character
+        .get("sublimations")
+        .and_then(|sublimations| sublimations.get("hpAssumption"))
+        .and_then(Value::as_str)
+        .unwrap_or("normal");
+    let condition_stats = stats.clone();
+    let condition_resources = *resources;
+
+    for sublimation_id in &candidate.sublimation_ids {
+        let level = get_sublimation_effective_level(sublimation_id);
+        match sublimation_id.as_str() {
+            "vivacite-2" => {
+                resources.ap += (0.5 * level).round() as i32;
+                stats.elemental_resistance -= 37.5 * level;
+            }
+            "velocite-2" => {
+                resources.mp += (0.5 * level).round() as i32;
+                stats.damage_inflicted_percent -= 5.0 * level;
+            }
+            "devastation-3" => {
+                resources.wp += ((1.0 / 3.0) * level).round() as i32;
+                stats.willpower -= (10.0 / 3.0) * level;
+            }
+            "influence-6" => stats.critical_hit_percent += 3.0 * level,
+            "influence-vitale-6" => stats.critical_hit_percent += 4.0 * level,
+            "critique-berserk-6" => stats.critical_hit_percent += 5.0 * level,
+            "force-vitale-2" => resources.ap += (0.5 * level).round() as i32,
+            "agilite-vitale-2" => resources.mp += (0.5 * level).round() as i32,
+            "armure-lourde-2" => {
+                resources.mp += (-0.5 * level).round() as i32;
+                stats.damage_inflicted_percent += 5.0 * level;
+            }
+            "carnage-6" if hp_assumption == "berserk50" || hp_assumption == "berserk20" => {
+                stats.general_mastery += 90.0 * level;
+            }
+            "puissance-brute-4" => resources.wp -= level.round() as i32,
+            "concentration-elementaire" => {
+                stats.damage_inflicted_percent += 20.0;
+                stats.heals_performed_percent += 20.0;
+                apply_weakest_elemental_mastery_percent(stats, 3, -30.0);
+            }
+            "chaos" => {
+                stats.damage_inflicted_percent += 20.0;
+                stats.heals_performed_percent += 20.0;
+                apply_weakest_elemental_mastery_percent(stats, 4, -100.0);
+            }
+            "secret-critique" if condition_stats.critical_mastery <= 0.0 => {
+                stats.critical_hit_percent += 30.0;
+            }
+            "inflexibilite" if condition_resources.ap <= 10 => {
+                stats.damage_inflicted_percent += 15.0;
+                stats.willpower += 10.0;
+            }
+            "inflexibilite-ii" if has_no_secondary_mastery(&condition_stats) => {
+                stats.damage_inflicted_percent += 20.0;
+                stats.heals_performed_percent += 20.0;
+            }
+            "exces" | "exces-ii" => stats.damage_inflicted_percent -= 10.0,
+            "expert-des-armes-legeres-6" => stats.general_mastery += 150.0 * level,
+            _ => {}
+        }
+    }
+}
+
+fn apply_weakest_elemental_mastery_percent(stats: &mut BaseStats, count: usize, percent: f64) {
+    let mut entries = vec![
+        (Element::Fire, stats.elemental_mastery.fire),
+        (Element::Water, stats.elemental_mastery.water),
+        (Element::Earth, stats.elemental_mastery.earth),
+        (Element::Air, stats.elemental_mastery.air),
+    ];
+    entries.sort_by(|left, right| {
+        left.1
+            .partial_cmp(&right.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    for (element, mastery) in entries.into_iter().take(count) {
+        let next = round_damage(mastery + mastery * percent / 100.0);
+        set_elemental_mastery(&mut stats.elemental_mastery, &element, next);
+    }
+}
+
+fn set_elemental_mastery(mastery: &mut ElementalMastery, element: &Element, value: f64) {
+    match element {
+        Element::Fire => mastery.fire = value,
+        Element::Water => mastery.water = value,
+        Element::Earth => mastery.earth = value,
+        Element::Air => mastery.air = value,
+        Element::Light => mastery.light = value,
+        Element::Neutral => mastery.neutral = value,
+    }
+}
+
+fn has_no_secondary_mastery(stats: &BaseStats) -> bool {
+    stats.melee_mastery <= 0.0
+        && stats.distance_mastery <= 0.0
+        && stats.berserk_mastery <= 0.0
+        && stats.rear_mastery <= 0.0
+        && stats.critical_mastery <= 0.0
+}
+
+fn get_sublimation_effective_level(sublimation_id: &str) -> f64 {
+    match sublimation_id {
+        "influence-6"
+        | "influence-vitale-6"
+        | "critique-berserk-6"
+        | "carnage-6"
+        | "expert-des-armes-legeres-6"
+        | "longueur-6" => 6.0,
+        "brulure-4"
+        | "brulure-secondaire-4"
+        | "gel-4"
+        | "gel-secondaire-4"
+        | "tellurisme-4"
+        | "tellurisme-secondaire-4"
+        | "ventilation-4"
+        | "ventilation-secondaire-4"
+        | "puissance-brute-4" => 4.0,
+        "devastation-3" => 3.0,
+        "sauvegarde-6" | "tolerance-2" | "vivacite-2" | "velocite-2" | "force-vitale-2"
+        | "agilite-vitale-2" | "armure-lourde-2" => 2.0,
+        _ => 1.0,
+    }
+}
+
+fn create_sublimation_combat_state(character: &Value) -> SublimationCombatState {
+    let elemental_carryover = character
+        .get("sublimationElementalCarryover")
+        .and_then(Value::as_object)
+        .map(|carryover| {
+            carryover
+                .iter()
+                .filter_map(|(key, value)| {
+                    read_element_key(key).map(|element| (element, value.as_f64().unwrap_or(0.0)))
+                })
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+    let alternance_previous_element = character
+        .get("sublimationAlternancePreviousElement")
+        .and_then(|value| serde_json::from_value::<Element>(value.clone()).ok());
+
+    SublimationCombatState {
+        elemental_carryover,
+        alternance_previous_element,
+        ..SublimationCombatState::default()
+    }
+}
+
+fn read_element_key(key: &str) -> Option<Element> {
+    match key {
+        "fire" => Some(Element::Fire),
+        "water" => Some(Element::Water),
+        "earth" => Some(Element::Earth),
+        "air" => Some(Element::Air),
+        "light" => Some(Element::Light),
+        "neutral" => Some(Element::Neutral),
+        _ => None,
+    }
+}
+
+fn add_spent_resources_for_sublimations(state: &mut SublimationCombatState, cost: SpellCost) {
+    state.spent_resources_this_turn.ap += cost.ap.max(0);
+    state.spent_resources_this_turn.mp += cost.mp.max(0);
+    state.spent_resources_this_turn.wp += cost.wp.max(0);
+    state.spent_resources_this_turn.bq += i32::from(cost.bq > 0);
+}
+
+fn collect_sublimation_damage_bonus_percent(
+    candidate: &OptimizerCandidateInput,
+    spell: &SearchCatalogEntry,
+    effective_cost: SpellCost,
+    state: &mut SublimationCombatState,
+) -> f64 {
+    let mut bonus = collect_action_sublimation_bonus(candidate, spell);
+    if let Some(damage_element) = spell.element.clone().filter(is_sublimation_element) {
+        bonus += consume_elemental_carryover_bonus(candidate, &damage_element, state);
+        bonus += collect_alternance_bonus(candidate, &damage_element, state);
+    }
+    bonus += consume_spell_count_carryover_bonus(candidate, state);
+    bonus += collect_spent_resource_sublimation_bonus(candidate, state);
+
+    if effective_cost.ap > 0 {
+        store_spell_count_carryover(candidate, state);
+    }
+
+    bonus
+}
+
+fn collect_action_sublimation_bonus(
+    candidate: &OptimizerCandidateInput,
+    spell: &SearchCatalogEntry,
+) -> f64 {
+    candidate
+        .sublimation_ids
+        .iter()
+        .map(
+            |sublimation_id| match (sublimation_id.as_str(), &spell.element) {
+                ("brulure-4", Some(Element::Fire))
+                | ("gel-4", Some(Element::Water))
+                | ("tellurisme-4", Some(Element::Earth))
+                | ("ventilation-4", Some(Element::Air)) => {
+                    4.0 * get_sublimation_effective_level(sublimation_id)
+                }
+                ("longueur-6", _) if spell_supports_distance(spell) => {
+                    2.0 * get_sublimation_effective_level(sublimation_id)
+                }
+                _ => 0.0,
+            },
+        )
+        .sum()
+}
+
+fn consume_elemental_carryover_bonus(
+    candidate: &OptimizerCandidateInput,
+    damage_element: &Element,
+    state: &mut SublimationCombatState,
+) -> f64 {
+    let has_matching_sublimation = candidate.sublimation_ids.iter().any(|sublimation_id| {
+        secondary_carryover_target(sublimation_id).as_ref() == Some(damage_element)
+    });
+    if !has_matching_sublimation {
+        return 0.0;
+    }
+    state
+        .elemental_carryover
+        .remove(damage_element)
+        .unwrap_or(0.0)
+}
+
+fn collect_alternance_bonus(
+    candidate: &OptimizerCandidateInput,
+    damage_element: &Element,
+    state: &SublimationCombatState,
+) -> f64 {
+    let mut bonus = 0.0;
+    if candidate
+        .sublimation_ids
+        .iter()
+        .any(|sublimation_id| sublimation_id == "alternance")
+        && state.damage_elements_this_turn.len() == 1
+        && state.damage_elements_this_turn.first() != Some(damage_element)
+    {
+        bonus += 20.0;
+    }
+    if candidate
+        .sublimation_ids
+        .iter()
+        .any(|sublimation_id| sublimation_id == "alternance-ii")
+        && state
+            .alternance_previous_element
+            .as_ref()
+            .is_some_and(|previous| previous != damage_element)
+    {
+        bonus += 15.0;
+    }
+    bonus
+}
+
+fn consume_spell_count_carryover_bonus(
+    candidate: &OptimizerCandidateInput,
+    state: &mut SublimationCombatState,
+) -> f64 {
+    let mut bonus = 0.0;
+    for family_id in ["exces", "exces-ii"] {
+        if !candidate
+            .sublimation_ids
+            .iter()
+            .any(|sublimation_id| sublimation_family_id(sublimation_id) == family_id)
+        {
+            continue;
+        }
+        let entry = state
+            .spell_count_carryover
+            .entry(family_id.to_string())
+            .or_default();
+        bonus += entry.pending_damage_inflicted_percent;
+        entry.pending_damage_inflicted_percent = 0.0;
+    }
+    bonus
+}
+
+fn collect_spent_resource_sublimation_bonus(
+    candidate: &OptimizerCandidateInput,
+    state: &SublimationCombatState,
+) -> f64 {
+    if !candidate
+        .sublimation_ids
+        .iter()
+        .any(|sublimation_id| sublimation_id == "puissance-brute-4")
+    {
+        return 0.0;
+    }
+    let level = get_sublimation_effective_level("puissance-brute-4");
+    let spent = state.spent_resources_this_turn.wp + state.spent_resources_this_turn.bq;
+    (spent.max(0) as f64 * 2.0 * level).min(4.0 * level)
+}
+
+fn store_sublimation_after_action(
+    candidate: &OptimizerCandidateInput,
+    spell: &SearchCatalogEntry,
+    action_damage: f64,
+    state: &mut SublimationCombatState,
+) {
+    let Some(damage_element) = spell.element.clone().filter(is_sublimation_element) else {
+        return;
+    };
+
+    for sublimation_id in &candidate.sublimation_ids {
+        let Some(target) = secondary_carryover_target(sublimation_id) else {
+            continue;
+        };
+        if !secondary_carryover_triggers(sublimation_id, &damage_element) {
+            continue;
+        }
+        let before = state
+            .elemental_carryover
+            .get(&target)
+            .copied()
+            .unwrap_or(0.0);
+        let added = 2.0 * get_sublimation_effective_level(sublimation_id);
+        state
+            .elemental_carryover
+            .insert(target, (before + added).min(30.0));
+    }
+
+    if action_damage > 0.0 {
+        if !state.damage_elements_this_turn.contains(&damage_element) {
+            state.damage_elements_this_turn.push(damage_element.clone());
+        }
+        state.alternance_previous_element = Some(damage_element);
+    }
+}
+
+fn store_spell_count_carryover(
+    candidate: &OptimizerCandidateInput,
+    state: &mut SublimationCombatState,
+) {
+    for sublimation_id in &candidate.sublimation_ids {
+        let (family_id, interval, amount) = match sublimation_id.as_str() {
+            "exces" => ("exces", 10, 100.0),
+            "exces-ii" => ("exces", 5, 50.0),
+            _ => continue,
+        };
+        let entry = state
+            .spell_count_carryover
+            .entry(family_id.to_string())
+            .or_default();
+        entry.qualified_casts += 1;
+        if entry.qualified_casts % interval == 0 {
+            entry.pending_damage_inflicted_percent =
+                entry.pending_damage_inflicted_percent.max(amount);
+        }
+    }
+}
+
+fn secondary_carryover_target(sublimation_id: &str) -> Option<Element> {
+    match sublimation_id {
+        "brulure-secondaire-4" => Some(Element::Fire),
+        "gel-secondaire-4" => Some(Element::Water),
+        "tellurisme-secondaire-4" => Some(Element::Earth),
+        "ventilation-secondaire-4" => Some(Element::Air),
+        _ => None,
+    }
+}
+
+fn secondary_carryover_triggers(sublimation_id: &str, element: &Element) -> bool {
+    match sublimation_id {
+        "brulure-secondaire-4" => matches!(element, Element::Water | Element::Earth | Element::Air),
+        "gel-secondaire-4" => matches!(element, Element::Fire | Element::Earth | Element::Air),
+        "tellurisme-secondaire-4" => {
+            matches!(element, Element::Fire | Element::Water | Element::Air)
+        }
+        "ventilation-secondaire-4" => {
+            matches!(element, Element::Fire | Element::Water | Element::Earth)
+        }
+        _ => false,
+    }
+}
+
+fn sublimation_family_id(sublimation_id: &str) -> &str {
+    match sublimation_id {
+        "exces" | "exces-ii" => "exces",
+        _ => sublimation_id,
+    }
+}
+
+fn is_sublimation_element(element: &Element) -> bool {
+    matches!(
+        element,
+        Element::Fire | Element::Water | Element::Earth | Element::Air
+    )
+}
+
+fn spell_supports_distance(spell: &SearchCatalogEntry) -> bool {
+    spell.element.is_some()
+}
+
+fn collect_sublimation_resource_carryover(
+    candidate: &OptimizerCandidateInput,
+    resources: ResourcePool,
+) -> ResourcePool {
+    let mut carryover = ResourcePool::default();
+    if candidate
+        .sublimation_ids
+        .iter()
+        .any(|sublimation_id| sublimation_id == "sauvegarde-6")
+        && resources.ap > 0
+    {
+        carryover.ap = std::cmp::min(resources.ap, 1);
+    }
+    if candidate
+        .sublimation_ids
+        .iter()
+        .any(|sublimation_id| sublimation_id == "tolerance-2")
+        && resources.mp > 0
+    {
+        carryover.mp = std::cmp::min(resources.mp, 2);
+    }
+    carryover
 }
 
 fn get_passive_search_weight(
@@ -3772,14 +4238,22 @@ pub fn resolve_action_context(context: Option<PartialActionContext>) -> ActionCo
         position: None,
         range_mode: None,
         is_critical: None,
+        critical_mode: None,
         is_berserk: None,
         is_blocked: None,
+    });
+    let is_critical = context.is_critical.unwrap_or(false);
+    let critical_mode = context.critical_mode.unwrap_or(if is_critical {
+        CriticalEvaluationMode::ForcedCritical
+    } else {
+        CriticalEvaluationMode::ForcedNonCritical
     });
 
     ActionContext {
         position: context.position.unwrap_or(AttackPosition::Face),
         range_mode: context.range_mode,
-        is_critical: context.is_critical.unwrap_or(false),
+        is_critical,
+        critical_mode,
         is_berserk: context.is_berserk.unwrap_or(false),
         is_blocked: context.is_blocked.unwrap_or(false),
     }
@@ -3835,14 +4309,6 @@ pub fn compute_raw_damage(
     let resolved_context = resolve_action_context(context);
     let resolved_element = resolve_damage_element(&effect.element, stats);
     let elemental_mastery = get_elemental_mastery(&stats.elemental_mastery, &resolved_element);
-    let extra_mastery = get_extra_mastery(stats, &resolved_context);
-    let mastery_multiplier =
-        1.0 + (stats.general_mastery + elemental_mastery + extra_mastery) / 100.0;
-    let critical_multiplier = if resolved_context.is_critical {
-        1.25
-    } else {
-        1.0
-    };
     let position_multiplier = get_position_multiplier(&resolved_context.position);
     let final_multiplier = 1.0 + stats.damage_inflicted_percent / 100.0;
     let block_multiplier = if resolved_context.is_blocked {
@@ -3851,6 +4317,89 @@ pub fn compute_raw_damage(
         1.0
     };
     let times = effect.times.unwrap_or(1.0);
+    let non_critical_branch = compute_damage_branch(
+        stats,
+        effect,
+        &resolved_context,
+        elemental_mastery,
+        false,
+        position_multiplier,
+        final_multiplier,
+        block_multiplier,
+        times,
+    );
+    let critical_branch = compute_damage_branch(
+        stats,
+        effect,
+        &resolved_context,
+        elemental_mastery,
+        true,
+        position_multiplier,
+        final_multiplier,
+        block_multiplier,
+        times,
+    );
+    let effective_critical_hit_percent = match resolved_context.critical_mode {
+        CriticalEvaluationMode::Expected => stats.critical_hit_percent.clamp(0.0, 100.0),
+        CriticalEvaluationMode::ForcedCritical => 100.0,
+        CriticalEvaluationMode::ForcedNonCritical => 0.0,
+    };
+    let result = match resolved_context.critical_mode {
+        CriticalEvaluationMode::Expected => round_damage(
+            non_critical_branch.result * (1.0 - effective_critical_hit_percent / 100.0)
+                + critical_branch.result * (effective_critical_hit_percent / 100.0),
+        ),
+        CriticalEvaluationMode::ForcedCritical => critical_branch.result,
+        CriticalEvaluationMode::ForcedNonCritical => non_critical_branch.result,
+    };
+    let selected_branch =
+        if resolved_context.critical_mode == CriticalEvaluationMode::ForcedCritical {
+            &critical_branch
+        } else {
+            &non_critical_branch
+        };
+
+    DamageFormulaBreakdown {
+        base_damage: effect.base,
+        times,
+        resolved_element,
+        elemental_mastery,
+        extra_mastery: selected_branch.extra_mastery,
+        mastery_multiplier: selected_branch.mastery_multiplier,
+        critical_mode: resolved_context.critical_mode,
+        effective_critical_hit_percent,
+        non_critical_result: non_critical_branch.result,
+        critical_result: critical_branch.result,
+        critical_multiplier: selected_branch.critical_multiplier,
+        position_multiplier,
+        final_multiplier,
+        block_multiplier,
+        result,
+    }
+}
+
+struct DamageBranch {
+    extra_mastery: f64,
+    mastery_multiplier: f64,
+    critical_multiplier: f64,
+    result: f64,
+}
+
+fn compute_damage_branch(
+    stats: &BaseStats,
+    effect: &DamageEffect,
+    context: &ActionContext,
+    elemental_mastery: f64,
+    is_critical: bool,
+    position_multiplier: f64,
+    final_multiplier: f64,
+    block_multiplier: f64,
+    times: f64,
+) -> DamageBranch {
+    let extra_mastery = get_extra_mastery(stats, context, is_critical);
+    let mastery_multiplier =
+        1.0 + (stats.general_mastery + elemental_mastery + extra_mastery) / 100.0;
+    let critical_multiplier = if is_critical { 1.25 } else { 1.0 };
     let result = round_damage(
         (effect.base
             * times
@@ -3862,17 +4411,10 @@ pub fn compute_raw_damage(
             .max(0.0),
     );
 
-    DamageFormulaBreakdown {
-        base_damage: effect.base,
-        times,
-        resolved_element,
-        elemental_mastery,
+    DamageBranch {
         extra_mastery,
         mastery_multiplier,
         critical_multiplier,
-        position_multiplier,
-        final_multiplier,
-        block_multiplier,
         result,
     }
 }
@@ -4974,7 +5516,7 @@ fn get_highest_elemental_mastery_element(mastery: &ElementalMastery) -> Element 
         .0
 }
 
-fn get_extra_mastery(stats: &BaseStats, context: &ActionContext) -> f64 {
+fn get_extra_mastery(stats: &BaseStats, context: &ActionContext, is_critical: bool) -> f64 {
     let range_mastery = match context.range_mode {
         Some(RangeMode::Melee) => stats.melee_mastery,
         Some(RangeMode::Distance) => stats.distance_mastery,
@@ -4992,7 +5534,7 @@ fn get_extra_mastery(stats: &BaseStats, context: &ActionContext) -> f64 {
         } else {
             0.0
         }
-        + if context.is_critical {
+        + if is_critical {
             stats.critical_mastery
         } else {
             0.0
@@ -5512,12 +6054,15 @@ fn create_repair_candidate_from_evaluation(
     evaluation: &CandidateEvaluationResult,
 ) -> Option<OptimizerCandidateInput> {
     let violation = evaluation.first_violation.as_ref()?;
+    if violation.action_index < 0 {
+        return None;
+    }
     create_hybrid_repair_candidate(
         candidate,
         &HybridViolationInput {
             violation_type: violation.violation_type.clone(),
             turn_index: violation.turn_index,
-            action_index: violation.action_index,
+            action_index: violation.action_index as u32,
         },
     )
 }
@@ -6709,6 +7254,27 @@ fn evaluate_candidate_with_catalog<'a>(
     catalog: &'a [SearchCatalogEntry],
     spells_by_id: &BTreeMap<&'a str, &'a SearchCatalogEntry>,
 ) -> Result<CandidateEvaluationResult, String> {
+    if let Some(sublimation_id) = validate_candidate_sublimations(candidate) {
+        return Ok(create_candidate_evaluation_result(
+            candidate_id,
+            false,
+            0.0,
+            read_request_resources(&request.character),
+            create_huppermage_state(read_request_resources(&request.character), vec![]),
+            None,
+            Some(CandidateEvaluationViolation {
+                turn_index: 0,
+                violation_type: "invalidSublimation".to_string(),
+                action_index: -1,
+                spell_id: Some(sublimation_id),
+                resource: None,
+                required: None,
+                available: None,
+                scope: None,
+            }),
+        ));
+    }
+
     let mut base_resources = read_request_resources(&request.character);
     let mut base_stats = read_request_stats(&request.character);
     let active_passive_ids = candidate.passive_ids.clone();
@@ -6719,6 +7285,12 @@ fn evaluate_candidate_with_catalog<'a>(
         apply_initial_passive_effects(base_stats.clone(), base_resources, &passives);
     base_stats = initial_passives.stats;
     base_resources = initial_passives.resources;
+    apply_initial_sublimations(
+        candidate,
+        &request.character,
+        &mut base_stats,
+        &mut base_resources,
+    );
 
     let default_context = request
         .default_action_context
@@ -6727,6 +7299,7 @@ fn evaluate_candidate_with_catalog<'a>(
     let mut resources = base_resources;
     let mut total_damage = 0.0;
     let mut damage_by_resolved_element = DamageByElement::default();
+    let mut sublimation_state = create_sublimation_combat_state(&request.character);
 
     for (turn_index, turn) in candidate.plan.turns.iter().enumerate() {
         let mut turn_damage = 0.0;
@@ -6750,6 +7323,7 @@ fn evaluate_candidate_with_catalog<'a>(
                 ));
             };
 
+            let action_context = action.context.clone().or_else(|| default_context.clone());
             let rules = create_spell_rules_from_search_entry(spell);
             let target = action.target.as_ref().map(|target| target.kind.clone());
             if let Some(violation) = validate_spell_rules(
@@ -6787,7 +7361,7 @@ fn evaluate_candidate_with_catalog<'a>(
                 effective_cost,
                 &spell.id,
                 action_index as u32,
-                default_context.clone(),
+                action_context.clone(),
             );
             if let Some(violation) = resource_validation.violation {
                 return Ok(create_candidate_evaluation_result(
@@ -6801,6 +7375,7 @@ fn evaluate_candidate_with_catalog<'a>(
                 ));
             }
             resources = resource_validation.resources_after_cost;
+            add_spent_resources_for_sublimations(&mut sublimation_state, effective_cost);
 
             if spell.id == "cycle-elementaire" {
                 let cycle = apply_cycle_elementaire(huppermage, resources);
@@ -6842,6 +7417,12 @@ fn evaluate_candidate_with_catalog<'a>(
                 &action,
                 resources,
             );
+            action_stats.damage_inflicted_percent += collect_sublimation_damage_bonus_percent(
+                candidate,
+                spell,
+                effective_cost,
+                &mut sublimation_state,
+            );
 
             let mut action_damage = 0.0;
             if !is_empty_cell_action(action) {
@@ -6850,8 +7431,7 @@ fn evaluate_candidate_with_catalog<'a>(
                     if damage_matches_last_generated_rune(&damage_stats, &effect, &huppermage) {
                         damage_stats.damage_inflicted_percent += 20.0;
                     }
-                    let damage =
-                        compute_raw_damage(&damage_stats, &effect, default_context.clone());
+                    let damage = compute_raw_damage(&damage_stats, &effect, action_context.clone());
                     action_damage = round_damage(action_damage + damage.result);
                     turn_damage = round_damage(turn_damage + damage.result);
                     damage_by_resolved_element = add_resolved_element_damage(
@@ -6879,7 +7459,7 @@ fn evaluate_candidate_with_catalog<'a>(
 
             if let Some(halo_damage) = apply_halo_chatoyant_damage(spell, &mut huppermage, action) {
                 let damage =
-                    compute_raw_damage(&action_stats, &halo_damage, default_context.clone());
+                    compute_raw_damage(&action_stats, &halo_damage, action_context.clone());
                 turn_damage = round_damage(turn_damage + damage.result);
                 damage_by_resolved_element = add_resolved_element_damage(
                     damage_by_resolved_element,
@@ -6926,11 +7506,14 @@ fn evaluate_candidate_with_catalog<'a>(
                     resources = generation.resources;
                 }
             }
+            store_sublimation_after_action(candidate, spell, action_damage, &mut sublimation_state);
         }
 
         let turn_end = apply_turn_end_bq(huppermage, resources);
         huppermage = turn_end.state;
         resources = turn_end.resources;
+        let sublimation_resource_carryover =
+            collect_sublimation_resource_carryover(candidate, resources);
         if has_passive(&huppermage, "profusion-runique") {
             let active_rune_count = get_active_rune_count(&huppermage);
             if active_rune_count > 0 {
@@ -6946,7 +7529,11 @@ fn evaluate_candidate_with_catalog<'a>(
             let carried =
                 create_next_turn_state(base_resources, resources, huppermage, &casts_by_spell_id);
             resources = carried.resources;
+            resources.ap += sublimation_resource_carryover.ap;
+            resources.mp += sublimation_resource_carryover.mp;
             huppermage = carried.huppermage;
+            sublimation_state.damage_elements_this_turn.clear();
+            sublimation_state.spent_resources_this_turn = ResourcePool::default();
         }
     }
 
@@ -7040,7 +7627,7 @@ fn violation_with_turn(
     CandidateEvaluationViolation {
         turn_index,
         violation_type: violation.violation_type.clone(),
-        action_index: violation.action_index,
+        action_index: violation.action_index as i32,
         spell_id: violation.spell_id.clone(),
         resource: None,
         required: violation.required,
@@ -7056,13 +7643,28 @@ fn resource_violation_with_turn(
     CandidateEvaluationViolation {
         turn_index,
         violation_type: violation.violation_type.clone(),
-        action_index: violation.action_index,
+        action_index: violation.action_index as i32,
         spell_id: Some(violation.spell_id.clone()),
         resource: Some(violation.resource.clone()),
         required: Some(violation.required),
         available: Some(violation.available),
         scope: None,
     }
+}
+
+#[derive(Clone, Debug, Default)]
+struct SublimationCombatState {
+    elemental_carryover: BTreeMap<Element, f64>,
+    damage_elements_this_turn: Vec<Element>,
+    alternance_previous_element: Option<Element>,
+    spell_count_carryover: BTreeMap<String, SpellCountCarryoverState>,
+    spent_resources_this_turn: ResourcePool,
+}
+
+#[derive(Clone, Debug, Default)]
+struct SpellCountCarryoverState {
+    qualified_casts: u32,
+    pending_damage_inflicted_percent: f64,
 }
 
 #[wasm_bindgen]
@@ -8306,6 +8908,7 @@ mod tests {
                             .map(|index| CandidateAction {
                                 spell_id: format!("hit-{index}"),
                                 target: None,
+                                context: None,
                             })
                             .collect(),
                     }],
@@ -8617,6 +9220,7 @@ mod tests {
                             .map(|index| CandidateAction {
                                 spell_id: format!("hit-{index}"),
                                 target: None,
+                                context: None,
                             })
                             .collect(),
                     }],
@@ -8753,6 +9357,7 @@ mod tests {
             } else {
                 None
             },
+            context: None,
         }
     }
 
@@ -8762,6 +9367,7 @@ mod tests {
             target: Some(CandidateActionTarget {
                 kind: ActionTargetKind::EmptyCell,
             }),
+            context: None,
         }
     }
 
@@ -8786,6 +9392,7 @@ mod tests {
                 position: Some(AttackPosition::Rear),
                 range_mode: Some(RangeMode::Distance),
                 is_critical: Some(true),
+                critical_mode: None,
                 is_berserk: None,
                 is_blocked: None,
             }),
@@ -8876,6 +9483,7 @@ mod tests {
                 position: Some(AttackPosition::Rear),
                 range_mode: Some(RangeMode::Distance),
                 is_critical: Some(true),
+                critical_mode: None,
                 is_berserk: Some(false),
                 is_blocked: Some(false),
             }),

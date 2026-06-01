@@ -7,7 +7,8 @@ Date: 2026-06-02
 - Path: `/Users/zacariachtatar/game_repos/wakfu-turn-optimizer/.worktrees/codex/port-hybrid-engine-rust-wasm-handoff`
 - Branch: `codex/port-hybrid-engine-rust-wasm-handoff`
 - Active OpenSpec change: `port-hybrid-engine-to-rust-wasm`
-- Current status at refresh: clean before this handoff update
+- Current status at refresh: post-rebase sublimation integration validated,
+  ready for commit
 
 This worktree is intentionally separate from the main checkout. Do not touch the
 main checkout at `/Users/zacariachtatar/game_repos/wakfu-turn-optimizer`.
@@ -40,6 +41,8 @@ The OpenSpec task list for `port-hybrid-engine-to-rust-wasm` is complete:
   local refinement, restarts/immigrants, direct evaluator cache, and metrics.
 - Parallel Rust/WASM benchmark harness.
 - SQLite-backed persistent search sessions and UI workspace/session state.
+- Rebase onto `master` with the TypeScript sublimation engine integrated into
+  Rust/WASM search transport, direct evaluation, and differential fixtures.
 - Documentation and archived benchmark evidence.
 - Full verification pass.
 
@@ -49,42 +52,57 @@ instead of browser-only storage.
 
 ## Recent Commits
 
-Most relevant recent commits before rebasing onto `master`:
+Most relevant recent commits after rebasing onto `master`:
 
-- `6f534db test(optimizer): archive rust wasm rollout benchmarks`
+- `9c44374 feat(optimizer): carry sublimations through rust wasm search`
+  - Carries candidate `sublimationIds` through Rust/WASM request, search,
+    resume-state, scoring, and final top-candidate transport.
+
+- `e9d01d5 test(optimizer): archive rust wasm rollout benchmarks`
   - Archives 100k, 1M, 10M, and 100M benchmark evidence.
   - Records throughput, score, valid rate, cache, and memory metrics.
-- `c966d25 fix(optimizer): remove bounded progress from ui runs`
+- `cc39b91 fix(optimizer): remove bounded progress from ui runs`
   - Replaces fixed progress with unbounded generation/evaluation counters.
-- `8d6026d feat(optimizer): persist ui state in sqlite`
+- `d584611 feat(optimizer): persist ui state in sqlite`
   - Adds SQLite-backed local API routes for workspace and optimizer sessions.
-- `6277481 feat(optimizer): persist rust wasm search sessions`
+- `2e56654 feat(optimizer): persist rust wasm search sessions`
   - Adds the resumable SQLite runner for long Rust/WASM searches.
-- `ce8f2fb docs(optimizer): document rust wasm parallel rollout`
+- `26a6af0 docs(optimizer): document rust wasm parallel rollout`
   - Documents parallel backend usage, trust level, and limitations.
-- `32af927 perf(optimizer): borrow rust search effects`
+- `711da97 perf(optimizer): borrow rust search effects`
   - Ports the effective hybrid search behavior into the direct Rust path.
 
 ## Validation Evidence
 
-Latest completed verification before the sublimations rebase:
+Latest completed verification after rebasing onto `master` and integrating
+supported sublimation rules:
 
 ```bash
 rtk pnpm test
 rtk pnpm wasm:test
 rtk pnpm diff:rust-wasm
 rtk pnpm diff:rust-wasm:soak
+rtk pnpm bench:hybrid -- --compare-backends --scenario t3-full --budget 100000 --seed smoke --no-build --no-oracle
 rtk openspec validate port-hybrid-engine-to-rust-wasm --strict --no-interactive
 rtk git diff --check
 ```
 
 Results:
 
-- TypeScript tests: 205 passed.
+- TypeScript tests: 254 passed.
 - Rust tests: 55 passed.
-- CI differential: 91 fixtures, 24 generated candidates, 0 mismatches.
-- Soak differential: 98 fixtures, 1024 generated candidates, 0 mismatches.
+- CI differential: 91 fixtures, 32 generated candidates, 0 mismatches. The
+  generated batch now includes targeted sublimation candidates for initial
+  stat/resource effects, action damage, elemental carryover, Alternance,
+  Exces, Puissance Brute, elemental mastery percentage modifiers, and invalid
+  sublimation violations.
+- Soak differential: 98 fixtures, 1088 generated candidates, 0 mismatches.
 - OpenSpec strict validation: valid.
+- Diff whitespace check: passed.
+- `t3-full` 100k smoke, no per-candidate oracle:
+  - TypeScript: `6,389.64 it/s`, score `103545.66`.
+  - Rust/WASM: `11,478.01 it/s`, score `103545.66`.
+  - Final top candidates revalidated in TypeScript with score delta `0`.
 
 Notes:
 
@@ -122,16 +140,23 @@ Conclusion:
   spike's x12 ratio.
 - The parallel harness gives the useful speedup for long experimental runs.
 
-## Rebase On Master
+## Post-Rebase Sublimation Notes
 
-The branch is being rebased onto `origin/master`, which includes the TypeScript
-sublimation engine work. After the rebase:
+The branch has been rebased onto `origin/master`, which includes the TypeScript
+sublimation engine. TypeScript remains the oracle. Rust/WASM now:
 
-1. Inspect the sublimation rules now present in TypeScript.
-2. Port the supported sublimation rules into Rust/WASM where needed.
-3. Keep TypeScript as the oracle and expand differential coverage for the new
-   rules.
-4. Re-run the validation suite and commit the integration in coherent slices.
+- accepts action-level context in candidate plans, including `criticalMode`;
+- applies supported sublimation effective levels for initial stat/resource
+  effects, per-action elemental bonuses, elemental carryover, Exces counters,
+  Puissance Brute spent-resource bonuses, and AP/MP carryover;
+- reports global `invalidSublimation` candidate violations with the same
+  normalized `actionIndex: -1` shape as TypeScript;
+- keeps final Rust top candidates revalidated through TypeScript in no-oracle
+  benchmark mode.
+
+If TypeScript gameplay rules, catalog entries, or supported sublimation effects
+change again, reset incompatible persistent search sessions and re-run the
+differential suite before trusting Rust/WASM results.
 
 ## Commands To Resume
 

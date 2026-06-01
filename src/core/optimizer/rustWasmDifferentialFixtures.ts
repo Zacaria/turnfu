@@ -161,6 +161,8 @@ type RustSpellRules = {
 
 export type GeneratedCandidate = {
   id: string;
+  passiveIds?: string[];
+  sublimationIds?: string[];
   plan: ComboPlan;
 };
 
@@ -551,6 +553,11 @@ function createSeededCandidateBatchFixtures(
     "resonance",
     "fleche-de-lumiere",
     "larmes-scintillantes",
+    "lueur-de-laube",
+    "disque-luminescent",
+    "flux-denergie",
+    "debacle",
+    "averse",
   ];
   const spellBook = Object.fromEntries(spellIds.map((spellId) => {
     const spell = requireSpell(spellId);
@@ -558,7 +565,10 @@ function createSeededCandidateBatchFixtures(
   }));
 
   return options.candidateBatchSeeds.map((seed) => {
-    const candidates = createSeededGeneratedCandidates(seed, spellIds, options.candidatesPerBatch);
+    const candidates = [
+      ...createSeededGeneratedCandidates(seed, spellIds, options.candidatesPerBatch),
+      ...createSublimationGeneratedCandidates(seed),
+    ];
 
     return {
       kind: "candidateBatch",
@@ -574,6 +584,17 @@ function createSeededCandidateBatchFixtures(
         availableSpellIds: spellIds,
         maxActionsPerTurn: 4,
         maxPassiveCount: 0,
+        maxSublimationCount: 2,
+        availableSublimationIds: [
+          "influence-6",
+          "brulure-4",
+          "brulure-secondaire-4",
+          "alternance-ii",
+          "exces-ii",
+          "puissance-brute-4",
+          "concentration-elementaire",
+          "chaos",
+        ],
       }),
       candidates,
       resources: character.resources,
@@ -583,6 +604,62 @@ function createSeededCandidateBatchFixtures(
       expected: candidates.map((candidate) => evaluateGeneratedCandidateWithTypeScript(candidate, character)),
     };
   });
+}
+
+function createSublimationGeneratedCandidates(seed: string): GeneratedCandidate[] {
+  return [
+    {
+      id: `${seed}:sublimation:initial-critical`,
+      sublimationIds: ["influence-6"],
+      plan: { turns: [{ actions: [{ spellId: "lueur-de-laube", context: { criticalMode: "expected" } }] }] },
+    },
+    {
+      id: `${seed}:sublimation:fire-action`,
+      sublimationIds: ["brulure-4"],
+      plan: { turns: [{ actions: [{ spellId: "lueur-de-laube" }] }] },
+    },
+    {
+      id: `${seed}:sublimation:secondary-carryover`,
+      sublimationIds: ["brulure-secondaire-4"],
+      plan: { turns: [{ actions: [{ spellId: "debacle" }, { spellId: "lueur-de-laube" }] }] },
+    },
+    {
+      id: `${seed}:sublimation:alternance-ii`,
+      sublimationIds: ["alternance-ii"],
+      plan: { turns: [{ actions: [{ spellId: "lueur-de-laube" }, { spellId: "debacle" }] }] },
+    },
+    {
+      id: `${seed}:sublimation:exces-ii`,
+      sublimationIds: ["exces-ii"],
+      plan: {
+        turns: [{
+          actions: [
+            { spellId: "lueur-de-laube" },
+            { spellId: "flux-denergie" },
+            { spellId: "disque-luminescent" },
+            { spellId: "debacle" },
+            { spellId: "resonance" },
+            { spellId: "larmes-scintillantes" },
+          ],
+        }],
+      },
+    },
+    {
+      id: `${seed}:sublimation:puissance-brute`,
+      sublimationIds: ["puissance-brute-4"],
+      plan: { turns: [{ actions: [{ spellId: "averse" }, { spellId: "averse" }, { spellId: "lueur-de-laube" }] }] },
+    },
+    {
+      id: `${seed}:sublimation:elemental-mastery-percent`,
+      sublimationIds: ["concentration-elementaire"],
+      plan: { turns: [{ actions: [{ spellId: "lueur-de-laube" }] }] },
+    },
+    {
+      id: `${seed}:sublimation:invalid-sublimation`,
+      sublimationIds: ["absolution"],
+      plan: { turns: [{ actions: [{ spellId: "lueur-de-laube" }] }] },
+    },
+  ];
 }
 
 function createSeededGeneratedCandidates(seed: string, spellIds: string[], count: number): GeneratedCandidate[] {
@@ -609,9 +686,28 @@ function evaluateGeneratedCandidateWithTypeScript(
   candidate: GeneratedCandidate,
   character: SimulatedCharacter,
 ) {
+  const activePassives = candidate.passiveIds ?? [];
+  const sublimationIds = candidate.sublimationIds ?? [];
+  const candidateCharacter: SimulatedCharacter = {
+    ...character,
+    classState: {
+      ...character.classState,
+      huppermage: {
+        ...character.classState?.huppermage,
+        activePassives,
+      },
+    },
+    sublimations: sublimationIds.length > 0
+      ? {
+        ...character.sublimations,
+        selections: sublimationIds.map((sublimationId) => ({ sublimationId })),
+        hpAssumption: character.sublimations?.hpAssumption ?? "normal",
+      }
+      : character.sublimations,
+  };
   const simulation = simulateCombo({
     catalog: huppermageCatalog,
-    character,
+    character: candidateCharacter,
     combo: candidate.plan,
   });
 
