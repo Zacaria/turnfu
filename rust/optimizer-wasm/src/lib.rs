@@ -462,9 +462,13 @@ pub struct OptimizerRequest {
     pub max_actions_per_turn: u32,
     pub max_passive_count: u32,
     #[serde(default)]
+    pub max_sublimation_count: u32,
+    #[serde(default)]
     pub available_spell_ids: Vec<String>,
     #[serde(default)]
     pub available_passive_ids: Vec<String>,
+    #[serde(default)]
+    pub available_sublimation_ids: Vec<String>,
     pub catalog: Value,
     pub character: Value,
     #[serde(default)]
@@ -605,6 +609,8 @@ pub struct CandidateScoreBreakdown {
 pub struct ScoredTopCandidateEntry {
     pub id: String,
     pub passive_ids: Vec<String>,
+    #[serde(default)]
+    pub sublimation_ids: Vec<String>,
     pub plan: CandidatePlan,
     pub score: CandidateScoreBreakdown,
 }
@@ -615,6 +621,8 @@ pub struct CandidateEvaluationInput {
     pub id: String,
     #[serde(default)]
     pub passive_ids: Vec<String>,
+    #[serde(default)]
+    pub sublimation_ids: Vec<String>,
     pub plan: CandidatePlan,
 }
 
@@ -624,6 +632,7 @@ pub struct BackendMetrics {
     pub request_catalog_entries: u32,
     pub request_available_spells: u32,
     pub request_available_passives: u32,
+    pub request_available_sublimations: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -815,6 +824,8 @@ pub struct ProgressBatchInput {
 pub struct OptimizerCandidateInput {
     #[serde(default)]
     pub passive_ids: Vec<String>,
+    #[serde(default)]
+    pub sublimation_ids: Vec<String>,
     pub plan: CandidatePlan,
 }
 
@@ -893,15 +904,21 @@ impl SeededRandom {
 
 pub fn normalize_candidate(mut candidate: OptimizerCandidateInput) -> OptimizerCandidateInput {
     candidate.passive_ids.sort();
+    candidate.passive_ids.dedup();
+    candidate.sublimation_ids.sort();
+    candidate.sublimation_ids.dedup();
     candidate
 }
 
 pub fn encode_candidate(candidate: &OptimizerCandidateInput) -> String {
     let mut passive_ids = candidate.passive_ids.clone();
     passive_ids.sort();
+    let mut sublimation_ids = candidate.sublimation_ids.clone();
+    sublimation_ids.sort();
     format!(
-        "{}::{}",
+        "{}::{}::{}",
         passive_ids.join("+"),
+        sublimation_ids.join("+"),
         candidate
             .plan
             .turns
@@ -920,6 +937,11 @@ fn hash_candidate(candidate: &OptimizerCandidateInput) -> u128 {
     let mut hash = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d_u128;
     for passive_id in &candidate.passive_ids {
         hash_candidate_bytes(&mut hash, passive_id.as_bytes());
+        hash_candidate_byte(&mut hash, b'+');
+    }
+    hash_candidate_byte(&mut hash, b':');
+    for sublimation_id in &candidate.sublimation_ids {
+        hash_candidate_bytes(&mut hash, sublimation_id.as_bytes());
         hash_candidate_byte(&mut hash, b'+');
     }
     hash_candidate_byte(&mut hash, b':');
@@ -1222,9 +1244,16 @@ fn crossover_candidates_with_catalog(
         catalog,
         rng,
     );
+    let sublimation_ids = crossover_sublimation_ids(
+        &parent_a.sublimation_ids,
+        &parent_b.sublimation_ids,
+        request,
+        rng,
+    );
 
     Ok(OptimizerCandidateInput {
         passive_ids,
+        sublimation_ids,
         plan: CandidatePlan { turns },
     })
 }
@@ -1252,6 +1281,9 @@ fn mutate_candidate_with_catalog(
     let mut next = candidate.clone();
     if rng.chance(0.35) {
         next.passive_ids = mutate_passive_ids(&next.passive_ids, request, catalog, rng);
+    }
+    if rng.chance(0.25) {
+        next.sublimation_ids = mutate_sublimation_ids(&next.sublimation_ids, request, rng);
     }
 
     let Some(turn_index) = select_mutation_turn_index(request, &next, rng) else {
@@ -1475,6 +1507,7 @@ fn enqueue_hybrid_elite_neighbors_with_catalog(
         &mut metrics,
         &mut generated,
     );
+    add_sublimation_neighbors(request, &mut queue, input, &mut seen, &mut metrics, &mut generated);
 
     for turn_index in (0..input.plan.turns.len()).rev() {
         let turn = &input.plan.turns[turn_index];
@@ -1771,6 +1804,12 @@ fn compare_top_candidates(
                 .cmp(&right.candidate.passive_ids.len())
         })
         .then_with(|| {
+            left.candidate
+                .sublimation_ids
+                .len()
+                .cmp(&right.candidate.sublimation_ids.len())
+        })
+        .then_with(|| {
             count_candidate_actions(&left.candidate).cmp(&count_candidate_actions(&right.candidate))
         })
         .then_with(|| left.id.cmp(&right.id))
@@ -1825,6 +1864,12 @@ fn compare_population_entries(
                 .passive_ids
                 .len()
                 .cmp(&right.candidate.passive_ids.len())
+        })
+        .then_with(|| {
+            left.candidate
+                .sublimation_ids
+                .len()
+                .cmp(&right.candidate.sublimation_ids.len())
         })
         .then_with(|| {
             count_candidate_actions(&left.candidate).cmp(&count_candidate_actions(&right.candidate))
@@ -1922,6 +1967,11 @@ fn create_hybrid_input_descriptor(candidate: &OptimizerCandidateInput) -> Vec<St
             let mut passive_ids = candidate.passive_ids.clone();
             passive_ids.sort();
             passive_ids.join(",")
+        }),
+        format!("sublimations:{}", {
+            let mut sublimation_ids = candidate.sublimation_ids.clone();
+            sublimation_ids.sort();
+            sublimation_ids.join(",")
         }),
     ];
 
@@ -2032,6 +2082,84 @@ fn mutate_passive_ids(
         let choices = next.iter().cloned().collect::<Vec<_>>();
         next.remove(rng.pick(&choices));
         next.insert(pick_weighted_passive_id(&missing, request, catalog, rng));
+    }
+
+    next.into_iter().collect()
+}
+
+fn crossover_sublimation_ids(
+    parent_a_sublimation_ids: &[String],
+    parent_b_sublimation_ids: &[String],
+    request: &OptimizerRequest,
+    rng: &mut SeededRandom,
+) -> Vec<String> {
+    let available = get_available_sublimation_ids(request)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let mut inherited = parent_a_sublimation_ids
+        .iter()
+        .chain(parent_b_sublimation_ids.iter())
+        .filter(|sublimation_id| available.contains(*sublimation_id))
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    inherited.sort();
+
+    let mut selected = Vec::new();
+    for sublimation_id in inherited {
+        if selected.len() >= request.max_sublimation_count as usize {
+            break;
+        }
+        let in_parent_a = parent_a_sublimation_ids.contains(&sublimation_id);
+        let in_parent_b = parent_b_sublimation_ids.contains(&sublimation_id);
+        if (in_parent_a && in_parent_b) || rng.chance(0.5) {
+            selected.push(sublimation_id);
+        }
+    }
+
+    selected.sort();
+    selected
+}
+
+fn mutate_sublimation_ids(
+    current_sublimation_ids: &[String],
+    request: &OptimizerRequest,
+    rng: &mut SeededRandom,
+) -> Vec<String> {
+    let available_sublimation_ids = get_available_sublimation_ids(request);
+    if available_sublimation_ids.is_empty() || request.max_sublimation_count == 0 {
+        return Vec::new();
+    }
+
+    let available = available_sublimation_ids.iter().collect::<BTreeSet<_>>();
+    let mut next = current_sublimation_ids
+        .iter()
+        .filter(|sublimation_id| available.contains(sublimation_id))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let missing = available_sublimation_ids
+        .iter()
+        .filter(|sublimation_id| !next.contains(*sublimation_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let can_add = next.len()
+        < std::cmp::min(
+            request.max_sublimation_count as usize,
+            available_sublimation_ids.len(),
+        )
+        && !missing.is_empty();
+    let can_remove = !next.is_empty();
+
+    if can_add && (!can_remove || rng.chance(0.45)) {
+        next.insert(pick_weighted_sublimation_id(&missing, rng));
+    } else if can_remove && (!can_add || rng.chance(0.35)) {
+        let choices = next.iter().cloned().collect::<Vec<_>>();
+        next.remove(rng.pick(&choices));
+    } else if can_add && can_remove {
+        let choices = next.iter().cloned().collect::<Vec<_>>();
+        next.remove(rng.pick(&choices));
+        next.insert(pick_weighted_sublimation_id(&missing, rng));
     }
 
     next.into_iter().collect()
@@ -2172,6 +2300,92 @@ fn add_passive_neighbors(
     }
 }
 
+fn add_sublimation_neighbors(
+    request: &OptimizerRequest,
+    queue: &mut Vec<OptimizerCandidateInput>,
+    input: &OptimizerCandidateInput,
+    seen: &mut BTreeSet<String>,
+    metrics: &mut BTreeMap<String, u32>,
+    generated: &mut u32,
+) {
+    let available_sublimation_ids = get_available_sublimation_ids(request);
+    let active_sublimation_ids = input
+        .sublimation_ids
+        .iter()
+        .filter(|sublimation_id| available_sublimation_ids.contains(sublimation_id))
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let missing_sublimation_ids = available_sublimation_ids
+        .iter()
+        .filter(|sublimation_id| !active_sublimation_ids.contains(sublimation_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let sublimation_limit = std::cmp::min(
+        request.max_sublimation_count as usize,
+        available_sublimation_ids.len(),
+    );
+
+    for sublimation_id in &active_sublimation_ids {
+        let mut candidate = input.clone();
+        candidate.sublimation_ids = active_sublimation_ids
+            .iter()
+            .filter(|active_sublimation_id| *active_sublimation_id != sublimation_id)
+            .cloned()
+            .collect();
+        add_elite_neighbor(
+            queue,
+            candidate,
+            seen,
+            metrics,
+            generated,
+            Some("hybridSublimationNeighborCandidates"),
+        );
+    }
+
+    if active_sublimation_ids.len() < sublimation_limit {
+        for sublimation_id in missing_sublimation_ids.iter().take(12) {
+            let mut candidate = input.clone();
+            candidate.sublimation_ids = active_sublimation_ids
+                .iter()
+                .cloned()
+                .chain(std::iter::once(sublimation_id.clone()))
+                .collect();
+            candidate.sublimation_ids.sort();
+            add_elite_neighbor(
+                queue,
+                candidate,
+                seen,
+                metrics,
+                generated,
+                Some("hybridSublimationNeighborCandidates"),
+            );
+        }
+    }
+
+    for sublimation_id in &active_sublimation_ids {
+        for replacement_sublimation_id in missing_sublimation_ids.iter().take(8) {
+            let mut candidate = input.clone();
+            candidate.sublimation_ids = active_sublimation_ids
+                .iter()
+                .filter(|active_sublimation_id| *active_sublimation_id != sublimation_id)
+                .cloned()
+                .chain(std::iter::once(replacement_sublimation_id.clone()))
+                .collect();
+            candidate.sublimation_ids.sort();
+            add_elite_neighbor(
+                queue,
+                candidate,
+                seen,
+                metrics,
+                generated,
+                Some("hybridSublimationNeighborCandidates"),
+            );
+        }
+    }
+}
+
 fn add_elite_neighbor(
     queue: &mut Vec<OptimizerCandidateInput>,
     candidate: OptimizerCandidateInput,
@@ -2241,6 +2455,7 @@ fn create_random_candidate(
 ) -> OptimizerCandidateInput {
     OptimizerCandidateInput {
         passive_ids: pick_random_passives(request, catalog, rng),
+        sublimation_ids: pick_random_sublimations(request, rng),
         plan: CandidatePlan {
             turns: (0..request.duration)
                 .map(|_| CandidateTurn {
@@ -2327,6 +2542,7 @@ fn create_resource_aware_candidate(
 
     OptimizerCandidateInput {
         passive_ids: pick_random_passives(request, catalog, rng),
+        sublimation_ids: pick_random_sublimations(request, rng),
         plan: CandidatePlan { turns },
     }
 }
@@ -3176,6 +3392,150 @@ fn pick_weighted_passive_id(
     }
 
     passive_ids.last().cloned().unwrap_or_default()
+}
+
+fn pick_random_sublimations(request: &OptimizerRequest, rng: &mut SeededRandom) -> Vec<String> {
+    let sublimation_ids = get_available_sublimation_ids(request);
+    if sublimation_ids.is_empty() || request.max_sublimation_count == 0 {
+        return Vec::new();
+    }
+
+    let sublimation_limit =
+        std::cmp::min(request.max_sublimation_count as usize, sublimation_ids.len());
+    let target_count = if request.iterations >= 80 {
+        rng.integer(std::cmp::min(1, sublimation_limit) as u32, sublimation_limit as u32) as usize
+    } else {
+        rng.integer(0, sublimation_limit as u32) as usize
+    };
+    let mut remaining = sublimation_ids;
+    let mut selected = Vec::new();
+    for _index in 0..target_count {
+        let sublimation_id = pick_weighted_sublimation_id(&remaining, rng);
+        selected.push(sublimation_id.clone());
+        remaining.retain(|entry| entry != &sublimation_id);
+    }
+    selected.sort();
+    selected
+}
+
+fn pick_domain_seed_sublimations(request: &OptimizerRequest) -> Vec<String> {
+    let available = get_available_sublimation_ids(request)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let mut selected = [
+        "influence-6",
+        "carnage-6",
+        "brulure-4",
+        "gel-4",
+        "tellurisme-4",
+        "ventilation-4",
+        "puissance-brute-4",
+        "alternance-ii",
+        "exces-ii",
+        "longueur-6",
+        "concentration-elementaire",
+        "armure-lourde-2",
+    ]
+    .into_iter()
+    .filter(|sublimation_id| available.contains(*sublimation_id))
+    .take(request.max_sublimation_count as usize)
+    .map(str::to_string)
+    .collect::<Vec<_>>();
+    selected.sort();
+    selected
+}
+
+fn get_available_sublimation_ids(request: &OptimizerRequest) -> Vec<String> {
+    let mut sublimation_ids = request
+        .available_sublimation_ids
+        .iter()
+        .filter(|sublimation_id| is_supported_sublimation_id(sublimation_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    sublimation_ids.sort_by(|left, right| {
+        get_sublimation_search_weight(right)
+            .partial_cmp(&get_sublimation_search_weight(left))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.cmp(right))
+    });
+    sublimation_ids.dedup();
+    sublimation_ids
+}
+
+fn pick_weighted_sublimation_id(
+    sublimation_ids: &[String],
+    rng: &mut SeededRandom,
+) -> String {
+    let total_weight = sublimation_ids
+        .iter()
+        .map(|sublimation_id| get_sublimation_search_weight(sublimation_id))
+        .sum::<f64>()
+        .max(1.0);
+    let mut cursor = rng.next() * total_weight;
+    for sublimation_id in sublimation_ids {
+        cursor -= get_sublimation_search_weight(sublimation_id);
+        if cursor <= 0.0 {
+            return sublimation_id.clone();
+        }
+    }
+    sublimation_ids.last().cloned().unwrap_or_default()
+}
+
+fn is_supported_sublimation_id(sublimation_id: &str) -> bool {
+    matches!(
+        sublimation_id,
+        "sauvegarde-6"
+            | "tolerance-2"
+            | "vivacite-2"
+            | "velocite-2"
+            | "devastation-3"
+            | "cicatrisation-6"
+            | "influence-6"
+            | "influence-vitale-6"
+            | "critique-berserk-6"
+            | "force-vitale-2"
+            | "agilite-vitale-2"
+            | "armure-lourde-2"
+            | "carnage-6"
+            | "brulure-4"
+            | "brulure-secondaire-4"
+            | "gel-4"
+            | "gel-secondaire-4"
+            | "tellurisme-4"
+            | "tellurisme-secondaire-4"
+            | "ventilation-4"
+            | "ventilation-secondaire-4"
+            | "puissance-brute-4"
+            | "concentration-elementaire"
+            | "chaos"
+            | "secret-critique"
+            | "inflexibilite"
+            | "inflexibilite-ii"
+            | "alternance"
+            | "alternance-ii"
+            | "exces"
+            | "exces-ii"
+            | "expert-des-armes-legeres-6"
+            | "longueur-6"
+    )
+}
+
+fn get_sublimation_search_weight(sublimation_id: &str) -> f64 {
+    match sublimation_id {
+        "puissance-brute-4" | "alternance" | "alternance-ii" | "exces" | "exces-ii" => 10.0,
+        "concentration-elementaire" | "chaos" => 9.0,
+        "carnage-6" | "armure-lourde-2" => 8.0,
+        "influence-6" | "influence-vitale-6" | "critique-berserk-6" => 6.0,
+        "brulure-4" | "gel-4" | "tellurisme-4" | "ventilation-4" => 5.0,
+        "brulure-secondaire-4"
+        | "gel-secondaire-4"
+        | "tellurisme-secondaire-4"
+        | "ventilation-secondaire-4" => 4.5,
+        "longueur-6" => 4.0,
+        "sauvegarde-6" | "tolerance-2" => 3.0,
+        "force-vitale-2" | "agilite-vitale-2" | "vivacite-2" | "velocite-2" => 2.0,
+        _ => 1.0,
+    }
 }
 
 fn get_passive_search_weight(
@@ -4906,6 +5266,7 @@ pub fn inspect_optimizer_request(request: OptimizerRequest) -> OptimizerResponse
                 .unwrap_or(0),
             request_available_spells: request.available_spell_ids.len() as u32,
             request_available_passives: request.available_passive_ids.len() as u32,
+            request_available_sublimations: request.available_sublimation_ids.len() as u32,
         },
     }
 }
@@ -5197,6 +5558,7 @@ fn evaluate_and_track_hybrid_candidate(
                 ScoredTopCandidateEntry {
                     id: id.clone(),
                     passive_ids: candidate.passive_ids.clone(),
+                    sublimation_ids: candidate.sublimation_ids.clone(),
                     plan: candidate.plan.clone(),
                     score: score.clone(),
                 },
@@ -5693,6 +6055,7 @@ fn create_domain_warmup_candidates(
         for passive_ids in passive_variants {
             candidates.push(OptimizerCandidateInput {
                 passive_ids,
+                sublimation_ids: pick_domain_seed_sublimations(request),
                 plan: CandidatePlan {
                     turns: turns.clone(),
                 },
@@ -6316,6 +6679,7 @@ fn compare_scored_top_candidates(
         .partial_cmp(&left.score.score)
         .unwrap_or(std::cmp::Ordering::Equal)
         .then_with(|| left.passive_ids.len().cmp(&right.passive_ids.len()))
+        .then_with(|| left.sublimation_ids.len().cmp(&right.sublimation_ids.len()))
         .then_with(|| count_plan_actions(&left.plan).cmp(&count_plan_actions(&right.plan)))
         .then_with(|| left.id.cmp(&right.id))
 }
@@ -6619,6 +6983,7 @@ pub fn evaluate_candidate_batch(
                 request,
                 &OptimizerCandidateInput {
                     passive_ids: candidate.passive_ids.clone(),
+                    sublimation_ids: candidate.sublimation_ids.clone(),
                     plan: candidate.plan.clone(),
                 },
                 &candidate.id,
@@ -7144,6 +7509,7 @@ mod tests {
         .expect("request should parse");
         let candidate = OptimizerCandidateInput {
             passive_ids: vec!["profusion-runique".to_string()],
+            sublimation_ids: vec![],
             plan: CandidatePlan {
                 turns: vec![
                     CandidateTurn {
@@ -7224,6 +7590,7 @@ mod tests {
         .expect("request should parse");
         let candidate = OptimizerCandidateInput {
             passive_ids: vec![],
+            sublimation_ids: vec![],
             plan: CandidatePlan {
                 turns: vec![
                     CandidateTurn {
@@ -7306,6 +7673,7 @@ mod tests {
         .expect("request should parse");
         let candidate = OptimizerCandidateInput {
             passive_ids: vec![],
+            sublimation_ids: vec![],
             plan: CandidatePlan {
                 turns: vec![
                     CandidateTurn {
@@ -7395,6 +7763,7 @@ mod tests {
         .expect("request should parse");
         let candidate = OptimizerCandidateInput {
             passive_ids: vec!["antithese".to_string()],
+            sublimation_ids: vec![],
             plan: CandidatePlan {
                 turns: vec![CandidateTurn {
                     actions: vec![action("fire-hit"), action("water-hit")],
@@ -7462,6 +7831,7 @@ mod tests {
         .expect("request should parse");
         let candidate = OptimizerCandidateInput {
             passive_ids: vec!["absorption-quadramentale".to_string()],
+            sublimation_ids: vec![],
             plan: CandidatePlan {
                 turns: vec![CandidateTurn {
                     actions: vec![action("removal")],
@@ -7511,6 +7881,7 @@ mod tests {
         .expect("request should parse");
         let candidate = OptimizerCandidateInput {
             passive_ids: vec![],
+            sublimation_ids: vec![],
             plan: CandidatePlan {
                 turns: vec![CandidateTurn {
                     actions: vec![action("trigger-spell")],
@@ -7570,6 +7941,7 @@ mod tests {
         .expect("request should parse");
         let candidate = OptimizerCandidateInput {
             passive_ids: vec![],
+            sublimation_ids: vec![],
             plan: CandidatePlan {
                 turns: vec![
                     CandidateTurn {
@@ -7620,6 +7992,7 @@ mod tests {
         .expect("request should parse");
         let candidate = OptimizerCandidateInput {
             passive_ids: vec![],
+            sublimation_ids: vec![],
             plan: CandidatePlan {
                 turns: vec![CandidateTurn {
                     actions: vec![action("ramping-spell"), action("ramping-spell")],
@@ -7649,11 +8022,13 @@ mod tests {
             CandidateEvaluationInput {
                 id: "valid".to_string(),
                 passive_ids: vec![],
+                sublimation_ids: vec![],
                 plan: candidate_from_actions(vec!["hit"], vec![]).plan,
             },
             CandidateEvaluationInput {
                 id: "invalid".to_string(),
                 passive_ids: vec![],
+                sublimation_ids: vec![],
                 plan: CandidatePlan {
                     turns: vec![CandidateTurn {
                         actions: vec![action("missing")],
@@ -7716,7 +8091,7 @@ mod tests {
 
         assert_eq!(
             encode_candidate(&candidate),
-            "passive-a+passive-z::ray@emptyCell,hit|"
+            "passive-a+passive-z::::ray@emptyCell,hit|"
         );
         assert_eq!(
             normalize_candidate(candidate).passive_ids,
@@ -7924,6 +8299,7 @@ mod tests {
             id: id.to_string(),
             candidate: OptimizerCandidateInput {
                 passive_ids: vec![],
+                sublimation_ids: vec![],
                 plan: CandidatePlan {
                     turns: vec![CandidateTurn {
                         actions: (0..action_count)
@@ -7989,6 +8365,7 @@ mod tests {
         let request = transformation_request();
         let candidate = OptimizerCandidateInput {
             passive_ids: vec![],
+            sublimation_ids: vec![],
             plan: CandidatePlan {
                 turns: vec![
                     CandidateTurn {
@@ -8025,6 +8402,7 @@ mod tests {
         let request = transformation_request();
         let candidate = OptimizerCandidateInput {
             passive_ids: vec!["passive-a".to_string()],
+            sublimation_ids: vec![],
             plan: CandidatePlan {
                 turns: vec![
                     CandidateTurn {
@@ -8101,7 +8479,7 @@ mod tests {
         let candidate = candidate_from_actions(vec!["hit"], vec!["passive-a"]);
         assert_eq!(
             create_evaluation_cache_key("prefix::", &candidate),
-            "prefix::passive-a::hit|hit"
+            "prefix::passive-a::::hit|hit"
         );
 
         let mut cache = EvaluatorCache::new(2);
@@ -8232,6 +8610,7 @@ mod tests {
             id: id.to_string(),
             candidate: OptimizerCandidateInput {
                 passive_ids: passive_ids.into_iter().map(str::to_string).collect(),
+                sublimation_ids: vec![],
                 plan: CandidatePlan {
                     turns: vec![CandidateTurn {
                         actions: (0..action_count)
@@ -8350,6 +8729,7 @@ mod tests {
     ) -> OptimizerCandidateInput {
         OptimizerCandidateInput {
             passive_ids: passive_ids.into_iter().map(str::to_string).collect(),
+            sublimation_ids: vec![],
             plan: CandidatePlan {
                 turns: vec![
                     CandidateTurn {
@@ -8692,6 +9072,7 @@ mod tests {
         .expect("request should parse");
         let candidate = OptimizerCandidateInput {
             passive_ids: vec!["extension-des-sens".to_string()],
+            sublimation_ids: vec![],
             plan: CandidatePlan {
                 turns: vec![CandidateTurn {
                     actions: vec![
@@ -8756,6 +9137,7 @@ mod tests {
         .expect("request should parse");
         let candidate = OptimizerCandidateInput {
             passive_ids: vec!["initiative-de-lame".to_string()],
+            sublimation_ids: vec![],
             plan: CandidatePlan {
                 turns: vec![
                     CandidateTurn {

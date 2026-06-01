@@ -13,8 +13,10 @@ export type RustWasmOptimizerRequest = {
   iterations: number;
   maxActionsPerTurn: number;
   maxPassiveCount: number;
+  maxSublimationCount: number;
   availableSpellIds: string[];
   availablePassiveIds: string[];
+  availableSublimationIds: string[];
   catalog: CatalogEntry[];
   character: SimulatedCharacter;
   criterion?: ComboOptimizationCriterion;
@@ -92,6 +94,7 @@ export type RustWasmHybridIslandResumeState = {
     id: string;
     candidate: {
       passiveIds?: string[];
+      sublimationIds?: string[];
       plan: ComboPlan;
     };
     score: number;
@@ -99,10 +102,12 @@ export type RustWasmHybridIslandResumeState = {
   }>;
   repairQueue: Array<{
     passiveIds?: string[];
+    sublimationIds?: string[];
     plan: ComboPlan;
   }>;
   eliteNeighborQueue: Array<{
     passiveIds?: string[];
+    sublimationIds?: string[];
     plan: ComboPlan;
   }>;
 };
@@ -141,8 +146,10 @@ export function createRustWasmOptimizerRequest(options: OptimizerExperimentOptio
     iterations: clampInteger(options.budget.iterations, 1, 1_000_000_000),
     maxActionsPerTurn: clampInteger(options.maxActionsPerTurn ?? 3, 1, 12),
     maxPassiveCount: clampInteger(options.maxPassiveCount ?? 0, 0, 6),
+    maxSublimationCount: clampInteger(options.maxSublimationCount ?? 0, 0, 12),
     availableSpellIds: [...(options.availableSpellIds ?? getDefaultAvailableSpellIds(options.catalog))].sort(),
     availablePassiveIds: [...(options.availablePassiveIds ?? [])].sort(),
+    availableSublimationIds: [...(options.availableSublimationIds ?? getDefaultAvailableSublimationIds(options.character))].sort(),
     catalog: normalizeCatalogForRustWasm(options.catalog),
     character: cloneJson(options.character),
     criterion: options.criterion ? cloneJson(options.criterion) : undefined,
@@ -164,6 +171,10 @@ function normalizeCatalogForRustWasm(catalog: CatalogEntry[]): CatalogEntry[] {
 
 function getDefaultAvailableSpellIds(catalog: CatalogEntry[]): string[] {
   return catalog.filter((entry) => entry.kind === "spell").map((entry) => entry.id);
+}
+
+function getDefaultAvailableSublimationIds(character: SimulatedCharacter): string[] {
+  return character.sublimations?.selections.map((selection) => selection.sublimationId) ?? [];
 }
 
 function cloneJson<T>(value: T): T {
