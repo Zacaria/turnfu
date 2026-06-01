@@ -493,6 +493,36 @@ pub struct HybridCandidateBatchResponse {
     pub metrics: BTreeMap<String, u32>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CandidateEvaluationViolation {
+    pub turn_index: u32,
+    pub violation_type: String,
+    pub action_index: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spell_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub available: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CandidateEvaluationResult {
+    pub candidate_id: String,
+    pub valid: bool,
+    pub total_damage: f64,
+    pub final_resources: ResourcePool,
+    pub final_huppermage: HuppermageState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_violation: Option<CandidateEvaluationViolation>,
+}
+
 #[derive(Debug, Default, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct BackendMetrics {
@@ -2057,6 +2087,7 @@ impl SeededRandom {
 struct SearchCatalogEntry {
     id: String,
     kind: String,
+    element: Option<Element>,
     cost: SpellCost,
     constraints: Vec<Value>,
     effects: Vec<Value>,
@@ -2074,6 +2105,10 @@ fn read_search_catalog(request: &OptimizerRequest) -> Result<Vec<SearchCatalogEn
         .map(|entry| SearchCatalogEntry {
             id: read_string_field(entry, "id").unwrap_or_default(),
             kind: read_string_field(entry, "kind").unwrap_or_default(),
+            element: entry
+                .get("element")
+                .cloned()
+                .and_then(|value| serde_json::from_value::<Element>(value).ok()),
             cost: read_spell_cost(entry.get("cost")),
             constraints: entry
                 .get("constraints")
@@ -2103,6 +2138,60 @@ fn read_request_resources(character: &Value) -> ResourcePool {
     read_resource_pool(character.get("resources"))
 }
 
+fn read_request_stats(character: &Value) -> BaseStats {
+    character
+        .get("stats")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<BaseStats>(value).ok())
+        .unwrap_or_default()
+}
+
+fn read_request_huppermage(
+    character: &Value,
+    resources: ResourcePool,
+    active_passive_ids: Vec<String>,
+) -> HuppermageState {
+    let parsed = character
+        .get("classState")
+        .and_then(|class_state| class_state.get("huppermage"))
+        .cloned()
+        .and_then(|value| serde_json::from_value::<HuppermageState>(value).ok());
+    let mut state = parsed.unwrap_or_else(|| create_huppermage_state(resources, vec![]));
+    state.active_passives = active_passive_ids;
+    state.bq_max = state.bq_max.max(resources.bq.max(resources.wp * 75));
+    state
+}
+
+fn read_passive_entries(request: &OptimizerRequest, passive_ids: &[String]) -> Vec<PassiveEntry> {
+    let Some(entries) = request.catalog.as_array() else {
+        return vec![];
+    };
+
+    entries
+        .iter()
+        .filter(|entry| {
+            read_string_field(entry, "kind").as_deref() == Some("passive")
+                && read_string_field(entry, "id")
+                    .is_some_and(|id| passive_ids.iter().any(|passive_id| passive_id == &id))
+        })
+        .map(|entry| PassiveEntry {
+            id: read_string_field(entry, "id").unwrap_or_default(),
+            effects: entry
+                .get("effects")
+                .and_then(Value::as_array)
+                .map(|effects| {
+                    effects
+                        .iter()
+                        .filter_map(|effect| {
+                            serde_json::from_value::<PassiveEffect>(effect.clone()).ok()
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        })
+        .collect()
+}
+
 fn read_resource_pool(value: Option<&Value>) -> ResourcePool {
     ResourcePool {
         ap: read_i32_field(value, "ap"),
@@ -2119,6 +2208,53 @@ fn read_spell_cost(value: Option<&Value>) -> SpellCost {
         wp: read_i32_field(value, "wp"),
         bq: read_i32_field(value, "bq"),
     }
+}
+
+fn create_spell_rules_from_search_entry(spell: &SearchCatalogEntry) -> SpellRules {
+    SpellRules {
+        id: spell.id.clone(),
+        element: read_element_from_search_entry(spell),
+        is_deck_tracked: spell.id != "coeur-de-lumiere"
+            && spell.id != "cycle-elementaire"
+            && spell.id != "feu-follet",
+        max_casts_per_turn: read_constraint_u32(&spell.constraints, "maxCastsPerTurn"),
+        max_casts_per_target: read_constraint_u32(&spell.constraints, "maxCastsPerTarget"),
+        cooldown_turns: read_constraint_u32(&spell.constraints, "cooldownTurns"),
+        required_target: spell
+            .constraints
+            .iter()
+            .find(|constraint| {
+                read_string_field(constraint, "type").as_deref() == Some("requiresTarget")
+            })
+            .and_then(|constraint| read_action_target_kind(constraint.get("target"))),
+    }
+}
+
+fn read_constraint_u32(constraints: &[Value], constraint_type: &str) -> Option<u32> {
+    constraints
+        .iter()
+        .find(|constraint| {
+            read_string_field(constraint, "type").as_deref() == Some(constraint_type)
+        })
+        .map(|constraint| read_u32_field(Some(constraint), "value"))
+}
+
+fn read_element_from_search_entry(entry: &SearchCatalogEntry) -> Option<Element> {
+    entry.element.clone()
+}
+
+fn collect_search_damage_effects(spell: &SearchCatalogEntry) -> Vec<DamageEffect> {
+    spell
+        .effects
+        .iter()
+        .filter_map(|effect| {
+            if read_string_field(effect, "type").as_deref() == Some("damage") {
+                serde_json::from_value::<DamageEffect>(effect.clone()).ok()
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 fn get_search_actions(
@@ -3903,6 +4039,199 @@ pub fn generate_hybrid_candidates(
     })
 }
 
+pub fn evaluate_candidate(
+    request: &OptimizerRequest,
+    candidate: &OptimizerCandidateInput,
+    candidate_id: &str,
+) -> Result<CandidateEvaluationResult, String> {
+    let catalog = read_search_catalog(request)?;
+    let spells_by_id = catalog
+        .iter()
+        .filter(|entry| entry.kind == "spell")
+        .map(|entry| (entry.id.as_str(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let mut base_resources = read_request_resources(&request.character);
+    let mut base_stats = read_request_stats(&request.character);
+    let active_passive_ids = candidate.passive_ids.clone();
+    let passives = read_passive_entries(request, &active_passive_ids);
+    let mut huppermage =
+        read_request_huppermage(&request.character, base_resources, active_passive_ids);
+    let initial_passives =
+        apply_initial_passive_effects(base_stats.clone(), base_resources, &passives);
+    base_stats = initial_passives.stats;
+    base_resources = initial_passives.resources;
+
+    let default_context = request
+        .default_action_context
+        .as_ref()
+        .and_then(|value| serde_json::from_value::<PartialActionContext>(value.clone()).ok());
+    let mut resources = base_resources;
+    let mut total_damage = 0.0;
+
+    for (turn_index, turn) in candidate.plan.turns.iter().enumerate() {
+        let mut turn_damage = 0.0;
+        let mut casts_by_spell_id = BTreeMap::new();
+        let mut target_casts_by_spell_id = BTreeMap::new();
+
+        for (action_index, action) in turn.actions.iter().enumerate() {
+            let Some(spell) = spells_by_id.get(action.spell_id.as_str()) else {
+                return Ok(create_candidate_evaluation_result(
+                    candidate_id,
+                    false,
+                    round_damage(total_damage + turn_damage),
+                    resources,
+                    huppermage,
+                    Some(violation_with_turn(
+                        turn_index as u32,
+                        &create_unknown_spell_violation(&action.spell_id, action_index as u32),
+                    )),
+                ));
+            };
+
+            let rules = create_spell_rules_from_search_entry(spell);
+            let target = action.target.as_ref().map(|target| target.kind.clone());
+            if let Some(violation) = validate_spell_rules(
+                &rules,
+                action_index as u32,
+                target.clone(),
+                &casts_by_spell_id,
+                &target_casts_by_spell_id,
+                &huppermage,
+            )
+            .or_else(|| {
+                validate_huppermage_class_action(
+                    &spell.id,
+                    action_index as u32,
+                    target.clone(),
+                    &casts_by_spell_id,
+                    &huppermage,
+                )
+            }) {
+                return Ok(create_candidate_evaluation_result(
+                    candidate_id,
+                    false,
+                    round_damage(total_damage + turn_damage),
+                    resources,
+                    huppermage,
+                    Some(violation_with_turn(turn_index as u32, &violation)),
+                ));
+            }
+
+            let resource_validation = validate_resource_cost(
+                resources,
+                spell.cost,
+                &spell.id,
+                action_index as u32,
+                default_context.clone(),
+            );
+            if let Some(violation) = resource_validation.violation {
+                return Ok(create_candidate_evaluation_result(
+                    candidate_id,
+                    false,
+                    round_damage(total_damage + turn_damage),
+                    resources,
+                    huppermage,
+                    Some(resource_violation_with_turn(turn_index as u32, &violation)),
+                ));
+            }
+            resources = resource_validation.resources_after_cost;
+
+            for effect in collect_search_damage_effects(spell) {
+                let damage = compute_raw_damage(&base_stats, &effect, default_context.clone());
+                turn_damage = round_damage(turn_damage + damage.result);
+            }
+
+            casts_by_spell_id.insert(
+                spell.id.clone(),
+                casts_by_spell_id.get(&spell.id).copied().unwrap_or(0) + 1,
+            );
+            if counts_as_soft_target_cast(action) {
+                target_casts_by_spell_id.insert(
+                    spell.id.clone(),
+                    target_casts_by_spell_id
+                        .get(&spell.id)
+                        .copied()
+                        .unwrap_or(0)
+                        + 1,
+                );
+            }
+            apply_spell_cooldown(&mut huppermage.cooldowns_by_spell_id, &rules);
+            huppermage = add_used_spell_id(huppermage, &rules);
+        }
+
+        let turn_end = apply_turn_end_bq(huppermage, resources);
+        huppermage = turn_end.state;
+        resources = turn_end.resources;
+        total_damage = round_damage(total_damage + turn_damage);
+
+        if turn_index + 1 < candidate.plan.turns.len() {
+            let carried =
+                create_next_turn_state(base_resources, resources, huppermage, &casts_by_spell_id);
+            resources = carried.resources;
+            huppermage = carried.huppermage;
+        }
+    }
+
+    Ok(create_candidate_evaluation_result(
+        candidate_id,
+        true,
+        total_damage,
+        resources,
+        huppermage,
+        None,
+    ))
+}
+
+fn create_candidate_evaluation_result(
+    candidate_id: &str,
+    valid: bool,
+    total_damage: f64,
+    final_resources: ResourcePool,
+    final_huppermage: HuppermageState,
+    first_violation: Option<CandidateEvaluationViolation>,
+) -> CandidateEvaluationResult {
+    CandidateEvaluationResult {
+        candidate_id: candidate_id.to_string(),
+        valid,
+        total_damage,
+        final_resources,
+        final_huppermage,
+        first_violation,
+    }
+}
+
+fn violation_with_turn(
+    turn_index: u32,
+    violation: &SimulationViolation,
+) -> CandidateEvaluationViolation {
+    CandidateEvaluationViolation {
+        turn_index,
+        violation_type: violation.violation_type.clone(),
+        action_index: violation.action_index,
+        spell_id: violation.spell_id.clone(),
+        resource: None,
+        required: violation.required,
+        available: violation.available,
+        scope: violation.scope.clone(),
+    }
+}
+
+fn resource_violation_with_turn(
+    turn_index: u32,
+    violation: &ResourceViolation,
+) -> CandidateEvaluationViolation {
+    CandidateEvaluationViolation {
+        turn_index,
+        violation_type: violation.violation_type.clone(),
+        action_index: violation.action_index,
+        spell_id: Some(violation.spell_id.clone()),
+        resource: Some(violation.resource.clone()),
+        required: Some(violation.required),
+        available: Some(violation.available),
+        scope: None,
+    }
+}
+
 #[wasm_bindgen]
 pub fn inspect_optimizer_request_json(request_json: &str) -> Result<String, JsValue> {
     let request = parse_optimizer_request(request_json)
@@ -3920,6 +4249,25 @@ pub fn generate_hybrid_candidates_json(request_json: &str) -> Result<String, JsV
     serde_json::to_string(&result).map_err(|error| {
         JsValue::from_str(&format!(
             "Failed to serialize Rust hybrid candidates: {error}"
+        ))
+    })
+}
+
+#[wasm_bindgen]
+pub fn evaluate_candidate_json(
+    request_json: &str,
+    candidate_json: &str,
+    candidate_id: &str,
+) -> Result<String, JsValue> {
+    let request = parse_optimizer_request(request_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid optimizer request JSON: {error}")))?;
+    let candidate: OptimizerCandidateInput = serde_json::from_str(candidate_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid candidate JSON: {error}")))?;
+    let result = evaluate_candidate(&request, &candidate, candidate_id)
+        .map_err(|error| JsValue::from_str(&error))?;
+    serde_json::to_string(&result).map_err(|error| {
+        JsValue::from_str(&format!(
+            "Failed to serialize Rust candidate evaluation: {error}"
         ))
     })
 }
@@ -4196,6 +4544,21 @@ mod tests {
             first.metrics.get("rustWasmGeneratedCandidates"),
             Some(&request.iterations)
         );
+    }
+
+    #[test]
+    fn evaluates_complete_candidates_across_turns() {
+        let request = transformation_request();
+        let candidate = candidate_from_actions(vec!["hit"], vec![]);
+        let evaluation = evaluate_candidate(&request, &candidate, "candidate:hit")
+            .expect("candidate should evaluate");
+
+        assert!(evaluation.valid);
+        assert_eq!(evaluation.candidate_id, "candidate:hit");
+        assert_eq!(evaluation.total_damage, 40.0);
+        assert_eq!(evaluation.final_resources.ap, 5);
+        assert_eq!(evaluation.final_resources.bq, 300);
+        assert!(evaluation.first_violation.is_none());
     }
 
     #[test]

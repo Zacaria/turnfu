@@ -29,6 +29,7 @@ import {
   type SimulatedCharacter,
 } from "../simulation/index.ts";
 import { evaluateSustainableCycle } from "./comboOptimizer.ts";
+import { createRustWasmOptimizerRequest, type RustWasmOptimizerRequest } from "./rustWasmBackendTypes.ts";
 
 export type RustWasmDifferentialFixture =
   | {
@@ -108,6 +109,7 @@ export type RustWasmDifferentialFixture =
       kind: "candidateBatch";
       name: string;
       seed: string;
+      request: RustWasmOptimizerRequest;
       candidates: GeneratedCandidate[];
       resources: ResourcePool;
       stats: ReturnType<typeof normalizeStatsForRust>;
@@ -562,6 +564,17 @@ function createSeededCandidateBatchFixtures(
       kind: "candidateBatch",
       name: `candidate-batch:${seed}`,
       seed,
+      request: createRustWasmOptimizerRequest({
+        catalog: huppermageCatalog,
+        character,
+        duration: 3,
+        engines: ["hybrid"],
+        budget: { iterations: candidates.length },
+        seed,
+        availableSpellIds: spellIds,
+        maxActionsPerTurn: 4,
+        maxPassiveCount: 0,
+      }),
       candidates,
       resources: character.resources,
       stats: normalizeStatsForRust(character.stats),
