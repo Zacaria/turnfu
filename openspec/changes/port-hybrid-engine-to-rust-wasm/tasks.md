@@ -44,16 +44,16 @@
 ## 6. Benchmarking and Rollout
 
 - [x] 6.1 Extend hybrid benchmarks to compare TypeScript and Rust/WASM backends on the same scenarios.
-- [ ] 6.2 Benchmark 100k, 1M, and 10M budgets for `t2-a8-p2`, `t3-a12-p3`, and `t3-full`.
-- [ ] 6.3 Run at least one local 100M Rust/WASM benchmark and record throughput, score, valid rate, cache metrics, and memory behavior.
+- [x] 6.2 Benchmark 100k, 1M, and 10M budgets for `t2-a8-p2`, `t3-a12-p3`, and `t3-full`.
+- [x] 6.3 Run at least one local 100M Rust/WASM benchmark and record throughput, score, valid rate, cache metrics, and memory behavior.
 - [x] 6.4 Add documentation for backend selection, differential commands, benchmark commands, and expected trust levels.
 - [x] 6.5 Enable Rust/WASM only as an experimental backend until differential tests and benchmark evidence justify a separate canonical-engine migration.
 
 ## 7. Verification
 
-- [ ] 7.1 Run the full TypeScript test suite.
-- [ ] 7.2 Run the Rust unit tests.
-- [ ] 7.3 Run the CI-sized differential suite.
-- [ ] 7.4 Run the local differential soak on representative generated batches.
-- [ ] 7.5 Run TypeScript and Rust/WASM benchmark comparisons and archive the results in project docs.
-- [ ] 7.6 Validate this OpenSpec change with `openspec validate port-hybrid-engine-to-rust-wasm --strict --no-interactive`.
+- [x] 7.1 Run the full TypeScript test suite.
+- [x] 7.2 Run the Rust unit tests.
+- [x] 7.3 Run the CI-sized differential suite.
+- [x] 7.4 Run the local differential soak on representative generated batches.
+- [x] 7.5 Run TypeScript and Rust/WASM benchmark comparisons and archive the results in project docs.
+- [x] 7.6 Validate this OpenSpec change with `openspec validate port-hybrid-engine-to-rust-wasm --strict --no-interactive`.

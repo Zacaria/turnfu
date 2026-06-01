@@ -92,20 +92,60 @@ but cannot recover it after reopening the optimizer.
 
 ## Current Local Evidence
 
-Local timings are noisy and machine-dependent, but the latest validated
-`t3-full` evidence is:
+Local timings are noisy and machine-dependent. The latest rollout benchmark
+artifacts are archived as JSON/JSONL under `docs/benchmarks/`.
 
-| Mode | Budget | Throughput | Score | TypeScript final validation |
-| --- | ---: | ---: | ---: | --- |
-| TypeScript | 1M | ~8.7k it/s | 103545.66 | canonical |
-| Rust/WASM direct | 1M | ~12.9k it/s | 103545.66 | top 5 valid, delta 0 |
-| Rust/WASM parallel, 20 workers | 1M | ~99.3k it/s | 103545.66 | top 5 valid, delta 0 |
-| Rust/WASM parallel, 20 workers, 100M target timeboxed | 16M completed in 204s | ~78.4k it/s | 103545.66 | top 5 valid, delta 0 |
+### 100k and 1M Direct Backend Comparison
 
-The 100M-target timeboxed run did not find a better score than the TypeScript
-reference best on `t3-full`. It did prove that the parallel long-run harness can
-merge multi-million-candidate Rust/WASM runs and revalidate the final top
-candidates with TypeScript.
+Raw file: `docs/benchmarks/rust-wasm-rollout-100k-1m-compare.jsonl`.
+
+| Scenario | Budget | TypeScript it/s | Rust/WASM direct it/s | Score | Rust final TS validation |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `t2-a8-p2` | 100k | 16,649.02 | 17,108.64 | 73,204.18 | top 5 valid, delta 0 |
+| `t2-a8-p2` | 1M | 13,312.02 | 18,420.83 | 73,204.18 | top 5 valid, delta 0 |
+| `t3-a12-p3` | 100k | 8,576.19 | 11,705.18 | 103,545.66 | top 5 valid, delta 0 |
+| `t3-a12-p3` | 1M | 9,380.20 | 12,942.12 | 103,545.66 | top 5 valid, delta 0 |
+| `t3-full` | 100k | 7,246.38 | 11,431.05 | 103,545.66 | top 5 valid, delta 0 |
+| `t3-full` | 1M | 7,356.78 | 12,244.11 | 103,545.66 | top 5 valid, delta 0 |
+
+### 10M Parallel Rust/WASM Matrix
+
+Raw files:
+
+- `docs/benchmarks/rust-wasm-rollout-10m-t2-a8-p2.json`
+- `docs/benchmarks/rust-wasm-rollout-10m-t3-a12-p3.json`
+- `docs/benchmarks/rust-wasm-rollout-10m-t3-full.json`
+
+| Scenario | Budget | Workers | Throughput | Score | Valid rate | TypeScript final validation |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `t2-a8-p2` | 10M | 20 | 124,968.61 it/s | 73,204.18 | 0.6113 | top 5 valid, delta 0 |
+| `t3-a12-p3` | 10M | 20 | 78,400.01 it/s | 103,545.66 | 0.3500 | top 5 valid, delta 0 |
+| `t3-full` | 10M | 20 | 79,736.95 it/s | 103,545.66 | 0.3556 | top 5 valid, delta 0 |
+
+### 100M Parallel Rust/WASM Run
+
+Raw files:
+
+- `docs/benchmarks/rust-wasm-rollout-100m-t3-full.json`
+- `docs/benchmarks/rust-wasm-rollout-100m-t3-full-memory.json`
+
+The memory-instrumented `t3-full` 100M run completed in `1,028,705.16ms`
+with 20 workers:
+
+- Throughput: `97,209.58 it/s`
+- Score: `103,545.66`
+- Valid rate: `0.3736`
+- Cache metrics: `9,502,676` hits, `90,497,324` misses, `90,097,324`
+  evictions with a `400,000` evaluation-cache limit across workers.
+- Memory behavior: parent RSS `329.44 MB`, average worker RSS `725.88 MB`,
+  peak worker RSS `1,012.50 MB`, sampled workers `20`.
+- TypeScript final validation: top 5 valid, max score delta `0`, max total
+  damage delta `0`.
+
+The 100M run did not find a score above the current TypeScript reference best on
+`t3-full`, but it proves that the parallel long-run harness can complete a full
+100M Rust/WASM search, merge the top candidates, and revalidate them with the
+TypeScript gameplay oracle.
 
 ## Merge Guardrails
 

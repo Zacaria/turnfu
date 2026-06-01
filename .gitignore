@@ -1,9 +1,9 @@
 .worktrees/
+.optimizer/
 node_modules/
 .pnpm-store/
 dist/
 artifacts/
-.worktrees/
 src/wasm/
 rust/optimizer-wasm/target/
 .DS_Store
@@ -12,4 +12,3 @@ rust/optimizer-wasm/target/
 /public/assets/areas/
 /public/assets/spellAttributes/
 /public/assets/stats/
-.worktrees

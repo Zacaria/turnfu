@@ -26,6 +26,7 @@ type WorkerSearchResponse = {
   invalidCandidates: number;
   topCandidates: RustWasmOptimizerScoredCandidate[];
   metrics: Record<string, number>;
+  workerMemoryUsage?: NodeJS.MemoryUsage;
 };
 
 const scenarios: HybridBenchmarkScenario[] = [
@@ -113,7 +114,9 @@ const baseRequest = createRustWasmOptimizerRequest({
 const workerSource = `
   const { parentPort, workerData } = require("node:worker_threads");
   const wasm = require(workerData.wasmPackagePath);
-  parentPort.postMessage(JSON.parse(wasm.run_hybrid_search_json(workerData.requestJson)));
+  const response = JSON.parse(wasm.run_hybrid_search_json(workerData.requestJson));
+  response.workerMemoryUsage = process.memoryUsage();
+  parentPort.postMessage(response);
 `;
 const start = performance.now();
 const results = timeboxMs > 0
@@ -124,6 +127,11 @@ const attempts = results.reduce((total, result) => total + result.attempts, 0);
 const validCandidates = results.reduce((total, result) => total + result.validCandidates, 0);
 const invalidCandidates = results.reduce((total, result) => total + result.invalidCandidates, 0);
 const metrics = mergeMetrics(results.map((result) => result.metrics));
+const workerMemoryUsages = results
+  .map((result) => result.workerMemoryUsage)
+  .filter((usage): usage is NodeJS.MemoryUsage => usage !== undefined);
+const peakWorkerRssBytes = Math.max(0, ...workerMemoryUsages.map((usage) => usage.rss));
+const totalWorkerRssBytes = workerMemoryUsages.reduce((total, usage) => total + usage.rss, 0);
 const topCandidates = results
   .flatMap((result) => result.topCandidates)
   .sort(compareRustCandidates)
@@ -171,6 +179,12 @@ console.log(JSON.stringify({
   finalOracleInvalid,
   finalOracleMaxScoreDelta: round(maxScoreDelta),
   finalOracleMaxTotalDamageDelta: round(maxTotalDamageDelta),
+  memory: {
+    parentRssMb: round(process.memoryUsage().rss / 1024 / 1024),
+    peakWorkerRssMb: round(peakWorkerRssBytes / 1024 / 1024),
+    averageWorkerRssMb: round((totalWorkerRssBytes / Math.max(1, workerMemoryUsages.length)) / 1024 / 1024),
+    sampledWorkers: workerMemoryUsages.length,
+  },
   metrics,
 }));
 
