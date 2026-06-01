@@ -2558,16 +2558,6 @@ fn collect_search_effects_by_type(
                     values.extend(nested_values);
                 }
             }
-            Some("trigger") => {
-                let nested_values = effect
-                    .get("effects")
-                    .and_then(Value::as_array)
-                    .map(|nested| {
-                        collect_search_effects_by_type(nested, effect_type, state, action)
-                    })
-                    .unwrap_or_default();
-                values.extend(nested_values);
-            }
             _ => {}
         }
     }
@@ -2598,14 +2588,6 @@ fn collect_search_tag_values(
                     values.extend(nested_values);
                 }
             }
-            Some("trigger") => {
-                let nested_values = effect
-                    .get("effects")
-                    .and_then(Value::as_array)
-                    .map(|nested| collect_search_tag_values(nested, tag_name, state, action))
-                    .unwrap_or_default();
-                values.extend(nested_values);
-            }
             _ => {}
         }
     }
@@ -2626,6 +2608,11 @@ fn is_search_condition_met(
             .cloned()
             .and_then(|value| serde_json::from_value::<Rune>(value).ok())
             .is_some_and(|rune| is_rune_active(&state.runes.active, &rune)),
+        Some("lastRune") => condition
+            .and_then(|value| value.get("rune"))
+            .cloned()
+            .and_then(|value| serde_json::from_value::<Rune>(value).ok())
+            .is_some_and(|rune| state.runes.last_generated_rune.as_ref() == Some(&rune)),
         Some("exactRuneCount") => {
             let count = read_u32_field(condition, "count") as usize;
             get_active_rune_count(state) == count
@@ -3444,24 +3431,28 @@ pub fn validate_spell_rules(
     }
 
     if let Some(max_casts) = spell.max_casts_per_target {
-        let current = target_casts_by_spell_id
-            .get(&spell.id)
-            .copied()
-            .unwrap_or(0);
-        if current >= max_casts {
-            return Some(SimulationViolation {
-                violation_type: "castLimitExceeded".to_string(),
-                action_index,
-                spell_id: Some(spell.id.clone()),
-                required: Some(max_casts as i32),
-                available: Some(current as i32),
-                scope: Some("target".to_string()),
-                message: format!("Spell '{}' exceeds max casts per target.", spell.id),
-            });
+        if target.as_ref() != Some(&ActionTargetKind::EmptyCell) {
+            let current = target_casts_by_spell_id
+                .get(&spell.id)
+                .copied()
+                .unwrap_or(0);
+            if current >= max_casts {
+                return Some(SimulationViolation {
+                    violation_type: "castLimitExceeded".to_string(),
+                    action_index,
+                    spell_id: Some(spell.id.clone()),
+                    required: Some(max_casts as i32),
+                    available: Some(current as i32),
+                    scope: Some("target".to_string()),
+                    message: format!("Spell '{}' exceeds max casts per target.", spell.id),
+                });
+            }
         }
     }
 
-    if let Some(max_casts) = spell.max_casts_per_turn {
+    let max_casts_per_turn =
+        effective_max_casts_per_turn(spell.max_casts_per_turn, &spell.id, huppermage_state);
+    if let Some(max_casts) = max_casts_per_turn {
         let current = casts_by_spell_id.get(&spell.id).copied().unwrap_or(0);
         if current >= max_casts {
             return Some(SimulationViolation {
@@ -3494,6 +3485,18 @@ pub fn validate_spell_rules(
     }
 
     None
+}
+
+fn effective_max_casts_per_turn(
+    max_casts_per_turn: Option<u32>,
+    spell_id: &str,
+    state: &HuppermageState,
+) -> Option<u32> {
+    if spell_id == "coeur-de-lumiere" && has_passive(state, "refraction-elementaire") {
+        return Some(4);
+    }
+
+    max_casts_per_turn
 }
 
 pub fn create_unknown_spell_violation(spell_id: &str, action_index: u32) -> SimulationViolation {
@@ -5579,6 +5582,119 @@ mod tests {
     }
 
     #[test]
+    fn candidate_evaluation_ignores_event_trigger_effects_without_event() {
+        let request = parse_optimizer_request(
+            r#"{
+              "schemaVersion":1,
+              "engine":"hybrid",
+              "seed":"trigger-resource",
+              "duration":1,
+              "iterations":10,
+              "maxActionsPerTurn":1,
+              "maxPassiveCount":0,
+              "availableSpellIds":["trigger-spell"],
+              "availablePassiveIds":[],
+              "catalog":[
+                {
+                  "kind":"spell",
+                  "id":"trigger-spell",
+                  "cost":{"ap":1},
+                  "effects":[
+                    {
+                      "type":"trigger",
+                      "event":"later",
+                      "effects":[{"type":"resourceDelta","resource":"bq","amount":-50}]
+                    }
+                  ],
+                  "constraints":[],
+                  "tags":[]
+                }
+              ],
+              "character":{"id":"test","resources":{"ap":6,"mp":3,"wp":2,"bq":100}}
+            }"#,
+        )
+        .expect("request should parse");
+        let candidate = OptimizerCandidateInput {
+            passive_ids: vec![],
+            plan: CandidatePlan {
+                turns: vec![CandidateTurn {
+                    actions: vec![action("trigger-spell")],
+                }],
+            },
+        };
+
+        let evaluation = evaluate_candidate(&request, &candidate, "candidate:trigger")
+            .expect("candidate should evaluate");
+
+        assert!(evaluation.valid);
+        assert_eq!(evaluation.final_resources.bq, 200);
+    }
+
+    #[test]
+    fn candidate_evaluation_applies_last_rune_cost_delta() {
+        let request = parse_optimizer_request(
+            r#"{
+              "schemaVersion":1,
+              "engine":"hybrid",
+              "seed":"last-rune-cost",
+              "duration":2,
+              "iterations":10,
+              "maxActionsPerTurn":1,
+              "maxPassiveCount":0,
+              "availableSpellIds":["water-rune","discounted-light"],
+              "availablePassiveIds":[],
+              "catalog":[
+                {
+                  "kind":"spell",
+                  "id":"water-rune",
+                  "element":"water",
+                  "cost":{},
+                  "effects":[],
+                  "constraints":[],
+                  "tags":[]
+                },
+                {
+                  "kind":"spell",
+                  "id":"discounted-light",
+                  "element":"light",
+                  "cost":{"ap":6},
+                  "effects":[
+                    {
+                      "type":"conditional",
+                      "condition":{"type":"lastRune","rune":"aquatic"},
+                      "effects":[{"type":"tag","tag":"costDelta","value":"ap:-1"}]
+                    }
+                  ],
+                  "constraints":[],
+                  "tags":[]
+                }
+              ],
+              "character":{"id":"test","resources":{"ap":5,"mp":3,"wp":2,"bq":100}}
+            }"#,
+        )
+        .expect("request should parse");
+        let candidate = OptimizerCandidateInput {
+            passive_ids: vec![],
+            plan: CandidatePlan {
+                turns: vec![
+                    CandidateTurn {
+                        actions: vec![action("water-rune")],
+                    },
+                    CandidateTurn {
+                        actions: vec![action("discounted-light")],
+                    },
+                ],
+            },
+        };
+
+        let evaluation = evaluate_candidate(&request, &candidate, "candidate:last-rune-cost")
+            .expect("candidate should evaluate");
+
+        assert!(evaluation.valid);
+        assert_eq!(evaluation.final_resources.ap, 0);
+    }
+
+    #[test]
     fn evaluates_candidate_batches_in_one_call() {
         let request = transformation_request();
         let candidates = vec![
@@ -6824,10 +6940,50 @@ mod tests {
                 .expect("target limit should win");
         assert_eq!(target_violation.scope, Some("target".to_string()));
 
+        assert!(validate_spell_rules(
+            &spell,
+            1,
+            Some(ActionTargetKind::EmptyCell),
+            &BTreeMap::new(),
+            &target_casts,
+            &state
+        )
+        .is_none());
+
         let turn_violation =
             validate_spell_rules(&spell, 1, None, &casts, &BTreeMap::new(), &state)
                 .expect("turn limit should block");
         assert_eq!(turn_violation.scope, Some("turn".to_string()));
+
+        let refraction_state = create_huppermage_state(
+            ResourcePool {
+                ap: 12,
+                mp: 6,
+                wp: 6,
+                bq: 500,
+            },
+            vec!["refraction-elementaire".to_string()],
+        );
+        let coeur = SpellRules {
+            id: "coeur-de-lumiere".to_string(),
+            element: None,
+            is_deck_tracked: false,
+            max_casts_per_turn: Some(1),
+            max_casts_per_target: None,
+            cooldown_turns: None,
+            required_target: None,
+        };
+        let mut coeur_casts = BTreeMap::new();
+        coeur_casts.insert("coeur-de-lumiere".to_string(), 1);
+        assert!(validate_spell_rules(
+            &coeur,
+            1,
+            None,
+            &coeur_casts,
+            &BTreeMap::new(),
+            &refraction_state
+        )
+        .is_none());
     }
 
     #[test]
