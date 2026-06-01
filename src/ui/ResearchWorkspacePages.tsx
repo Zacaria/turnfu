@@ -69,7 +69,7 @@ export type OptimizerWorkspaceSession = {
   runStatus: OptimizerRunStatus;
 };
 
-function createOptimizerWorkspaceSession(session: OptimizerWorkspaceSession): OptimizerWorkspaceSession {
+export function createOptimizerWorkspaceSession(session: OptimizerWorkspaceSession): OptimizerWorkspaceSession {
   if (session.runStatus !== "running") {
     return session;
   }
@@ -250,7 +250,7 @@ export function BuildPage({
             onRename={onRenameBuild}
           />
         </div>
-        <span className="status-pill status-ok">localStorage</span>
+        <span className="status-pill status-ok">SQLite local</span>
       </section>
 
       <section className="build-columns">

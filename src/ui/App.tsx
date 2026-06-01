@@ -76,7 +76,12 @@ import {
   type OptimizerWorkspaceControls,
 } from "./optimizerWorkspace.ts";
 import {
+  restoreOptimizerWorkspaceSessions,
+  saveOptimizerWorkspaceSession,
+} from "./optimizerSessionPersistence.ts";
+import {
   BuildPage,
+  createOptimizerWorkspaceSession,
   OptimizerWorkspacePage,
   OptimizerRunDetailPage,
   ResearchLibraryPage,
@@ -96,7 +101,6 @@ import {
   getBuildSavedCombos,
   getBuildSetups,
   restoreResearchWorkspace,
-  saveResearchWorkspace,
   renameBuild,
   renameSetupSnapshot,
   saveOptimizerCandidateCombo,
@@ -107,6 +111,10 @@ import {
   type WakfuClassId,
 } from "./researchWorkspace.ts";
 import type { SublimationBuild, SublimationCatalogEntry, SublimationCategory } from "../core/sublimations/types.ts";
+import {
+  restoreResearchWorkspaceFromSqlite,
+  saveResearchWorkspaceToSqlite,
+} from "./researchWorkspacePersistence.ts";
 import {
   createResearchRoute,
   openBuilderFromSetup,
@@ -199,13 +207,16 @@ export function App() {
   const [researchWorkspace, setResearchWorkspace] = useState<ResearchWorkspaceData>(() => (
     typeof window === "undefined"
       ? restoreResearchWorkspace(createMemoryStorageFallback())
-      : restoreResearchWorkspace(window.localStorage)
+      : restoreResearchWorkspace(createMemoryStorageFallback())
   ));
+  const [researchWorkspaceHydrated, setResearchWorkspaceHydrated] = useState(false);
+  const researchWorkspaceDirtyRef = useRef(false);
   const [researchRoute, setResearchRoute] = useState<ResearchRoute>(() => createResearchRoute());
-  const optimizerSessionsRef = useRef<Record<string, OptimizerWorkspaceSession>>({});
   const builderBaselineRef = useRef<{ assumptionKey: string; setupSnapshotId: string } | null>(null);
-  const optimizerSessionFlushRef = useRef<number | null>(null);
   const [optimizerSessions, setOptimizerSessions] = useState<Record<string, OptimizerWorkspaceSession>>({});
+  const [optimizerSessionsHydrated, setOptimizerSessionsHydrated] = useState(false);
+  const optimizerSessionsRef = useRef<Record<string, OptimizerWorkspaceSession>>(optimizerSessions);
+  const optimizerSessionsDirtyRef = useRef(false);
   const [buildClassFilter, setBuildClassFilter] = useState<WakfuClassId | "all">("all");
   const [characterConfig, setCharacterConfig] = useState<SimulatedCharacter>(() => createDefaultCharacter());
   const [equipmentCharacter, setEquipmentCharacter] = useState<SimulatedCharacter>(() => createDefaultEquipmentCharacter());
@@ -293,15 +304,75 @@ export function App() {
   }, [snapshots.length]);
 
   useEffect(() => {
-    if (typeof window !== "undefined") {
-      saveResearchWorkspace(window.localStorage, researchWorkspace);
+    if (typeof window === "undefined") {
+      setResearchWorkspaceHydrated(true);
+      return;
     }
-  }, [researchWorkspace]);
 
-  useEffect(() => () => {
-    if (optimizerSessionFlushRef.current !== null) {
-      window.cancelAnimationFrame(optimizerSessionFlushRef.current);
+    let cancelled = false;
+    restoreResearchWorkspaceFromSqlite(window.localStorage)
+      .then((restoredWorkspace) => {
+        if (cancelled || !restoredWorkspace || researchWorkspaceDirtyRef.current) {
+          return;
+        }
+
+        setResearchWorkspace(restoredWorkspace);
+      })
+      .catch((error: unknown) => {
+        console.error("Unable to restore research workspace from SQLite.", error);
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setResearchWorkspaceHydrated(true);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !researchWorkspaceHydrated) {
+      return;
     }
+
+    saveResearchWorkspaceToSqlite(researchWorkspace).catch((error: unknown) => {
+      console.error("Unable to persist research workspace to SQLite.", error);
+    });
+  }, [researchWorkspace, researchWorkspaceHydrated]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      setOptimizerSessionsHydrated(true);
+      return;
+    }
+
+    let cancelled = false;
+    restoreOptimizerWorkspaceSessions(createOptimizerWorkspaceSession)
+      .then((restoredSessions) => {
+        if (cancelled) {
+          return;
+        }
+
+        const nextSessions = optimizerSessionsDirtyRef.current
+          ? { ...restoredSessions, ...optimizerSessionsRef.current }
+          : restoredSessions;
+        optimizerSessionsRef.current = nextSessions;
+        setOptimizerSessions(nextSessions);
+      })
+      .catch((error: unknown) => {
+        console.error("Unable to restore optimizer sessions from SQLite.", error);
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setOptimizerSessionsHydrated(true);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -317,8 +388,16 @@ export function App() {
     setLocale(nextLocale);
   }
 
-  function createResearchBuild(input: { classId: WakfuClassId; gameplayLabel: string; name: string }) {
+  function updateResearchWorkspace(updater: (workspace: ResearchWorkspaceData) => ResearchWorkspaceData) {
     setResearchWorkspace((workspace) => {
+      const nextWorkspace = updater(workspace);
+      researchWorkspaceDirtyRef.current = true;
+      return nextWorkspace;
+    });
+  }
+
+  function createResearchBuild(input: { classId: WakfuClassId; gameplayLabel: string; name: string }) {
+    updateResearchWorkspace((workspace) => {
       const nextWorkspace = createBuild(workspace, { ...input, now: new Date().toISOString() });
       const createdBuild = nextWorkspace.builds.at(-1);
       if (createdBuild && createdBuild.id !== workspace.builds.at(-1)?.id) {
@@ -330,7 +409,7 @@ export function App() {
 
   function createBalancedSetFromSetup(setup: SetupSnapshot) {
     const now = new Date().toISOString();
-    setResearchWorkspace((workspace) => createBalancedElementSet(workspace, {
+    updateResearchWorkspace((workspace) => createBalancedElementSet(workspace, {
       buildId: setup.buildId,
       sourceSetupSnapshotId: setup.id,
       name: `Set éléments équilibrés ${now.slice(0, 16).replace("T", " ")}`,
@@ -422,7 +501,7 @@ export function App() {
 
   function saveOptimizerRun(setup: SetupSnapshot, controls: OptimizerWorkspaceControls) {
     const now = new Date().toISOString();
-    setResearchWorkspace((workspace) => createOptimizerRunReference(workspace, {
+    updateResearchWorkspace((workspace) => createOptimizerRunReference(workspace, {
       buildId: setup.buildId,
       setupSnapshotId: setup.id,
       label: `Run optimizer ${now.slice(0, 16).replace("T", " ")}`,
@@ -436,7 +515,7 @@ export function App() {
     candidate: OptimizerCandidateViewModel,
     controls: OptimizerWorkspaceControls,
   ) {
-    setResearchWorkspace((workspace) => saveOptimizerCandidateCombo(workspace, {
+    updateResearchWorkspace((workspace) => saveOptimizerCandidateCombo(workspace, {
       buildId: setup.buildId,
       setupSnapshotId: setup.id,
       name: createSavedComboName(candidate),
@@ -450,11 +529,11 @@ export function App() {
   }
 
   function removeSavedCombo(comboId: string) {
-    setResearchWorkspace((workspace) => deleteSavedCombo(workspace, comboId));
+    updateResearchWorkspace((workspace) => deleteSavedCombo(workspace, comboId));
   }
 
   function removeSavedCombos(comboIds: string[]) {
-    setResearchWorkspace((workspace) => deleteSavedCombos(workspace, { comboIds }));
+    updateResearchWorkspace((workspace) => deleteSavedCombos(workspace, { comboIds }));
   }
 
   function storeOptimizerSession(setupId: string, session: OptimizerWorkspaceSession) {
@@ -462,19 +541,11 @@ export function App() {
       ...optimizerSessionsRef.current,
       [setupId]: session,
     };
+    optimizerSessionsDirtyRef.current = true;
     optimizerSessionsRef.current = nextSessions;
-    if (typeof window === "undefined") {
-      setOptimizerSessions(nextSessions);
-      return;
-    }
-
-    if (optimizerSessionFlushRef.current !== null) {
-      return;
-    }
-
-    optimizerSessionFlushRef.current = window.requestAnimationFrame(() => {
-      optimizerSessionFlushRef.current = null;
-      setOptimizerSessions(optimizerSessionsRef.current);
+    setOptimizerSessions(nextSessions);
+    saveOptimizerWorkspaceSession(setupId, session).catch((error: unknown) => {
+      console.error("Unable to persist optimizer session to SQLite.", error);
     });
   }
 
@@ -776,57 +847,6 @@ export function App() {
       ...current,
       sublimations: nextSublimations,
     }));
-    persistBuilderSetupSublimations(nextSublimations);
-  }
-
-  function returnFromBuilder() {
-    if (
-      researchRoute.page === "builder"
-      && researchRoute.returnTo?.page === "setup"
-      && activeSetup
-      && character.sublimations
-      && !areSublimationBuildsEqual(character.sublimations, activeSetup.sublimations)
-    ) {
-      updateSetupSublimations(activeSetup, character.sublimations);
-      return;
-    }
-
-    setResearchRoute(returnToPrevious(researchRoute));
-  }
-
-  function persistBuilderSetupSublimations(sublimations: SublimationBuild) {
-    if (
-      researchRoute.page !== "builder"
-      || researchRoute.returnTo?.page !== "setup"
-      || !activeSetup
-      || areSublimationBuildsEqual(sublimations, activeSetup.sublimations)
-    ) {
-      return;
-    }
-
-    const now = new Date().toISOString();
-    const nextWorkspace = createSetupSnapshotWithSublimations(researchWorkspace, {
-      buildId: activeSetup.buildId,
-      sourceSetupSnapshotId: activeSetup.id,
-      sublimations,
-      now,
-    });
-    const createdSetupId = nextWorkspace.setupSnapshots.at(-1)?.id ?? activeSetup.id;
-    setResearchWorkspace(nextWorkspace);
-    setResearchRoute({
-      page: "builder",
-      buildId: activeSetup.buildId,
-      setupSnapshotId: createdSetupId,
-      returnTo: {
-        page: "setup",
-        buildId: activeSetup.buildId,
-        setupSnapshotId: createdSetupId,
-        returnTo: {
-          page: "build",
-          buildId: activeSetup.buildId,
-        },
-      },
-    });
   }
 
   function startSpellDrag(event: React.DragEvent, spellId: string) {
@@ -1045,7 +1065,7 @@ export function App() {
           build={activeBuild}
           catalog={catalog}
           initialSession={optimizerSessionsRef.current[activeSetup.id] ?? optimizerSessions[activeSetup.id]}
-          key={activeSetup.id}
+          key={`${activeSetup.id}:${optimizerSessionsHydrated ? "hydrated" : "loading"}`}
           setup={activeSetup}
           savedCandidateIds={savedCandidateIds}
           savedRunKeys={savedRunKeys}
@@ -1565,21 +1585,6 @@ function getBuilderBackLabel(route: ResearchRoute): string {
     default:
       return "Retour";
   }
-}
-
-function areSublimationBuildsEqual(left: SublimationBuild | undefined, right: SublimationBuild | undefined): boolean {
-  return createSublimationBuildComparisonKey(left) === createSublimationBuildComparisonKey(right);
-}
-
-function createSublimationBuildComparisonKey(build: SublimationBuild | undefined): string {
-  return JSON.stringify({
-    contactEnemiesAssumption: build?.contactEnemiesAssumption ?? null,
-    hpAssumption: build?.hpAssumption ?? null,
-    nearbyAlliesAssumption: build?.nearbyAlliesAssumption ?? null,
-    selections: [...(build?.selections ?? [])]
-      .map((selection) => selection.sublimationId)
-      .sort(),
-  });
 }
 
 function PanelHeader({

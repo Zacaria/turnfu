@@ -32,10 +32,10 @@ Rust/WASM backend.
 ## Validation Commands
 
 ```bash
-rtk npm run wasm:test
-rtk npm run diff:rust-wasm
-rtk npm run bench:hybrid -- --compare-backends --scenario t3-full --budget 100000 --seed smoke --no-build --no-oracle
-rtk npm run bench:hybrid -- --compare-backends --scenario t3-full --budget 1000000 --seed smoke --no-build --no-oracle
+rtk pnpm wasm:test
+rtk pnpm diff:rust-wasm
+rtk pnpm bench:hybrid -- --compare-backends --scenario t3-full --budget 100000 --seed smoke --no-build --no-oracle
+rtk pnpm bench:hybrid -- --compare-backends --scenario t3-full --budget 1000000 --seed smoke --no-build --no-oracle
 rtk openspec validate port-hybrid-engine-to-rust-wasm --strict --no-interactive
 ```
 
@@ -73,6 +73,22 @@ fingerprint, it resumes from the saved population, repair queue,
 elite-neighbor queue, restart/stagnation counters, and RNG state. Use `--reset`
 to discard a session after rules, catalog, character setup, or optimizer options
 change. For smoke tests, add `--max-rounds 1` or `--timebox-ms <milliseconds>`.
+
+## UI SQLite Recovery
+
+The optimizer UI persists its research workspace through the local Vite API at
+`/api/research-workspace` and its latest optimizer workspace sessions through
+`/api/optimizer-sessions`. The API stores this UI state in the same SQLite
+database used by persistent Rust/WASM search sessions, defaulting to
+`.optimizer/rust-wasm-search.sqlite`. Optimizer sessions are stored one row per
+setup so reopening a setup can recover the last controls, progress, result list,
+and pinned candidates.
+
+Use `WAKFU_OPTIMIZER_DB=/path/to/search.sqlite rtk pnpm dev` when the UI should
+read and write a different SQLite file. Existing `localStorage` research
+workspace data is migrated into SQLite once the API is available. If the API is
+unavailable, the browser keeps the current state in memory for that page load
+but cannot recover it after reopening the optimizer.
 
 ## Current Local Evidence
 
