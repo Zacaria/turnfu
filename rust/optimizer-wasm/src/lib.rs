@@ -519,6 +519,14 @@ pub struct HybridSearchResponse {
     pub metrics: BTreeMap<String, u32>,
 }
 
+#[derive(Clone, Debug)]
+struct DomainSeedCandidate {
+    passive_ids: Vec<&'static str>,
+    turns: Vec<Vec<&'static str>>,
+    max_duration: Option<u32>,
+    min_passive_count: Option<u32>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CandidateEvaluationViolation {
@@ -4721,6 +4729,518 @@ pub fn generate_hybrid_candidates(
     })
 }
 
+fn create_domain_warmup_candidates(
+    request: &OptimizerRequest,
+    catalog: &[SearchCatalogEntry],
+    actions: &[CandidateAction],
+) -> Vec<OptimizerCandidateInput> {
+    let action_by_key = actions
+        .iter()
+        .map(|action| (encode_candidate_action(action), action.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let available_passives = get_available_passive_ids(request, catalog)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let mut candidates = Vec::new();
+
+    for seed in huppermage_domain_seed_candidates() {
+        if seed.turns.len() as u32 > request.duration
+            || seed
+                .max_duration
+                .is_some_and(|max_duration| request.duration > max_duration)
+            || seed
+                .min_passive_count
+                .is_some_and(|min_count| request.max_passive_count < min_count)
+        {
+            continue;
+        }
+
+        let passive_variants = create_domain_seed_passive_variants(
+            &seed.passive_ids,
+            request,
+            catalog,
+            &available_passives,
+        );
+        if passive_variants.is_empty() {
+            continue;
+        }
+
+        let mut turns = Vec::new();
+        let mut supported = true;
+        for seed_turn in &seed.turns {
+            let projected_keys = project_domain_seed_turn(seed_turn, request, catalog);
+            let mut actions = Vec::new();
+            for action_key in projected_keys {
+                let Some(action) = action_by_key.get(action_key) else {
+                    supported = false;
+                    break;
+                };
+                actions.push(action.clone());
+            }
+            if !supported {
+                break;
+            }
+            turns.push(CandidateTurn { actions });
+        }
+        if !supported {
+            continue;
+        }
+
+        while turns.len() < request.duration as usize {
+            turns.push(CandidateTurn { actions: vec![] });
+        }
+
+        for passive_ids in passive_variants {
+            candidates.push(OptimizerCandidateInput {
+                passive_ids,
+                plan: CandidatePlan {
+                    turns: turns.clone(),
+                },
+            });
+        }
+    }
+
+    candidates
+}
+
+fn create_domain_seed_passive_variants(
+    passive_ids: &[&'static str],
+    request: &OptimizerRequest,
+    catalog: &[SearchCatalogEntry],
+    available_passives: &BTreeSet<String>,
+) -> Vec<Vec<String>> {
+    let available_seed_passives = passive_ids
+        .iter()
+        .filter(|passive_id| available_passives.contains(**passive_id))
+        .map(|passive_id| passive_id.to_string())
+        .collect::<Vec<_>>();
+    let passive_limit = std::cmp::min(
+        request.max_passive_count as usize,
+        available_seed_passives.len(),
+    );
+    if passive_limit == 0 {
+        return vec![vec![]];
+    }
+    if available_seed_passives.len() <= request.max_passive_count as usize {
+        return vec![available_seed_passives];
+    }
+
+    let mut variants = combine_passive_variants(&available_seed_passives, passive_limit);
+    variants.sort_by(|left, right| {
+        score_passive_variant(right, request, catalog)
+            .partial_cmp(&score_passive_variant(left, request, catalog))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    variants.truncate(24);
+    variants
+}
+
+fn combine_passive_variants(passive_ids: &[String], size: usize) -> Vec<Vec<String>> {
+    if size == 0 {
+        return vec![vec![]];
+    }
+    if passive_ids.len() < size {
+        return vec![];
+    }
+
+    let first = passive_ids[0].clone();
+    let remaining = &passive_ids[1..];
+    let mut with_first = combine_passive_variants(remaining, size - 1)
+        .into_iter()
+        .map(|mut variant| {
+            variant.push(first.clone());
+            variant.sort();
+            variant
+        })
+        .collect::<Vec<_>>();
+    let mut without_first = combine_passive_variants(remaining, size);
+    with_first.append(&mut without_first);
+    with_first
+}
+
+fn score_passive_variant(
+    passive_ids: &[String],
+    request: &OptimizerRequest,
+    catalog: &[SearchCatalogEntry],
+) -> f64 {
+    passive_ids
+        .iter()
+        .map(|passive_id| get_passive_search_weight(passive_id, request, catalog))
+        .sum()
+}
+
+fn project_domain_seed_turn(
+    seed_turn: &[&'static str],
+    request: &OptimizerRequest,
+    catalog: &[SearchCatalogEntry],
+) -> Vec<&'static str> {
+    if seed_turn.len() <= request.max_actions_per_turn as usize {
+        return seed_turn.to_vec();
+    }
+
+    let pivot_spell_ids = BTreeSet::from([
+        "coeur-de-lumiere",
+        "runification",
+        "fleche-de-lumiere",
+        "epee-de-lumiere",
+        "halo-chatoyant",
+    ]);
+    let entries_by_id = catalog
+        .iter()
+        .map(|entry| (entry.id.as_str(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let mut scored = seed_turn
+        .iter()
+        .enumerate()
+        .map(|(index, action_key)| {
+            let spell_id = action_key.split('@').next().unwrap_or(action_key);
+            let spell = entries_by_id.get(spell_id);
+            (
+                *action_key,
+                index,
+                pivot_spell_ids.contains(spell_id),
+                spell
+                    .map(|entry| get_action_search_weight(entry))
+                    .unwrap_or_default(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut selected_indexes = scored
+        .iter()
+        .filter(|(_, _, keep, _)| *keep)
+        .take(request.max_actions_per_turn as usize)
+        .map(|(_, index, _, _)| *index)
+        .collect::<BTreeSet<_>>();
+
+    scored.sort_by(|left, right| {
+        right
+            .3
+            .partial_cmp(&left.3)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.1.cmp(&right.1))
+    });
+    for (_, index, _, _) in scored {
+        if selected_indexes.len() >= request.max_actions_per_turn as usize {
+            break;
+        }
+        selected_indexes.insert(index);
+    }
+
+    seed_turn
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| selected_indexes.contains(index))
+        .map(|(_, action_key)| *action_key)
+        .collect()
+}
+
+fn huppermage_domain_seed_candidates() -> Vec<DomainSeedCandidate> {
+    vec![
+        DomainSeedCandidate {
+            passive_ids: vec!["carnage", "extension-des-sens", "profusion-runique"],
+            turns: vec![
+                vec![
+                    "halo-chatoyant",
+                    "eboulement",
+                    "coeur-de-lumiere",
+                    "papillons-diurnes",
+                    "flux-denergie",
+                    "debacle",
+                    "orbes-luisants",
+                    "orbes-luisants",
+                ],
+                vec![
+                    "coeur-de-lumiere",
+                    "runification",
+                    "debacle",
+                    "fleche-de-lumiere",
+                    "epee-de-lumiere",
+                    "eboulement",
+                    "ombres-dansantes",
+                    "halo-chatoyant",
+                ],
+                vec![
+                    "halo-chatoyant",
+                    "eboulement",
+                    "coeur-de-lumiere",
+                    "eboulement",
+                    "papillons-diurnes",
+                    "debacle",
+                    "orbes-luisants",
+                    "halo-chatoyant@emptyCell",
+                ],
+            ],
+            max_duration: None,
+            min_passive_count: None,
+        },
+        DomainSeedCandidate {
+            passive_ids: vec!["carnage", "extension-des-sens", "profusion-runique"],
+            turns: vec![
+                vec![
+                    "eboulement",
+                    "coeur-de-lumiere",
+                    "halo-chatoyant",
+                    "papillons-diurnes",
+                    "flux-denergie",
+                    "debacle",
+                    "orbes-luisants",
+                    "orbes-luisants",
+                ],
+                vec![
+                    "coeur-de-lumiere",
+                    "runification",
+                    "debacle",
+                    "fleche-de-lumiere",
+                    "epee-de-lumiere",
+                    "eboulement",
+                    "ombres-dansantes",
+                    "halo-chatoyant",
+                ],
+                vec![
+                    "halo-chatoyant",
+                    "eboulement",
+                    "coeur-de-lumiere",
+                    "halo-chatoyant@emptyCell",
+                    "papillons-diurnes",
+                    "debacle",
+                    "orbes-luisants",
+                    "halo-chatoyant@emptyCell",
+                ],
+            ],
+            max_duration: None,
+            min_passive_count: None,
+        },
+        DomainSeedCandidate {
+            passive_ids: vec!["carnage", "extension-des-sens", "profusion-runique"],
+            turns: vec![
+                vec![
+                    "halo-chatoyant",
+                    "eboulement",
+                    "coeur-de-lumiere",
+                    "papillons-diurnes",
+                    "flux-denergie",
+                    "debacle",
+                    "orbes-luisants",
+                    "orbes-luisants",
+                ],
+                vec![
+                    "coeur-de-lumiere",
+                    "runification",
+                    "eboulement",
+                    "debacle",
+                    "fleche-de-lumiere",
+                    "ombres-dansantes",
+                    "halo-chatoyant",
+                    "epee-de-lumiere",
+                ],
+                vec![
+                    "halo-chatoyant",
+                    "eboulement",
+                    "coeur-de-lumiere",
+                    "papillons-diurnes",
+                    "flux-denergie",
+                    "debacle",
+                    "orbes-luisants",
+                    "halo-chatoyant@emptyCell",
+                ],
+            ],
+            max_duration: None,
+            min_passive_count: None,
+        },
+        DomainSeedCandidate {
+            passive_ids: vec!["carnage", "extension-des-sens", "profusion-runique"],
+            turns: vec![
+                vec![
+                    "halo-chatoyant",
+                    "eboulement",
+                    "coeur-de-lumiere",
+                    "papillons-diurnes",
+                    "flux-denergie",
+                    "debacle",
+                    "orbes-luisants",
+                    "orbes-luisants",
+                ],
+                vec![
+                    "coeur-de-lumiere",
+                    "runification",
+                    "eboulement",
+                    "debacle",
+                    "fleche-de-lumiere",
+                    "ombres-dansantes",
+                    "halo-chatoyant",
+                    "epee-de-lumiere",
+                ],
+            ],
+            max_duration: None,
+            min_passive_count: None,
+        },
+        DomainSeedCandidate {
+            passive_ids: vec!["carnage", "extension-des-sens", "profusion-runique"],
+            turns: vec![
+                vec![
+                    "eboulement",
+                    "coeur-de-lumiere",
+                    "flux-denergie",
+                    "papillons-diurnes",
+                    "debacle",
+                    "orbes-luisants",
+                    "orbes-luisants",
+                ],
+                vec![
+                    "coeur-de-lumiere",
+                    "runification",
+                    "debacle",
+                    "debacle",
+                    "fleche-de-lumiere",
+                    "epee-de-lumiere",
+                    "epee-de-lumiere",
+                ],
+            ],
+            max_duration: Some(2),
+            min_passive_count: Some(3),
+        },
+        DomainSeedCandidate {
+            passive_ids: vec!["carnage", "extension-des-sens", "profusion-runique"],
+            turns: vec![
+                vec![
+                    "eboulement",
+                    "coeur-de-lumiere",
+                    "flux-denergie",
+                    "papillons-diurnes",
+                    "debacle",
+                    "orbes-luisants",
+                    "orbes-luisants",
+                ],
+                vec![
+                    "coeur-de-lumiere",
+                    "runification",
+                    "eboulement",
+                    "debacle",
+                    "fleche-de-lumiere",
+                    "orbes-luisants",
+                    "epee-de-lumiere",
+                ],
+            ],
+            max_duration: Some(2),
+            min_passive_count: None,
+        },
+        DomainSeedCandidate {
+            passive_ids: vec!["carnage", "extension-des-sens", "profusion-runique"],
+            turns: vec![
+                vec![
+                    "eboulement",
+                    "coeur-de-lumiere",
+                    "rayon-crepusculaire",
+                    "flux-denergie",
+                    "papillons-diurnes",
+                    "debacle",
+                    "orbes-luisants",
+                ],
+                vec![
+                    "coeur-de-lumiere",
+                    "runification",
+                    "debacle",
+                    "fleche-de-lumiere",
+                    "orbes-luisants",
+                    "papillons-diurnes",
+                    "epee-de-lumiere",
+                ],
+            ],
+            max_duration: None,
+            min_passive_count: None,
+        },
+        DomainSeedCandidate {
+            passive_ids: vec!["carnage", "extension-des-sens"],
+            turns: vec![
+                vec![
+                    "eboulement",
+                    "coeur-de-lumiere",
+                    "halo-chatoyant",
+                    "papillons-diurnes",
+                    "flux-denergie",
+                    "debacle",
+                    "orbes-luisants",
+                    "orbes-luisants",
+                ],
+                vec![
+                    "coeur-de-lumiere",
+                    "runification",
+                    "debacle",
+                    "fleche-de-lumiere",
+                    "epee-de-lumiere",
+                    "eboulement",
+                    "ombres-dansantes",
+                    "halo-chatoyant",
+                ],
+            ],
+            max_duration: None,
+            min_passive_count: None,
+        },
+        DomainSeedCandidate {
+            passive_ids: vec!["carnage", "extension-des-sens", "profusion-runique"],
+            turns: vec![
+                vec![
+                    "halo-chatoyant",
+                    "eboulement",
+                    "coeur-de-lumiere",
+                    "papillons-diurnes",
+                    "flux-denergie",
+                    "debacle",
+                    "orbes-luisants",
+                    "orbes-luisants",
+                ],
+                vec![
+                    "coeur-de-lumiere",
+                    "runification",
+                    "papillons-diurnes",
+                    "debacle",
+                    "fleche-de-lumiere",
+                    "eboulement",
+                    "halo-chatoyant",
+                    "epee-de-lumiere",
+                ],
+            ],
+            max_duration: None,
+            min_passive_count: None,
+        },
+        DomainSeedCandidate {
+            passive_ids: vec![
+                "carnage",
+                "extension-des-sens",
+                "fluctuation",
+                "liaison-lumineuse",
+                "profusion-runique",
+                "sauvegarde-runique",
+            ],
+            turns: vec![
+                vec![
+                    "flux-denergie",
+                    "eboulement",
+                    "coeur-de-lumiere",
+                    "papillons-diurnes",
+                    "epee-de-lumiere",
+                    "orbes-luisants",
+                    "debacle",
+                    "debacle",
+                    "cycle-elementaire",
+                ],
+                vec![
+                    "coeur-de-lumiere",
+                    "runification",
+                    "ombres-dansantes",
+                    "debacle",
+                    "fleche-de-lumiere",
+                    "flux-denergie",
+                    "halo-chatoyant@emptyCell",
+                    "epee-de-lumiere",
+                ],
+            ],
+            max_duration: None,
+            min_passive_count: None,
+        },
+    ]
+}
+
 pub fn run_hybrid_search(request: &OptimizerRequest) -> Result<HybridSearchResponse, String> {
     let mut metrics = BTreeMap::new();
     let supported = request.engine == "hybrid";
@@ -4751,14 +5271,21 @@ pub fn run_hybrid_search(request: &OptimizerRequest) -> Result<HybridSearchRespo
         .collect::<BTreeMap<_, _>>();
     let max_candidates = request.max_candidates.unwrap_or(20).clamp(1, 200) as usize;
     let mut rng = SeededRandom::new(&format!("{}:hybrid:run", request.seed));
+    let warmup_candidates = create_domain_warmup_candidates(request, &catalog, &actions);
+    let mut warmup_index = 0_usize;
     let mut attempts = 0;
     let mut valid_candidates = 0;
     let mut invalid_candidates = 0;
     let mut top_candidates = Vec::new();
 
-    for _ in 0..request.iterations {
-        let use_resource_aware = rng.chance(0.12);
-        let candidate = if use_resource_aware {
+    while attempts < request.iterations {
+        let candidate = if let Some(candidate) = warmup_candidates.get(warmup_index) {
+            warmup_index += 1;
+            *metrics
+                .entry("hybridDomainWarmupCandidates".to_string())
+                .or_insert(0) += 1;
+            candidate.clone()
+        } else if rng.chance(0.12) {
             *metrics
                 .entry("hybridResourceAwareCandidates".to_string())
                 .or_insert(0) += 1;
