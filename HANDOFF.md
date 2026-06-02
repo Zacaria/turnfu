@@ -82,7 +82,9 @@ and resolving Light damage elements for Rust sublimation Alternance/carryover:
 ```bash
 rtk pnpm test
 rtk pnpm wasm:test
+rtk env PATH=/Users/zacariachtatar/game_repos/wakfu-turn-optimizer/.worktrees/codex/port-hybrid-engine-rust-wasm-handoff/.local-cargo-bin/bin:$PATH wasm-pack build rust/optimizer-wasm --target nodejs --out-dir ../../src/wasm/optimizer_wasm_pkg --no-opt
 rtk pnpm diff:rust-wasm -- --no-build
+rtk pnpm diff:rust-wasm:soak -- --no-build
 rtk pnpm bench:hybrid -- --compare-backends --scenario t3-full --budget 100000 --seed smoke --no-build --no-oracle
 rtk openspec validate port-hybrid-engine-to-rust-wasm --strict --no-interactive
 rtk git diff --check
@@ -93,11 +95,12 @@ Results:
 - TypeScript tests: 256 passed.
 - Rust tests: 56 passed.
 - CI differential: 94 fixtures, 102 generated candidates, 0 mismatches.
+- Soak differential: 122 fixtures, 1648 generated candidates, 0 mismatches.
 - OpenSpec strict validation: valid.
 - Diff whitespace check: passed.
 - `t3-full` 100k smoke with supported sublimations, no per-candidate oracle:
-  - TypeScript: `2542.26 it/s`, score `167490.44`.
-  - Rust/WASM: `4611.79 it/s`, Rust direct and TypeScript-verified score
+  - TypeScript: `2572.80 it/s`, score `167490.44`.
+  - Rust/WASM: `4732.53 it/s`, Rust direct and TypeScript-verified score
     `169698.63`.
   - Final top oracle candidates: 50 valid, max score delta `0`, max total
     damage delta `0`.
