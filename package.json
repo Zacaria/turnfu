@@ -9,6 +9,14 @@
     "build": "vite build",
     "test": "node --test --experimental-strip-types \"src/**/*.test.ts\"",
     "bench:hybrid": "node --experimental-strip-types scripts/benchmark-hybrid.ts",
+    "bench:rust-wasm:parallel": "node --experimental-strip-types scripts/benchmark-rust-wasm-parallel.ts",
+    "search:rust-wasm": "node --experimental-strip-types scripts/search-rust-wasm-sqlite.ts",
+    "bench:wasm": "node --experimental-strip-types scripts/benchmark-rust-wasm.ts",
+    "wasm:build": "wasm-pack build rust/optimizer-wasm --target nodejs --out-dir ../../src/wasm/optimizer_wasm_pkg",
+    "wasm:test": "cargo test --manifest-path rust/optimizer-wasm/Cargo.toml",
+    "diff:rust-wasm": "node --experimental-strip-types scripts/differential-rust-wasm.ts",
+    "diff:rust-wasm:ci": "node --experimental-strip-types scripts/differential-rust-wasm.ts --profile ci",
+    "diff:rust-wasm:soak": "node --experimental-strip-types scripts/differential-rust-wasm.ts --profile soak",
     "validate:openspec:huppermage": "openspec validate catalog-huppermage-spells-effects --strict --no-interactive"
   },
   "dependencies": {

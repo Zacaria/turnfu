@@ -125,6 +125,34 @@ test("carries unused AP from supported sublimations into the next turn", () => {
   assert.equal(result.turns[1].initialCharacter.resources.ap, 8);
 });
 
+test("carries WP after initial sublimation malus without reapplying it each turn", () => {
+  const result = simulateCombo({
+    catalog,
+    character: {
+      ...character,
+      resources: createResources({ ap: 6, mp: 3, wp: 6, bq: 0 }),
+      sublimations: {
+        selections: [
+          { sublimationId: "puissance-brute-ii" },
+          { sublimationId: "puissance-brute-ii" },
+        ],
+        hpAssumption: "normal",
+      },
+    },
+    combo: {
+      turns: [
+        { actions: [{ spellId: "spark" }] },
+        { actions: [{ spellId: "resource-spend" }] },
+      ],
+    },
+  });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.turns[0].result.breakdown[0]?.resourceBefore.wp, 2);
+  assert.equal(result.turns[1].result.breakdown[0]?.resourceBefore.wp, 2);
+  assert.equal(result.turns[1].result.breakdown[0]?.resourceAfter.wp, 1);
+});
+
 test("carries secondary elemental sublimation damage into the next turn", () => {
   const result = simulateCombo({
     catalog,

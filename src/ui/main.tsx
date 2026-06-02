@@ -1,8 +1,8 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { AuraDemo } from "./AuraDemo.tsx?v=energy-no-spikes-v1";
-import { App } from "./App.tsx?v=sublimations-rebase-v1";
-import "./styles.css?v=sublimations-rebase-v1";
+import { AuraDemo } from "./AuraDemo.tsx";
+import { App } from "./App.tsx";
+import "./styles.css";
 
 const root = document.getElementById("root");
 

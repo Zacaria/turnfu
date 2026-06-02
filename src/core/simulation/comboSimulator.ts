@@ -8,6 +8,7 @@ import type {
   TurnState,
 } from "./types.ts";
 import { simulateTurn } from "./simulator.ts";
+import { computeActiveInitialSublimationResourceDelta } from "./sublimationResourceDeltas.ts";
 
 export function simulateCombo(options: ComboSimulationOptions): ComboSimulationResult {
   const turns = [];
@@ -72,7 +73,7 @@ function createNextTurnCharacter(baseCharacter: SimulatedCharacter, previousFina
     ...baseCharacter.resources,
     ap: baseCharacter.resources.ap + (previousFinalState.resourceCarryover.ap ?? 0),
     mp: baseCharacter.resources.mp + (previousFinalState.resourceCarryover.mp ?? 0),
-    wp: previousResources.wp,
+    wp: previousResources.wp - computeActiveInitialSublimationResourceDelta(baseCharacter, "wp"),
     bq: previousResources.bq,
   };
 

@@ -1,12 +1,16 @@
 .worktrees/
+.cargo-local/
+.local-cargo-bin/
+.optimizer/
 node_modules/
 .pnpm-store/
 dist/
 artifacts/
+src/wasm/
+rust/optimizer-wasm/target/
 .DS_Store
 *.log
 /*.png
 /public/assets/areas/
 /public/assets/spellAttributes/
 /public/assets/stats/
-.worktrees

@@ -19,7 +19,7 @@ import {
   type DurationGroupedResults,
   type OptimizerCandidateViewModel,
   type OptimizerWorkspaceControls,
-} from "./optimizerWorkspace.ts?v=optimizer-sublimations-v14";
+} from "./optimizerWorkspace.ts";
 import {
   filterBuildsByClass,
   formatWakfuClassLabel,
@@ -42,7 +42,7 @@ import {
   type SavedComboComparisonRow,
 } from "./savedComboComparison.ts";
 import { getHuppermageIconSrc } from "./icons.ts";
-import { createSublimationPreviewItems, type SublimationPreviewItem } from "./sublimationPreview.ts?v=optimizer-sublimations-v14";
+import { createSublimationPreviewItems, type SublimationPreviewItem } from "./sublimationPreview.ts";
 
 export type OptimizerRunStatus = "idle" | "running" | "done" | "stopped" | "error";
 
@@ -69,7 +69,7 @@ export type OptimizerWorkspaceSession = {
   runStatus: OptimizerRunStatus;
 };
 
-function createOptimizerWorkspaceSession(session: OptimizerWorkspaceSession): OptimizerWorkspaceSession {
+export function createOptimizerWorkspaceSession(session: OptimizerWorkspaceSession): OptimizerWorkspaceSession {
   if (session.runStatus !== "running") {
     return session;
   }
@@ -250,7 +250,7 @@ export function BuildPage({
             onRename={onRenameBuild}
           />
         </div>
-        <span className="status-pill status-ok">localStorage</span>
+        <span className="status-pill status-ok">SQLite local</span>
       </section>
 
       <section className="build-columns">
@@ -1037,7 +1037,7 @@ export function OptimizerWorkspacePage({
           </select>
         </label>
         <label className="field">
-          Itérations
+          Essais par lot
           <input
             type="number"
             min={10}
@@ -1094,9 +1094,8 @@ export function OptimizerWorkspacePage({
           <div className="optimizer-progress" role="status" aria-live="polite">
             <div>
               <b>{runProgress.label}</b>
-              <span>{runProgress.percent}% · {runProgress.attempts}/{normalizedControls.iterationBudget}</span>
+              <span>{runProgress.attempts} essais explorés</span>
             </div>
-            <progress value={runProgress.percent} max={100}>{runProgress.percent}%</progress>
             <div className="optimizer-progress-stats">
               <span>Valides: {runProgress.validCandidates}</span>
               <span>Invalides: {runProgress.invalidCandidates}</span>

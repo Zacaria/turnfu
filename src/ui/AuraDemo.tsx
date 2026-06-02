@@ -2,7 +2,7 @@ import { useMemo, useState, type CSSProperties } from "react";
 import type { Rune } from "../core/catalog/types.ts";
 import { formatRuneLabel } from "./i18n.ts";
 import { getRuneIconSrc } from "./spellAttributeIcons.ts";
-import "./auraDemo.css?v=energy-no-spikes-v1";
+import "./auraDemo.css";
 
 type RuneTone = {
   rune: Rune;

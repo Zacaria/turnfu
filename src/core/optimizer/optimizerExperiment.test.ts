@@ -4,6 +4,7 @@ import test from "node:test";
 import { cost, damage, huppermageCatalog, normalizeCatalog, normalizeEntry, passive, resourceDelta, screenshot, spell, statModifier } from "../catalog/index.ts";
 import { createResources } from "../simulation/index.ts";
 import {
+  configureRustWasmOptimizerBackend,
   createOptimizerExperimentEvaluator,
   runOptimizerExperiment,
   runOptimizerExperimentProgressive,
@@ -84,6 +85,7 @@ test("runs requested engines with common progress and deterministic seeded resul
   });
 
   assert.deepEqual(first.engineResults.map((result) => result.engine), allEngines);
+  assert.deepEqual(first.engineResults.map((result) => result.backend), allEngines.map(() => "typescript"));
   assert.ok(first.engineResults.every((result) => result.budget.iterations === 40));
   assert.ok(first.engineResults.every((result) => result.attempts > 0));
   assert.ok(first.engineResults.every((result) => result.validCandidates > 0));
@@ -93,6 +95,227 @@ test("runs requested engines with common progress and deterministic seeded resul
     first.engineResults.map((result) => result.bestCandidate?.id),
     second.engineResults.map((result) => result.bestCandidate?.id),
   );
+});
+
+test("keeps TypeScript backend as default and requires configured Rust backend", () => {
+  const defaultResult = runOptimizerExperiment({
+    catalog,
+    character,
+    duration: 2,
+    availableSpellIds: ["setup", "hit", "burst"],
+    engines: ["hybrid"],
+    seed: "default-backend",
+    budget: { iterations: 40 },
+    maxActionsPerTurn: 1,
+  });
+
+  assert.equal(defaultResult.engineResults[0]?.backend, "typescript");
+  assert.throws(
+    () => runOptimizerExperiment({
+      catalog,
+      character,
+      duration: 2,
+      availableSpellIds: ["setup", "hit", "burst"],
+      engines: ["hybrid"],
+      backend: "rustWasm",
+      seed: "rust-backend",
+      budget: { iterations: 40 },
+      maxActionsPerTurn: 1,
+    }),
+    /Rust\/WASM optimizer backend is not configured/,
+  );
+});
+
+test("runs configured Rust/WASM hybrid backend through the Rust batch evaluator guarded by the TypeScript oracle", () => {
+  configureRustWasmOptimizerBackend({
+    generate_hybrid_candidates_json(requestJson) {
+      const request = JSON.parse(requestJson);
+      return JSON.stringify({
+        schemaVersion: 1,
+        backend: "rustWasm",
+        supported: request.engine === "hybrid",
+        engine: request.engine,
+        seed: request.seed,
+        attempts: 2,
+        candidates: [
+          {
+            passiveIds: [],
+            plan: {
+              turns: [
+                { actions: [{ spellId: "hit" }] },
+                { actions: [{ spellId: "hit" }] },
+              ],
+            },
+          },
+          {
+            passiveIds: [],
+            plan: {
+              turns: [
+                { actions: [{ spellId: "setup" }] },
+                { actions: [{ spellId: "burst" }] },
+              ],
+            },
+          },
+        ],
+        metrics: {
+          rustWasmGeneratedCandidates: 2,
+        },
+      });
+    },
+    evaluate_candidate_batch_json(_requestJson, candidatesJson) {
+      const candidates = JSON.parse(candidatesJson);
+      return JSON.stringify(candidates.map((candidate: { id: string; plan: { turns: Array<{ actions: Array<{ spellId: string }> }> } }) => {
+        const firstSpell = candidate.plan.turns[0]?.actions[0]?.spellId;
+        const score = firstSpell === "setup" ? 144 : 40;
+        return {
+          candidateId: candidate.id,
+          valid: true,
+          totalDamage: score,
+          score: {
+            score,
+            totalDamage: score,
+            damageByResolvedElement: {
+              fire: score,
+              water: 0,
+              earth: 0,
+              air: 0,
+              light: 0,
+              neutral: 0,
+            },
+          },
+        };
+      }));
+    },
+  });
+
+  try {
+    const result = runOptimizerExperiment({
+      catalog,
+      character,
+      duration: 2,
+      availableSpellIds: ["setup", "hit", "burst"],
+      engines: ["hybrid"],
+      backend: "rustWasm",
+      seed: "rust-backend",
+      budget: { iterations: 2 },
+      maxActionsPerTurn: 1,
+    });
+
+    const engine = result.engineResults[0];
+    assert.equal(engine?.backend, "rustWasm");
+    assert.equal(engine?.attempts, 2);
+    assert.equal(engine?.metrics.rustWasmBatchCalls, 1);
+    assert.equal(engine?.metrics.rustWasmGeneratedCandidates, 2);
+    assert.equal(engine?.metrics.rustWasmCandidateEvaluations, 2);
+    assert.equal(result.bestCandidate?.score.score, 144);
+    assert.equal(result.bestCandidate?.plan.turns[0]?.actions[0]?.spellId, "setup");
+  } finally {
+    configureRustWasmOptimizerBackend(undefined);
+  }
+});
+
+test("can skip per-candidate Rust/WASM oracle checks and verify final top candidates through TypeScript", () => {
+  configureRustWasmOptimizerBackend({
+    generate_hybrid_candidates_json() {
+      throw new Error("direct Rust/WASM search should not request candidate batches");
+    },
+    run_hybrid_search_json(requestJson) {
+      const request = JSON.parse(requestJson);
+      return JSON.stringify({
+        schemaVersion: 1,
+        backend: "rustWasm",
+        supported: request.engine === "hybrid",
+        engine: request.engine,
+        seed: request.seed,
+        attempts: 2,
+        validCandidates: 2,
+        invalidCandidates: 0,
+        topCandidates: [
+          {
+            id: "::burst|",
+            passiveIds: [],
+            plan: {
+              turns: [
+                { actions: [{ spellId: "burst" }] },
+                { actions: [] },
+              ],
+            },
+            score: {
+              score: 999,
+              totalDamage: 999,
+              damageByResolvedElement: {
+                fire: 999,
+                water: 0,
+                earth: 0,
+                air: 0,
+                light: 0,
+                neutral: 0,
+              },
+            },
+          },
+          {
+            id: "::hit|hit",
+            passiveIds: [],
+            plan: {
+              turns: [
+                { actions: [{ spellId: "hit" }] },
+                { actions: [{ spellId: "hit" }] },
+              ],
+            },
+            score: {
+              score: 40,
+              totalDamage: 40,
+              damageByResolvedElement: {
+                fire: 40,
+                water: 0,
+                earth: 0,
+                air: 0,
+                light: 0,
+                neutral: 0,
+              },
+            },
+          },
+        ],
+        metrics: {
+          rustWasmGeneratedCandidates: 2,
+          rustWasmCandidateEvaluations: 2,
+        },
+      });
+    },
+    evaluate_candidate_batch_json() {
+      throw new Error("direct Rust/WASM search should not request candidate evaluations");
+    },
+  });
+
+  try {
+    const result = runOptimizerExperiment({
+      catalog,
+      character,
+      duration: 2,
+      availableSpellIds: ["setup", "hit", "burst"],
+      engines: ["hybrid"],
+      backend: "rustWasm",
+      rustWasmOracle: "finalTopCandidates",
+      seed: "rust-backend-no-candidate-oracle",
+      budget: { iterations: 2 },
+      maxActionsPerTurn: 1,
+    });
+
+    const engine = result.engineResults[0];
+    assert.equal(engine?.backend, "rustWasm");
+    assert.equal(engine?.attempts, 2);
+    assert.equal(engine?.validCandidates, 2);
+    assert.equal(engine?.metrics.rustWasmOracleCandidateChecks ?? 0, 0);
+    assert.equal(engine?.metrics.rustWasmBackendSearchCalls, 1);
+    assert.equal(engine?.metrics.rustWasmFinalOracleCandidates, 2);
+    assert.equal(engine?.metrics.rustWasmFinalOracleValid, 1);
+    assert.equal(engine?.metrics.rustWasmFinalOracleInvalid, 1);
+    assert.equal(engine?.metrics.rustWasmUnverifiedBestScore, 999);
+    assert.equal(result.bestCandidate?.score.score, 40);
+    assert.equal(result.bestCandidate?.plan.turns[0]?.actions[0]?.spellId, "hit");
+  } finally {
+    configureRustWasmOptimizerBackend(undefined);
+  }
 });
 
 test("evaluates complete plans so a weak setup turn can produce the best final score", () => {

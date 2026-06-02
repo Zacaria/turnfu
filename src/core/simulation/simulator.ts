@@ -196,7 +196,16 @@ export function simulateTurn(options: SimulationOptions): SimulationResult {
       appliedEffects.push(...abundance.appliedEffects);
     }
 
-    const spellDamageMechanics = applySpellDamageMechanics(spell, actionDamage, nextStats, nextResources, nextClassState, actionContext, action);
+    const spellDamageMechanics = applySpellDamageMechanics(
+      spell,
+      actionDamage,
+      nextStats,
+      nextResources,
+      nextClassState,
+      actionContext,
+      action,
+      effectContext.damageInflictedBonusPercent,
+    );
     actionDamage = roundDamage(actionDamage + spellDamageMechanics.damage);
     nextClassState = spellDamageMechanics.classState;
     appliedEffects.push(...spellDamageMechanics.appliedEffects);
@@ -1887,6 +1896,7 @@ function applySpellDamageMechanics(
   classState: ClassTurnState,
   actionContext: ActionContext,
   action: SimulationOptions["sequence"]["actions"][number],
+  damageInflictedBonusPercent: number,
 ): { damage: number; classState: ClassTurnState; appliedEffects: AppliedEffect[] } {
   let extraDamage = 0;
   let nextClassState = classState;
@@ -1923,7 +1933,7 @@ function applySpellDamageMechanics(
   }
 
   if (spell.id === "halo-chatoyant") {
-    const haloApplication = applyHaloChatoyant(huppermageState, stats, actionContext);
+    const haloApplication = applyHaloChatoyant(huppermageState, stats, actionContext, damageInflictedBonusPercent);
     extraDamage = roundDamage(extraDamage + haloApplication.damage);
     nextClassState = {
       ...nextClassState,
@@ -1939,6 +1949,7 @@ function applyHaloChatoyant(
   huppermageState: NonNullable<ClassTurnState["huppermage"]>,
   stats: BaseStats,
   actionContext: ActionContext,
+  damageInflictedBonusPercent: number,
 ): { damage: number; huppermageState: NonNullable<ClassTurnState["huppermage"]>; appliedEffects: AppliedEffect[] } {
   const before = huppermageState.haloChatoyantMarks;
   // The simulator is currently single-target, so only one existing Halo can be relevant.
@@ -1966,7 +1977,13 @@ function applyHaloChatoyant(
   }
 
   const damageEffect: DamageEffect = { type: "damage", element: "light", base: 81, times: triggerCount };
-  const formula = computeRawDamage(stats, damageEffect, actionContext);
+  const formula = computeRawDamage(
+    damageInflictedBonusPercent === 0
+      ? stats
+      : { ...stats, damageInflictedPercent: stats.damageInflictedPercent + damageInflictedBonusPercent },
+    damageEffect,
+    actionContext,
+  );
     appliedEffects.push({
       type: "damage",
       amount: formula.result,
