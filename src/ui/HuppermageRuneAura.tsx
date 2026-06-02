@@ -1,6 +1,6 @@
 import type { CSSProperties, ReactNode } from "react";
 import type { Element } from "../core/catalog/types.ts";
-import "./huppermageRuneAura.css?v=demo-frame-v1";
+import "./huppermageRuneAura.css";
 
 type AuraRange = number | {
   min: number;

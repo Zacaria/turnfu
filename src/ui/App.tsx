@@ -88,7 +88,7 @@ import {
   SavedComboComparisonPage,
   SetupPage,
   type OptimizerWorkspaceSession,
-} from "./ResearchWorkspacePages.tsx?v=sublimations-rebase-v1";
+} from "./ResearchWorkspacePages.tsx";
 import {
   createBalancedElementSet,
   createBuild,
@@ -537,6 +537,11 @@ export function App() {
   }
 
   function storeOptimizerSession(setupId: string, session: OptimizerWorkspaceSession) {
+    const currentSession = optimizerSessionsRef.current[setupId];
+    if (currentSession && areOptimizerWorkspaceSessionsEqual(currentSession, session)) {
+      return;
+    }
+
     const nextSessions = {
       ...optimizerSessionsRef.current,
       [setupId]: session,
@@ -3496,4 +3501,11 @@ function describeSpellCost(spell: CatalogEntry): string {
 
 function summarizeEntryTags(entry: CatalogEntry): string {
   return entry.tags.filter((tagName) => tagName !== "passive").slice(0, 3).join(" | ") || t("detail.passive").toLowerCase();
+}
+
+function areOptimizerWorkspaceSessionsEqual(
+  left: OptimizerWorkspaceSession,
+  right: OptimizerWorkspaceSession,
+): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
 }

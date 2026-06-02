@@ -19,7 +19,7 @@ import {
   type DurationGroupedResults,
   type OptimizerCandidateViewModel,
   type OptimizerWorkspaceControls,
-} from "./optimizerWorkspace.ts?v=optimizer-sublimations-v14";
+} from "./optimizerWorkspace.ts";
 import {
   filterBuildsByClass,
   formatWakfuClassLabel,
@@ -42,7 +42,7 @@ import {
   type SavedComboComparisonRow,
 } from "./savedComboComparison.ts";
 import { getHuppermageIconSrc } from "./icons.ts";
-import { createSublimationPreviewItems, type SublimationPreviewItem } from "./sublimationPreview.ts?v=optimizer-sublimations-v14";
+import { createSublimationPreviewItems, type SublimationPreviewItem } from "./sublimationPreview.ts";
 
 export type OptimizerRunStatus = "idle" | "running" | "done" | "stopped" | "error";
 
