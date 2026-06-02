@@ -2639,6 +2639,52 @@ test("counts any BQ spend as a puissance brute trigger", () => {
   assert.deepEqual(result.breakdown.map((action) => action.damage), [86.4, 92.8]);
 });
 
+test("applies puissance brute to Halo Chatoyant triggered damage", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      resources: createResources({ ap: 8, mp: 3, wp: 6, bq: 40 }),
+      stats: {
+        ...character.stats,
+        generalMastery: 0,
+        elementalMastery: {
+          fire: 0,
+          water: 0,
+          earth: 0,
+          air: 0,
+          light: 0,
+          neutral: 0,
+        },
+        damageInflictedPercent: 0,
+      },
+      classState: {
+        huppermage: {
+          runes: {
+            aerial: true,
+          },
+        },
+      },
+      sublimations: {
+        selections: [
+          { sublimationId: "puissance-brute-ii" },
+          { sublimationId: "puissance-brute-ii" },
+        ],
+        hpAssumption: "normal",
+      },
+    },
+    sequence: {
+      actions: [
+        { spellId: "orbe-test" },
+        { spellId: "halo-chatoyant" },
+      ],
+    },
+  });
+
+  assert.equal(result.valid, true);
+  assert.deepEqual(result.breakdown.map((action) => action.damage), [86.4, 87.48]);
+});
+
 test("rejects unsupported sublimations before simulation", () => {
   const result = simulateTurn({
     catalog: testCatalog,

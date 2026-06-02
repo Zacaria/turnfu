@@ -7,11 +7,10 @@ Date: 2026-06-02
 - Path: `/Users/zacariachtatar/game_repos/wakfu-turn-optimizer/.worktrees/codex/port-hybrid-engine-rust-wasm-handoff`
 - Branch: `codex/port-hybrid-engine-rust-wasm-handoff`
 - Active OpenSpec change: `port-hybrid-engine-to-rust-wasm`
-- Current status at refresh: post-rebase sublimation integration in progress.
-  The Rust/WASM backend is faster and revalidates final top candidates through
-  TypeScript, but it is not yet merge-ready for `master` because the
-  sublimation-enabled 100k smoke still scores below TypeScript and exposes a
-  Puissance Brute scoring delta on some Rust-ranked candidates.
+- Current status at refresh: post-rebase sublimation integration stabilized.
+  The Rust/WASM backend is faster on the sublimation-enabled 100k smoke, finds
+  a better TypeScript-verified score than the TypeScript backend for the smoke
+  seed, and the Rust top candidates revalidate with score delta `0`.
 
 This worktree is intentionally separate from the main checkout. Do not touch the
 main checkout at `/Users/zacariachtatar/game_repos/wakfu-turn-optimizer`.
@@ -77,13 +76,13 @@ Most relevant recent commits after rebasing onto `master`:
 
 ## Latest Validation Evidence
 
-Latest verification after enabling supported sublimations in the benchmark
-requests and correcting TypeScript multi-turn PW replay for Puissance Brute:
+Latest verification after aligning triggered Halo damage with Puissance Brute
+and resolving Light damage elements for Rust sublimation Alternance/carryover:
 
 ```bash
 rtk pnpm test
 rtk pnpm wasm:test
-rtk pnpm diff:rust-wasm
+rtk pnpm diff:rust-wasm -- --no-build
 rtk pnpm bench:hybrid -- --compare-backends --scenario t3-full --budget 100000 --seed smoke --no-build --no-oracle
 rtk openspec validate port-hybrid-engine-to-rust-wasm --strict --no-interactive
 rtk git diff --check
@@ -91,27 +90,24 @@ rtk git diff --check
 
 Results:
 
-- TypeScript tests: 255 passed.
-- Rust tests: 55 passed.
+- TypeScript tests: 256 passed.
+- Rust tests: 56 passed.
 - CI differential: 94 fixtures, 102 generated candidates, 0 mismatches.
 - OpenSpec strict validation: valid.
 - Diff whitespace check: passed.
-- `t3-full` 10k smoke with supported sublimations, no per-candidate oracle:
-  - TypeScript: about `7.0k it/s`, score `137824.34`.
-  - Rust/WASM: about `5.5k it/s`, TypeScript-verified score `149820.13`.
-  - Final top candidate score delta `0`; diagnostic max delta remains non-zero
-    on lower-ranked Puissance Brute candidates.
 - `t3-full` 100k smoke with supported sublimations, no per-candidate oracle:
-  - TypeScript: about `2.6k it/s`, score `165010.79`.
-  - Rust/WASM: about `6.1k it/s`, TypeScript-verified score `164042.00`.
-  - Rust/WASM keeps 50 unverified finalists for TypeScript revalidation, but
-    still needs Puissance Brute scoring parity and/or better medium-budget
-    search quality before this branch should merge.
+  - TypeScript: `2542.26 it/s`, score `167490.44`.
+  - Rust/WASM: `4611.79 it/s`, Rust direct and TypeScript-verified score
+    `169698.63`.
+  - Final top oracle candidates: 50 valid, max score delta `0`, max total
+    damage delta `0`.
 
 Notes:
 
 - `wasm-pack` / `wasm-bindgen` may write temporary files outside the sandbox, so
-  `rtk pnpm diff:rust-wasm` can require escalated execution in Codex.
+  `rtk pnpm diff:rust-wasm` can require escalated execution in Codex. In this
+  refresh, the full diff was run with `--no-build` after regenerating the local
+  WASM package with a worktree-local `wasm-bindgen 0.2.122` binary.
 - Node dependency work must use `pnpm`, not `npm`.
 
 ## Archived Benchmark Evidence
@@ -166,16 +162,25 @@ sublimation engine. TypeScript remains the oracle. Rust/WASM now:
   so TypeScript can choose the best verified candidates instead of trusting the
   first few Rust-ranked candidates blindly.
 
-Known open issue:
+Recent parity fixes:
 
 - Puissance Brute should reduce base/max PW at combat start, not subtract PW
   again every turn. TypeScript combo replay now preserves carried PW by
   precompensating initial `wp` sublimation deltas before each replayed turn.
   Rust already carries PW without reapplying the malus.
-- Some Rust-ranked Puissance Brute candidates still show non-zero score deltas
-  after TypeScript revalidation. The best 10k Rust candidate is delta `0`, but
-  the 100k Rust verified score remains below TypeScript. Fix this before
-  calling the branch merge-ready.
+- Puissance Brute's spent-resource damage bonus now applies in the TypeScript
+  oracle to triggered Halo Chatoyant damage, matching the rule that the bonus
+  applies to the next damage line after spending PW or BQ.
+- Rust now resolves Light spell damage to the current effective elemental
+  damage element before applying/storing elemental sublimations such as
+  Alternance. This fixes Rust undercounting Light spells such as Orbes
+  Luisants when they resolve to earth/water/fire/air for scoring.
+
+Known open issue:
+
+- The branch is much closer to mergeable after the parity fixes, but still
+  needs a final review pass for untracked local build artifacts and any
+  remaining OpenSpec/archive expectations before merging into `master`.
 
 If TypeScript gameplay rules, catalog entries, or supported sublimation effects
 change again, reset incompatible persistent search sessions and re-run the

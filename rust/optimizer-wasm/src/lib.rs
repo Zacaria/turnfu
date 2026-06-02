@@ -4343,10 +4343,11 @@ fn collect_sublimation_damage_bonus_percent(
     candidate: &OptimizerCandidateInput,
     spell: &SearchCatalogEntry,
     effective_cost: SpellCost,
+    stats: &BaseStats,
     state: &mut SublimationCombatState,
 ) -> f64 {
     let mut bonus = collect_action_sublimation_bonus(candidate, spell);
-    if let Some(damage_element) = spell.element.clone().filter(is_sublimation_element) {
+    if let Some(damage_element) = first_sublimation_damage_element(spell, stats) {
         bonus += consume_elemental_carryover_bonus(candidate, &damage_element, state);
         bonus += collect_alternance_bonus(candidate, &damage_element, state);
     }
@@ -4466,10 +4467,11 @@ fn collect_spent_resource_sublimation_bonus(
 fn store_sublimation_after_action(
     candidate: &OptimizerCandidateInput,
     spell: &SearchCatalogEntry,
+    stats: &BaseStats,
     action_damage: f64,
     state: &mut SublimationCombatState,
 ) {
-    let Some(damage_element) = spell.element.clone().filter(is_sublimation_element) else {
+    let Some(damage_element) = first_sublimation_damage_element(spell, stats) else {
         return;
     };
 
@@ -4497,6 +4499,16 @@ fn store_sublimation_after_action(
         }
         state.alternance_previous_element = Some(damage_element);
     }
+}
+
+fn first_sublimation_damage_element(
+    spell: &SearchCatalogEntry,
+    stats: &BaseStats,
+) -> Option<Element> {
+    collect_search_damage_effects(spell)
+        .first()
+        .map(|effect| resolve_damage_element(&effect.element, stats))
+        .filter(is_sublimation_element)
 }
 
 fn store_spell_count_carryover(
@@ -7973,6 +7985,7 @@ fn evaluate_candidate_with_catalog<'a>(
                 candidate,
                 spell,
                 effective_cost,
+                &turn_stats,
                 &mut sublimation_state,
             );
 
@@ -8058,7 +8071,13 @@ fn evaluate_candidate_with_catalog<'a>(
                     resources = generation.resources;
                 }
             }
-            store_sublimation_after_action(candidate, spell, action_damage, &mut sublimation_state);
+            store_sublimation_after_action(
+                candidate,
+                spell,
+                &turn_stats,
+                action_damage,
+                &mut sublimation_state,
+            );
         }
 
         let turn_end = apply_turn_end_bq(huppermage, resources);
@@ -8776,6 +8795,71 @@ mod tests {
                 },
             })
         );
+    }
+
+    #[test]
+    fn candidate_evaluation_applies_alternance_to_resolved_light_damage() {
+        let request = parse_optimizer_request(
+            r#"{
+              "schemaVersion":1,
+              "engine":"hybrid",
+              "seed":"alternance-light",
+              "duration":1,
+              "iterations":10,
+              "maxActionsPerTurn":3,
+              "maxPassiveCount":0,
+              "availableSpellIds":["water-hit","light-hit"],
+              "availablePassiveIds":[],
+              "availableSublimationIds":["alternance-ii"],
+              "catalog":[
+                {
+                  "kind":"spell",
+                  "id":"water-hit",
+                  "element":"water",
+                  "cost":{"ap":1},
+                  "effects":[{"type":"damage","element":"water","base":100}],
+                  "constraints":[],
+                  "tags":[]
+                },
+                {
+                  "kind":"spell",
+                  "id":"light-hit",
+                  "element":"light",
+                  "cost":{"ap":1},
+                  "effects":[{"type":"damage","element":"light","base":100}],
+                  "constraints":[],
+                  "tags":[]
+                }
+              ],
+              "character":{
+                "id":"test",
+                "resources":{"ap":6,"mp":3,"wp":2,"bq":100},
+                "stats":{
+                  "level":200,
+                  "hitPoints":1000,
+                  "generalMastery":0,
+                  "elementalMastery":{"fire":0,"water":0,"earth":1000,"air":0,"light":0,"neutral":0},
+                  "damageInflictedPercent":0
+                }
+              }
+            }"#,
+        )
+        .expect("request should parse");
+        let candidate = OptimizerCandidateInput {
+            passive_ids: vec![],
+            sublimation_ids: vec!["alternance-ii".to_string()],
+            plan: CandidatePlan {
+                turns: vec![CandidateTurn {
+                    actions: vec![action("water-hit"), action("light-hit")],
+                }],
+            },
+        };
+
+        let evaluation = evaluate_candidate(&request, &candidate, "candidate:alternance-light")
+            .expect("candidate should evaluate");
+
+        assert!(evaluation.valid);
+        assert_eq!(evaluation.total_damage, 1365.0);
     }
 
     #[test]
