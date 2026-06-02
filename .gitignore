@@ -1,4 +1,6 @@
 .worktrees/
+.cargo-local/
+.local-cargo-bin/
 .optimizer/
 node_modules/
 .pnpm-store/
