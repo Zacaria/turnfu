@@ -12,12 +12,14 @@ import {
 } from "../src/core/optimizer/index.ts";
 import { createResources } from "../src/core/simulation/index.ts";
 import type { ComboSimulationOptions, SimulatedCharacter } from "../src/core/simulation/types.ts";
+import { sublimationCatalog } from "../src/core/sublimations/index.ts";
 
 type HybridBenchmarkScenario = {
   id: string;
   duration: number;
   maxActionsPerTurn: number;
   maxPassiveCount: number;
+  maxSublimationCount: number;
 };
 
 const character: SimulatedCharacter = {
@@ -71,11 +73,11 @@ const defaultActionContext: ComboSimulationOptions["defaultActionContext"] = {
 };
 
 const scenarios: HybridBenchmarkScenario[] = [
-  { id: "t2-a7-p3", duration: 2, maxActionsPerTurn: 7, maxPassiveCount: 3 },
-  { id: "t2-a8-p2", duration: 2, maxActionsPerTurn: 8, maxPassiveCount: 2 },
-  { id: "t3-a12-p3", duration: 3, maxActionsPerTurn: 12, maxPassiveCount: 3 },
-  { id: "t3-a10-p6", duration: 3, maxActionsPerTurn: 10, maxPassiveCount: 6 },
-  { id: "t3-full", duration: 3, maxActionsPerTurn: 12, maxPassiveCount: 6 },
+  { id: "t2-a7-p3", duration: 2, maxActionsPerTurn: 7, maxPassiveCount: 3, maxSublimationCount: 12 },
+  { id: "t2-a8-p2", duration: 2, maxActionsPerTurn: 8, maxPassiveCount: 2, maxSublimationCount: 12 },
+  { id: "t3-a12-p3", duration: 3, maxActionsPerTurn: 12, maxPassiveCount: 3, maxSublimationCount: 12 },
+  { id: "t3-a10-p6", duration: 3, maxActionsPerTurn: 10, maxPassiveCount: 6, maxSublimationCount: 12 },
+  { id: "t3-full", duration: 3, maxActionsPerTurn: 12, maxPassiveCount: 6, maxSublimationCount: 12 },
 ];
 
 const requestedScenarioIds = new Set(readOptionValues("--scenario"));
@@ -89,6 +91,9 @@ const selectedScenarios = requestedScenarioIds.size > 0
   ? scenarios.filter((scenario) => requestedScenarioIds.has(scenario.id))
   : scenarios;
 const availablePassiveIds = huppermageCatalog.filter((entry) => entry.kind === "passive").map((entry) => entry.id);
+const availableSublimationIds = sublimationCatalog
+  .filter((entry) => entry.supportStatus === "supported")
+  .map((entry) => entry.id);
 
 if (requestedBackends.includes("rustWasm")) {
   configureRustWasmOptimizerBackend(loadRustWasmBackend());
@@ -111,7 +116,9 @@ for (const scenario of selectedScenarios) {
           budget: { iterations: budget },
           maxActionsPerTurn: scenario.maxActionsPerTurn,
           maxPassiveCount: scenario.maxPassiveCount,
+          maxSublimationCount: scenario.maxSublimationCount,
           availablePassiveIds,
+          availableSublimationIds,
           defaultActionContext,
           maxCandidates: 5,
           progressInterval: 1_000_000,

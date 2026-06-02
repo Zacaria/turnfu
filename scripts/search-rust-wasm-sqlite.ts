@@ -15,12 +15,14 @@ import {
 } from "../src/core/optimizer/rustWasmBackendTypes.ts";
 import { createResources } from "../src/core/simulation/index.ts";
 import type { ComboSimulationOptions, SimulatedCharacter } from "../src/core/simulation/types.ts";
+import { sublimationCatalog } from "../src/core/sublimations/index.ts";
 
 type HybridSearchScenario = {
   id: string;
   duration: number;
   maxActionsPerTurn: number;
   maxPassiveCount: number;
+  maxSublimationCount: number;
 };
 
 type WorkerSearchResponse = {
@@ -47,9 +49,9 @@ type WorkerStateRow = {
 };
 
 const scenarios: HybridSearchScenario[] = [
-  { id: "t2-a8-p2", duration: 2, maxActionsPerTurn: 8, maxPassiveCount: 2 },
-  { id: "t3-a12-p3", duration: 3, maxActionsPerTurn: 12, maxPassiveCount: 3 },
-  { id: "t3-full", duration: 3, maxActionsPerTurn: 12, maxPassiveCount: 6 },
+  { id: "t2-a8-p2", duration: 2, maxActionsPerTurn: 8, maxPassiveCount: 2, maxSublimationCount: 12 },
+  { id: "t3-a12-p3", duration: 3, maxActionsPerTurn: 12, maxPassiveCount: 3, maxSublimationCount: 12 },
+  { id: "t3-full", duration: 3, maxActionsPerTurn: 12, maxPassiveCount: 6, maxSublimationCount: 12 },
 ];
 
 const sessionId = readOption("--session") ?? "hupper-t3-full";
@@ -115,6 +117,9 @@ const defaultActionContext: ComboSimulationOptions["defaultActionContext"] = {
 const availablePassiveIds = huppermageCatalog
   .filter((entry) => entry.kind === "passive")
   .map((entry) => entry.id);
+const availableSublimationIds = sublimationCatalog
+  .filter((entry) => entry.supportStatus === "supported")
+  .map((entry) => entry.id);
 const baseRequest = createRustWasmOptimizerRequest({
   catalog: huppermageCatalog,
   character,
@@ -126,7 +131,9 @@ const baseRequest = createRustWasmOptimizerRequest({
   budget: { iterations: chunkSize },
   maxActionsPerTurn: scenario.maxActionsPerTurn,
   maxPassiveCount: scenario.maxPassiveCount,
+  maxSublimationCount: scenario.maxSublimationCount,
   availablePassiveIds,
+  availableSublimationIds,
   defaultActionContext,
   maxCandidates: 5,
 });
@@ -394,6 +401,7 @@ function verifyTopCandidates(topCandidates: RustWasmOptimizerScoredCandidate[]):
   for (const candidate of topCandidates) {
     const evaluation = oracle.evaluateDetailed({
       passiveIds: candidate.passiveIds,
+      sublimationIds: candidate.sublimationIds,
       plan: candidate.plan,
     });
     if (!evaluation.result) {

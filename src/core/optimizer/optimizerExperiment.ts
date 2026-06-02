@@ -26,6 +26,8 @@ export type OptimizerExperimentEngineKind = "random" | "mcts" | "novelty" | "ann
 export type OptimizerExperimentBackendKind = "typescript" | "rustWasm";
 export type RustWasmOracleMode = "perCandidate" | "finalTopCandidates" | "disabled";
 
+const RUST_WASM_FINAL_ORACLE_CANDIDATE_LIMIT = 50;
+
 export type OptimizerExperimentBudget = {
   iterations: number;
 };
@@ -391,6 +393,7 @@ function runRustWasmHybridSearchEngine(
     ...normalized,
     engines: ["hybrid"],
     budget: normalized.budget,
+    maxCandidates: getRustWasmUnverifiedTopCandidateLimit(normalized),
   });
   const response = parseRustWasmSearchResponse(wasm.run_hybrid_search_json!(JSON.stringify(request)));
   if (!response.supported) {
@@ -3271,7 +3274,7 @@ function addRustWasmUnverifiedTopCandidate(
     return;
   }
 
-  const maxCandidates = clampInteger(context.options.maxCandidates ?? 20, 1, 200);
+  const maxCandidates = getRustWasmUnverifiedTopCandidateLimit(context.options);
   const existing = topCandidates.get(candidate.id);
   if (existing && compareRankedCandidates(candidate, existing) >= 0) {
     return;
@@ -3289,6 +3292,15 @@ function addRustWasmUnverifiedTopCandidate(
   if (candidateToRemove) {
     topCandidates.delete(candidateToRemove.id);
   }
+}
+
+function getRustWasmUnverifiedTopCandidateLimit(options: Pick<NormalizedExperimentOptions, "maxCandidates" | "rustWasmOracle">): number {
+  const requested = clampInteger(options.maxCandidates ?? 20, 1, 200);
+  if (options.rustWasmOracle !== "finalTopCandidates") {
+    return requested;
+  }
+
+  return Math.max(requested, RUST_WASM_FINAL_ORACLE_CANDIDATE_LIMIT);
 }
 
 function findWorstTopCandidate(

@@ -2664,6 +2664,8 @@ struct SearchCatalogEntry {
     id: String,
     kind: String,
     element: Option<Element>,
+    can_distance: bool,
+    max_distance: Option<f64>,
     cost: SpellCost,
     constraints: Vec<Value>,
     effects: Vec<Value>,
@@ -2689,6 +2691,14 @@ fn read_search_catalog(request: &OptimizerRequest) -> Result<Vec<SearchCatalogEn
                 .get("element")
                 .cloned()
                 .and_then(|value| serde_json::from_value::<Element>(value).ok());
+            let cast_profile = entry.get("castProfile");
+            let can_distance = cast_profile
+                .and_then(|profile| profile.get("canDistance"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let max_distance = cast_profile
+                .and_then(|profile| profile.get("maxDistance"))
+                .and_then(Value::as_f64);
             let cost = read_spell_cost(entry.get("cost"));
             let constraints = entry
                 .get("constraints")
@@ -2723,6 +2733,8 @@ fn read_search_catalog(request: &OptimizerRequest) -> Result<Vec<SearchCatalogEn
                 id,
                 kind,
                 element,
+                can_distance,
+                max_distance,
                 cost,
                 constraints,
                 effects,
@@ -3523,30 +3535,79 @@ fn pick_random_sublimations(request: &OptimizerRequest, rng: &mut SeededRandom) 
     selected
 }
 
-fn pick_domain_seed_sublimations(request: &OptimizerRequest) -> Vec<String> {
+fn create_domain_seed_sublimation_variants(request: &OptimizerRequest) -> Vec<Vec<String>> {
     let available = get_available_sublimation_ids(request)
         .into_iter()
         .collect::<BTreeSet<_>>();
-    let mut selected = [
-        "influence-6",
-        "carnage-6",
-        "brulure-4",
-        "gel-4",
-        "tellurisme-4",
-        "ventilation-4",
-        "puissance-brute-4",
-        "alternance-ii",
-        "exces-ii",
-        "longueur-6",
-        "concentration-elementaire",
-        "armure-lourde-2",
-    ]
-    .into_iter()
-    .filter(|sublimation_id| available.contains(*sublimation_id))
-    .take(request.max_sublimation_count as usize)
-    .map(str::to_string)
-    .collect::<Vec<_>>();
+    let variants = [
+        vec![
+            "armure-lourde-ii",
+            "concentration-elementaire",
+            "expert-des-armes-legeres-ii",
+            "expert-des-armes-legeres-iii",
+            "force-vitale-ii",
+        ],
+        vec![
+            "armure-lourde-ii",
+            "concentration-elementaire",
+            "expert-des-armes-legeres-ii",
+            "expert-des-armes-legeres-iii",
+            "force-vitale-ii",
+            "influence-iii",
+            "longueur-iii",
+        ],
+        vec![
+            "armure-lourde-ii",
+            "concentration-elementaire",
+            "carnage-iii",
+            "expert-des-armes-legeres-ii",
+            "expert-des-armes-legeres-iii",
+            "force-vitale-ii",
+        ],
+        vec![
+            "concentration-elementaire",
+            "expert-des-armes-legeres-ii",
+            "expert-des-armes-legeres-iii",
+            "force-vitale-ii",
+            "puissance-brute-iii",
+        ],
+        vec![
+            "armure-lourde-ii",
+            "concentration-elementaire",
+            "expert-des-armes-legeres-ii",
+            "expert-des-armes-legeres-iii",
+            "force-vitale-ii",
+            "exces-ii",
+        ],
+    ];
+    let mut selected = variants
+        .into_iter()
+        .map(|variant| {
+            let mut sublimation_ids = variant
+                .into_iter()
+                .filter(|sublimation_id| available.contains(*sublimation_id))
+                .take(request.max_sublimation_count as usize)
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            sublimation_ids.sort();
+            sublimation_ids.dedup();
+            sublimation_ids
+        })
+        .filter(|sublimation_ids| !sublimation_ids.is_empty())
+        .filter(|sublimation_ids| {
+            validate_candidate_sublimations(&OptimizerCandidateInput {
+                passive_ids: Vec::new(),
+                sublimation_ids: sublimation_ids.clone(),
+                plan: CandidatePlan { turns: Vec::new() },
+            })
+            .is_none()
+        })
+        .collect::<Vec<_>>();
     selected.sort();
+    selected.dedup();
+    if selected.is_empty() {
+        selected.push(Vec::new());
+    }
     selected
 }
 
@@ -3591,7 +3652,7 @@ fn get_sublimation_search_weight(sublimation_id: &str) -> f64 {
     match sublimation_family_id(sublimation_id).unwrap_or("") {
         "puissance-brute" | "alternance" | "exces" => 10.0,
         "concentration-elementaire" | "chaos" => 9.0,
-        "carnage" | "armure-lourde" => 8.0,
+        "carnage" | "armure-lourde" | "expert-des-armes-legeres" => 8.0,
         "influence" | "influence-vitale" | "critique-berserk" => 6.0,
         "brulure" | "gel" | "tellurisme" | "ventilation" => 5.0,
         "brulure-secondaire"
@@ -4494,7 +4555,7 @@ fn is_sublimation_element(element: &Element) -> bool {
 }
 
 fn spell_supports_distance(spell: &SearchCatalogEntry) -> bool {
-    spell.element.is_some()
+    spell.can_distance && spell.max_distance.unwrap_or(0.0) >= 2.0
 }
 
 fn collect_sublimation_resource_carryover(
@@ -7085,14 +7146,17 @@ fn create_domain_warmup_candidates(
             turns.push(CandidateTurn { actions: vec![] });
         }
 
+        let sublimation_variants = create_domain_seed_sublimation_variants(request);
         for passive_ids in passive_variants {
-            candidates.push(OptimizerCandidateInput {
-                passive_ids,
-                sublimation_ids: pick_domain_seed_sublimations(request),
-                plan: CandidatePlan {
-                    turns: turns.clone(),
-                },
-            });
+            for sublimation_ids in &sublimation_variants {
+                candidates.push(OptimizerCandidateInput {
+                    passive_ids: passive_ids.clone(),
+                    sublimation_ids: sublimation_ids.clone(),
+                    plan: CandidatePlan {
+                        turns: turns.clone(),
+                    },
+                });
+            }
         }
     }
 
@@ -7233,7 +7297,7 @@ fn project_domain_seed_turn(
 fn huppermage_domain_seed_candidates() -> Vec<DomainSeedCandidate> {
     vec![
         DomainSeedCandidate {
-            passive_ids: vec!["carnage", "extension-des-sens", "profusion-runique"],
+            passive_ids: vec!["carnage", "extension-des-sens", "plenitude", "profusion-runique"],
             turns: vec![
                 vec![
                     "halo-chatoyant",
@@ -7270,7 +7334,7 @@ fn huppermage_domain_seed_candidates() -> Vec<DomainSeedCandidate> {
             min_passive_count: None,
         },
         DomainSeedCandidate {
-            passive_ids: vec!["carnage", "extension-des-sens", "profusion-runique"],
+            passive_ids: vec!["carnage", "extension-des-sens", "plenitude", "profusion-runique"],
             turns: vec![
                 vec![
                     "eboulement",
@@ -7307,7 +7371,7 @@ fn huppermage_domain_seed_candidates() -> Vec<DomainSeedCandidate> {
             min_passive_count: None,
         },
         DomainSeedCandidate {
-            passive_ids: vec!["carnage", "extension-des-sens", "profusion-runique"],
+            passive_ids: vec!["carnage", "extension-des-sens", "plenitude", "profusion-runique"],
             turns: vec![
                 vec![
                     "halo-chatoyant",
@@ -7344,7 +7408,7 @@ fn huppermage_domain_seed_candidates() -> Vec<DomainSeedCandidate> {
             min_passive_count: None,
         },
         DomainSeedCandidate {
-            passive_ids: vec!["carnage", "extension-des-sens", "profusion-runique"],
+            passive_ids: vec!["carnage", "extension-des-sens", "plenitude", "profusion-runique"],
             turns: vec![
                 vec![
                     "halo-chatoyant",
@@ -7371,7 +7435,7 @@ fn huppermage_domain_seed_candidates() -> Vec<DomainSeedCandidate> {
             min_passive_count: None,
         },
         DomainSeedCandidate {
-            passive_ids: vec!["carnage", "extension-des-sens", "profusion-runique"],
+            passive_ids: vec!["carnage", "extension-des-sens", "plenitude", "profusion-runique"],
             turns: vec![
                 vec![
                     "eboulement",
@@ -7396,7 +7460,7 @@ fn huppermage_domain_seed_candidates() -> Vec<DomainSeedCandidate> {
             min_passive_count: Some(3),
         },
         DomainSeedCandidate {
-            passive_ids: vec!["carnage", "extension-des-sens", "profusion-runique"],
+            passive_ids: vec!["carnage", "extension-des-sens", "plenitude", "profusion-runique"],
             turns: vec![
                 vec![
                     "eboulement",
@@ -7421,7 +7485,7 @@ fn huppermage_domain_seed_candidates() -> Vec<DomainSeedCandidate> {
             min_passive_count: None,
         },
         DomainSeedCandidate {
-            passive_ids: vec!["carnage", "extension-des-sens", "profusion-runique"],
+            passive_ids: vec!["carnage", "extension-des-sens", "plenitude", "profusion-runique"],
             turns: vec![
                 vec![
                     "eboulement",
@@ -7446,7 +7510,7 @@ fn huppermage_domain_seed_candidates() -> Vec<DomainSeedCandidate> {
             min_passive_count: None,
         },
         DomainSeedCandidate {
-            passive_ids: vec!["carnage", "extension-des-sens"],
+            passive_ids: vec!["carnage", "extension-des-sens", "plenitude"],
             turns: vec![
                 vec![
                     "eboulement",
@@ -7473,7 +7537,7 @@ fn huppermage_domain_seed_candidates() -> Vec<DomainSeedCandidate> {
             min_passive_count: None,
         },
         DomainSeedCandidate {
-            passive_ids: vec!["carnage", "extension-des-sens", "profusion-runique"],
+            passive_ids: vec!["carnage", "extension-des-sens", "plenitude", "profusion-runique"],
             turns: vec![
                 vec![
                     "halo-chatoyant",

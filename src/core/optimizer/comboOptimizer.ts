@@ -1,6 +1,7 @@
 import type { CatalogEntry, Element } from "../catalog/types.ts";
 import { simulateCombo } from "../simulation/comboSimulator.ts";
 import { roundDamage } from "../simulation/damage.ts";
+import { computeActiveInitialSublimationResourceDelta } from "../simulation/sublimationResourceDeltas.ts";
 import type {
   Action,
   ActionResult,
@@ -616,7 +617,7 @@ function createReplayCharacter(baseCharacter: SimulatedCharacter, previousFinalS
       ...baseCharacter.resources,
       ap: baseCharacter.resources.ap + (previousFinalState.resourceCarryover.ap ?? 0),
       mp: baseCharacter.resources.mp + (previousFinalState.resourceCarryover.mp ?? 0),
-      wp: previousResources.wp,
+      wp: previousResources.wp - computeActiveInitialSublimationResourceDelta(baseCharacter, "wp"),
       bq: previousResources.bq,
     },
     stats: cloneStats(baseCharacter.stats),

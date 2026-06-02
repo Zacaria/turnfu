@@ -7,8 +7,11 @@ Date: 2026-06-02
 - Path: `/Users/zacariachtatar/game_repos/wakfu-turn-optimizer/.worktrees/codex/port-hybrid-engine-rust-wasm-handoff`
 - Branch: `codex/port-hybrid-engine-rust-wasm-handoff`
 - Active OpenSpec change: `port-hybrid-engine-to-rust-wasm`
-- Current status at refresh: post-rebase sublimation integration validated,
-  ready for commit
+- Current status at refresh: post-rebase sublimation integration in progress.
+  The Rust/WASM backend is faster and revalidates final top candidates through
+  TypeScript, but it is not yet merge-ready for `master` because the
+  sublimation-enabled 100k smoke still scores below TypeScript and exposes a
+  Puissance Brute scoring delta on some Rust-ranked candidates.
 
 This worktree is intentionally separate from the main checkout. Do not touch the
 main checkout at `/Users/zacariachtatar/game_repos/wakfu-turn-optimizer`.
@@ -44,7 +47,7 @@ The OpenSpec task list for `port-hybrid-engine-to-rust-wasm` is complete:
 - Rebase onto `master` with the TypeScript sublimation engine integrated into
   Rust/WASM search transport, direct evaluation, and differential fixtures.
 - Documentation and archived benchmark evidence.
-- Full verification pass.
+- Verification pass before the latest Puissance Brute/replay investigation.
 
 The UI no longer exposes a bounded progress bar for unbounded search sessions.
 It stores optimizer workspace/session state in the SQLite-backed local API
@@ -72,16 +75,15 @@ Most relevant recent commits after rebasing onto `master`:
 - `711da97 perf(optimizer): borrow rust search effects`
   - Ports the effective hybrid search behavior into the direct Rust path.
 
-## Validation Evidence
+## Latest Validation Evidence
 
-Latest completed verification after rebasing onto `master` and integrating
-supported sublimation rules:
+Latest verification after enabling supported sublimations in the benchmark
+requests and correcting TypeScript multi-turn PW replay for Puissance Brute:
 
 ```bash
 rtk pnpm test
 rtk pnpm wasm:test
 rtk pnpm diff:rust-wasm
-rtk pnpm diff:rust-wasm:soak
 rtk pnpm bench:hybrid -- --compare-backends --scenario t3-full --budget 100000 --seed smoke --no-build --no-oracle
 rtk openspec validate port-hybrid-engine-to-rust-wasm --strict --no-interactive
 rtk git diff --check
@@ -89,19 +91,22 @@ rtk git diff --check
 
 Results:
 
-- TypeScript tests: 254 passed.
+- TypeScript tests: 255 passed.
 - Rust tests: 55 passed.
-- CI differential: 94 fixtures, 102 generated candidates, 0 mismatches. The
-  generated batch now includes one targeted candidate for each currently
-  supported sublimation catalog entry, plus HP-assumption-specific candidates
-  for healthy, berserk, and low-AP/secondary-mastery conditions.
-- Soak differential: 122 fixtures, 1648 generated candidates, 0 mismatches.
+- CI differential: 94 fixtures, 102 generated candidates, 0 mismatches.
 - OpenSpec strict validation: valid.
 - Diff whitespace check: passed.
-- `t3-full` 100k smoke, no per-candidate oracle:
-  - TypeScript: `7,010.96 it/s`, score `103545.66`.
-  - Rust/WASM: `11,572.42 it/s`, score `103545.66`.
-  - Final top candidates revalidated in TypeScript with score delta `0`.
+- `t3-full` 10k smoke with supported sublimations, no per-candidate oracle:
+  - TypeScript: about `7.0k it/s`, score `137824.34`.
+  - Rust/WASM: about `5.5k it/s`, TypeScript-verified score `149820.13`.
+  - Final top candidate score delta `0`; diagnostic max delta remains non-zero
+    on lower-ranked Puissance Brute candidates.
+- `t3-full` 100k smoke with supported sublimations, no per-candidate oracle:
+  - TypeScript: about `2.6k it/s`, score `165010.79`.
+  - Rust/WASM: about `6.1k it/s`, TypeScript-verified score `164042.00`.
+  - Rust/WASM keeps 50 unverified finalists for TypeScript revalidation, but
+    still needs Puissance Brute scoring parity and/or better medium-budget
+    search quality before this branch should merge.
 
 Notes:
 
@@ -109,7 +114,7 @@ Notes:
   `rtk pnpm diff:rust-wasm` can require escalated execution in Codex.
 - Node dependency work must use `pnpm`, not `npm`.
 
-## Benchmark Evidence
+## Archived Benchmark Evidence
 
 Archived files live in `docs/benchmarks/`.
 
@@ -132,9 +137,10 @@ Representative results:
   - Peak worker RSS about `1012 MB`.
   - Top 5 revalidated in TypeScript with max score delta `0`.
 
-Conclusion:
+Archived conclusion before the sublimation-enabled benchmark correction:
 
-- Rust/WASM result quality is aligned for the archived rollout matrix.
+- Rust/WASM result quality was aligned for the archived no-sublimation rollout
+  matrix.
 - Direct Rust/WASM is faster than TypeScript, but not at the old simplified
   spike's x12 ratio.
 - The parallel harness gives the useful speedup for long experimental runs.
@@ -156,6 +162,20 @@ sublimation engine. TypeScript remains the oracle. Rust/WASM now:
   normalized `actionIndex: -1` shape as TypeScript;
 - keeps final Rust top candidates revalidated through TypeScript in no-oracle
   benchmark mode.
+- asks Rust/WASM for a larger unverified finalist buffer in final-oracle mode,
+  so TypeScript can choose the best verified candidates instead of trusting the
+  first few Rust-ranked candidates blindly.
+
+Known open issue:
+
+- Puissance Brute should reduce base/max PW at combat start, not subtract PW
+  again every turn. TypeScript combo replay now preserves carried PW by
+  precompensating initial `wp` sublimation deltas before each replayed turn.
+  Rust already carries PW without reapplying the malus.
+- Some Rust-ranked Puissance Brute candidates still show non-zero score deltas
+  after TypeScript revalidation. The best 10k Rust candidate is delta `0`, but
+  the 100k Rust verified score remains below TypeScript. Fix this before
+  calling the branch merge-ready.
 
 If TypeScript gameplay rules, catalog entries, or supported sublimation effects
 change again, reset incompatible persistent search sessions and re-run the
