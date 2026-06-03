@@ -270,6 +270,10 @@ pub struct FeuFolletResult {
     pub before: u32,
     pub after: u32,
     pub recovered_runes: Vec<Rune>,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub recovered_rune_ap_gain: u32,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub recovered_rune_bq_gain: i32,
     #[serde(default)]
     pub temporary_unlocked_spell_element: Option<Element>,
 }
@@ -5001,6 +5005,10 @@ fn is_zero_u32(value: &u32) -> bool {
     *value == 0
 }
 
+fn is_zero_i32(value: &i32) -> bool {
+    *value == 0
+}
+
 pub fn create_huppermage_state(
     resources: ResourcePool,
     active_passives: Vec<String>,
@@ -5166,6 +5174,8 @@ pub fn apply_feu_follet_place(mut state: HuppermageState) -> FeuFolletResult {
         before,
         after: before + 1,
         recovered_runes: vec![],
+        recovered_rune_ap_gain: 0,
+        recovered_rune_bq_gain: 0,
         temporary_unlocked_spell_element: None,
     }
 }
@@ -5188,24 +5198,32 @@ pub fn apply_feu_follet_recover(mut state: HuppermageState) -> FeuFolletResult {
         state.feu_follets_active -= 1;
     }
 
-    if should_recover_rune && !recovered_runes.is_empty() {
-        state.runes = apply_recovered_runes(state.runes, &recovered_runes);
+    let mut recovered_rune_ap_gain = 0;
+    let mut recovered_rune_bq_gain = 0;
+
+    if should_recover_rune {
+        let generation = apply_recovered_runes_as_generated(state, &recovered_runes);
+        state = generation.state;
+        recovered_rune_ap_gain += generation.ap_gain;
+        recovered_rune_bq_gain += generation.bq_gain;
+
+        if let Some(rune) = recovered_last_rune.clone() {
+            let generation = apply_recovered_runes_as_generated(state, std::slice::from_ref(&rune));
+            state = generation.state;
+            recovered_rune_ap_gain += generation.ap_gain;
+            recovered_rune_bq_gain += generation.bq_gain;
+        }
+    } else {
+        state = add_abundance(state, 25).state;
     }
 
-    let unlocked_rune = if should_recover_rune && !recovered_runes.is_empty() {
+    let recovered_any = !recovered_runes.is_empty() || recovered_last_rune.is_some();
+    let unlocked_rune = if should_recover_rune && recovered_any {
         state.runes.last_generated_rune.clone()
     } else {
         recovered_last_rune.clone()
     };
     state.temporary_unlocked_spell_element = unlocked_rune.as_ref().map(rune_to_element);
-
-    if should_recover_rune {
-        if let Some(rune) = recovered_last_rune {
-            set_rune_active(&mut state.runes.active, &rune, true);
-        }
-    } else {
-        state = add_abundance(state, 25).state;
-    }
 
     let unlocked_element = state.temporary_unlocked_spell_element.clone();
     let after = state.feu_follets_active;
@@ -5215,6 +5233,8 @@ pub fn apply_feu_follet_recover(mut state: HuppermageState) -> FeuFolletResult {
         before,
         after,
         recovered_runes: sort_runes_for_application(&recovered_runes),
+        recovered_rune_ap_gain,
+        recovered_rune_bq_gain,
         temporary_unlocked_spell_element: unlocked_element,
     }
 }
@@ -5826,20 +5846,51 @@ fn get_feu_follet_stored_rune(state: &HuppermageState) -> Option<Rune> {
     }
 }
 
-fn apply_recovered_runes(
-    mut runes: HuppermageRuneState,
+#[derive(Clone, Debug, PartialEq)]
+struct RecoveredRuneGeneration {
+    state: HuppermageState,
+    ap_gain: u32,
+    bq_gain: i32,
+}
+
+fn apply_recovered_runes_as_generated(
+    mut state: HuppermageState,
     recovered_runes: &[Rune],
-) -> HuppermageRuneState {
+) -> RecoveredRuneGeneration {
     let sorted_runes = sort_runes_for_application(recovered_runes);
     if sorted_runes.is_empty() {
-        return runes;
+        return RecoveredRuneGeneration {
+            state,
+            ap_gain: 0,
+            bq_gain: 0,
+        };
     }
 
+    let mut ap_gain = 0;
+    let mut bq_gain = 0;
     for rune in &sorted_runes {
-        set_rune_active(&mut runes.active, rune, true);
+        if is_rune_active(&state.runes.active, rune) {
+            continue;
+        }
+
+        if !is_rune_active(&state.rune_ap_gains_this_turn, rune) {
+            set_rune_active(&mut state.rune_ap_gains_this_turn, rune, true);
+            ap_gain += 1;
+        }
+
+        set_rune_active(&mut state.runes.active, rune, true);
+        state.runes.last_generated_rune = Some(rune.clone());
+
+        if has_passive(&state, "antithese") {
+            bq_gain += apply_bq_gain_multiplier(20, &state);
+        }
     }
-    runes.last_generated_rune = sorted_runes.last().cloned().or(runes.last_generated_rune);
-    runes
+
+    RecoveredRuneGeneration {
+        state,
+        ap_gain,
+        bq_gain,
+    }
 }
 
 fn sort_runes_for_application(runes: &[Rune]) -> Vec<Rune> {
@@ -7959,6 +8010,21 @@ fn evaluate_candidate_with_catalog<'a>(
                     if action_index == 0 && has_passive(&huppermage, "initiative-de-lame") {
                         resources.ap += 2.0;
                     }
+                }
+            }
+
+            if spell.id == "feu-follet" {
+                match target {
+                    Some(ActionTargetKind::EmptyCell) => {
+                        huppermage = apply_feu_follet_place(huppermage).state;
+                    }
+                    Some(ActionTargetKind::FeuFollet) => {
+                        let recovery = apply_feu_follet_recover(huppermage);
+                        resources.ap += f64::from(recovery.recovered_rune_ap_gain);
+                        resources.bq += f64::from(recovery.recovered_rune_bq_gain);
+                        huppermage = recovery.state;
+                    }
+                    _ => {}
                 }
             }
 
@@ -10465,6 +10531,8 @@ mod tests {
             recovered.recovered_runes,
             vec![Rune::Incandescent, Rune::Aquatic, Rune::Telluric]
         );
+        assert_eq!(recovered.recovered_rune_ap_gain, 3);
+        assert_eq!(recovered.recovered_rune_bq_gain, 0);
         assert_eq!(
             recovered.state.runes.last_generated_rune,
             Some(Rune::Telluric)
@@ -10473,6 +10541,81 @@ mod tests {
             recovered.temporary_unlocked_spell_element,
             Some(Element::Earth)
         );
+    }
+
+    #[test]
+    fn feu_follet_recovery_recovered_runes_grant_generation_ap_after_runification() {
+        let request = parse_optimizer_request(
+            r#"{
+              "schemaVersion":1,
+              "engine":"hybrid",
+              "seed":"feu-follet-runification-probe",
+              "duration":2,
+              "iterations":10,
+              "maxActionsPerTurn":8,
+              "maxPassiveCount":1,
+              "availableSpellIds":["flux-denergie","averse","eboulement","papillons-diurnes","feu-follet","runification","orbes-luisants"],
+              "availablePassiveIds":["sauvegarde-runique"],
+              "catalog":[
+                {"kind":"spell","id":"flux-denergie","element":"fire","cost":{"ap":1},"effects":[{"type":"damage","base":10,"element":"fire"}],"constraints":[],"tags":[]},
+                {"kind":"spell","id":"averse","element":"water","cost":{"ap":1},"effects":[{"type":"damage","base":10,"element":"water"}],"constraints":[],"tags":[]},
+                {"kind":"spell","id":"eboulement","element":"earth","cost":{"ap":1},"effects":[{"type":"damage","base":10,"element":"earth"}],"constraints":[],"tags":[]},
+                {"kind":"spell","id":"papillons-diurnes","element":"air","cost":{"ap":1},"effects":[{"type":"damage","base":10,"element":"air"}],"constraints":[],"tags":[]},
+                {
+                  "kind":"spell",
+                  "id":"feu-follet",
+                  "cost":{"ap":1},
+                  "effects":[
+                    {"type":"conditional","condition":{"type":"targetIs","value":"emptyCell"},"effects":[{"type":"tag","tag":"placesClassState","value":"feuFollet"}]},
+                    {"type":"conditional","condition":{"type":"targetIs","value":"feuFollet"},"effects":[{"type":"resourceDelta","resource":"ap","amount":2}]}
+                  ],
+                  "constraints":[],
+                  "tags":[]
+                },
+                {"kind":"spell","id":"runification","cost":{"wp":1},"effects":[{"type":"tag","tag":"consumeAllRunes","value":true}],"constraints":[],"tags":[]},
+                {"kind":"spell","id":"orbes-luisants","cost":{"ap":3},"effects":[{"type":"damage","base":10,"element":"light"}],"constraints":[],"tags":[]},
+                {"kind":"passive","id":"sauvegarde-runique","effects":[],"constraints":[],"tags":[]}
+              ],
+              "character":{"id":"test","resources":{"ap":12,"mp":3,"wp":6,"bq":500},"stats":{"damageInflictedPercent":20}}
+            }"#,
+        )
+        .expect("request should parse");
+        let candidate = OptimizerCandidateInput {
+            passive_ids: vec!["sauvegarde-runique".to_string()],
+            sublimation_ids: vec![],
+            plan: CandidatePlan {
+                turns: vec![
+                    CandidateTurn {
+                        actions: vec![
+                            action("flux-denergie"),
+                            empty_cell_action("feu-follet"),
+                            action("averse"),
+                            action("eboulement"),
+                            action("papillons-diurnes"),
+                        ],
+                    },
+                    CandidateTurn {
+                        actions: vec![
+                            action("runification"),
+                            CandidateAction {
+                                spell_id: "feu-follet".to_string(),
+                                target: Some(CandidateActionTarget {
+                                    kind: ActionTargetKind::FeuFollet,
+                                }),
+                                context: None,
+                            },
+                            action("orbes-luisants"),
+                        ],
+                    },
+                ],
+            },
+        };
+
+        let evaluation = evaluate_candidate(&request, &candidate, "ff-runification-recover")
+            .expect("candidate should evaluate");
+
+        assert!(evaluation.valid, "{evaluation:?}");
+        assert_eq!(evaluation.final_resources.ap, 13.0);
     }
 
     #[test]
