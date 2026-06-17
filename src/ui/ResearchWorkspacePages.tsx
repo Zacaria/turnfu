@@ -9,6 +9,10 @@ import type {
 } from "../core/sublimations/types.ts";
 import { validateSublimationBuild } from "../core/sublimations/index.ts";
 import {
+  createContinuousOptimizerPageViewModel,
+  createDefaultContinuousOptimizerControls,
+} from "./continuousOptimizerWorkspace.ts";
+import {
   createDefaultOptimizerControls,
   createOptimizerCandidateSpellIconRows,
   getPinnedCandidates,
@@ -88,6 +92,7 @@ export function ResearchLibraryPage({
   classFilter,
   onClassFilterChange,
   onCreateBuild,
+  onOpenContinuousOptimizer,
   onOpenBuild,
   onOpenQuickBuilder,
   workspace,
@@ -95,6 +100,7 @@ export function ResearchLibraryPage({
   classFilter: WakfuClassId | "all";
   onClassFilterChange: (classId: WakfuClassId | "all") => void;
   onCreateBuild: (input: { classId: WakfuClassId; gameplayLabel: string; name: string }) => void;
+  onOpenContinuousOptimizer: () => void;
   onOpenBuild: (buildId: string) => void;
   onOpenQuickBuilder: () => void;
   workspace: ResearchWorkspaceData;
@@ -119,10 +125,16 @@ export function ResearchLibraryPage({
           <span>Laboratoire</span>
           <h1>Builds</h1>
         </div>
-        <button className="secondary-button" type="button" onClick={onOpenQuickBuilder}>
-          <Wrench size={16} />
-          Builder rapide
-        </button>
+        <div className="row-actions">
+          <button className="secondary-button" type="button" onClick={onOpenContinuousOptimizer}>
+            <Search size={16} />
+            Continuous
+          </button>
+          <button className="secondary-button" type="button" onClick={onOpenQuickBuilder}>
+            <Wrench size={16} />
+            Builder rapide
+          </button>
+        </div>
       </section>
 
       <section className="research-layout">
@@ -309,6 +321,81 @@ export function BuildPage({
               </div>
             );
           })}
+        </section>
+      </section>
+    </main>
+  );
+}
+
+export function ContinuousOptimizerPage({ onBack }: { onBack: () => void }) {
+  const view = createContinuousOptimizerPageViewModel({
+    controls: createDefaultContinuousOptimizerControls(),
+    session: null,
+    checkpoints: [],
+    promotedSeeds: [],
+    motifs: [],
+  });
+
+  return (
+    <main className="research-shell optimizer-shell">
+      <PageBackButton onBack={onBack} label="Laboratoire" />
+      <section className="build-header">
+        <div className="build-header-title">
+          <span>Rust/WASM · {view.controls.dbPath}</span>
+          <h1>Continuous</h1>
+        </div>
+        <span className="status-pill">{view.statusLabel}</span>
+      </section>
+
+      <section className="build-columns">
+        <section className="workspace-section">
+          <h2>Session</h2>
+          <div className="thin-row">
+            <b>{view.controls.sessionId}</b>
+            <span>{view.controls.scenarioId} · {view.controls.workerCount} workers · chunk {view.controls.chunkSize}</span>
+          </div>
+          <div className="row-actions">
+            <button className="primary-button" type="button" disabled={!view.operations.canStart}>
+              <Play size={16} />
+              Start
+            </button>
+            <button className="secondary-button" type="button" disabled={!view.operations.canPause}>
+              Pause
+            </button>
+            <button className="secondary-button" type="button" disabled={!view.operations.canResume}>
+              Resume
+            </button>
+          </div>
+        </section>
+
+        <section className="workspace-section">
+          <h2>Best combos</h2>
+          <div className="thin-row">
+            <b>{view.bestCombos.bestScore?.toFixed(2) ?? "Aucun score"}</b>
+            <span>{view.bestCombos.totalAttempts.toLocaleString("fr-FR")} attempts · valid {(view.bestCombos.validRate * 100).toFixed(1)}%</span>
+          </div>
+          {view.bestCombos.checkpoints.length === 0 ? (
+            <EmptyState title="Aucun checkpoint" body="La session n'a pas encore publié de checkpoint." />
+          ) : null}
+        </section>
+
+        <section className="workspace-section">
+          <h2>Learned evidence</h2>
+          {view.learnedEvidence.promotedSeeds.length === 0 && view.learnedEvidence.motifs.length === 0 ? (
+            <EmptyState title="Aucune évidence promue" body="Les motifs et seeds promus apparaîtront ici après minage du corpus." />
+          ) : null}
+          {view.learnedEvidence.promotedSeeds.map((seed) => (
+            <div className="thin-row" key={seed.label}>
+              <b>{seed.label}</b>
+              <span>{seed.score.toFixed(2)} · confidence {(seed.confidence * 100).toFixed(0)}% · used {seed.usageCount}</span>
+            </div>
+          ))}
+          {view.learnedEvidence.motifs.map((motif) => (
+            <div className="thin-row" key={motif.label}>
+              <b>{motif.label}</b>
+              <span>{motif.bestScore.toFixed(2)} · support {motif.supportCount} · confidence {(motif.confidence * 100).toFixed(0)}%</span>
+            </div>
+          ))}
         </section>
       </section>
     </main>

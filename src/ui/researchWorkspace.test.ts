@@ -22,6 +22,7 @@ import {
 } from "./researchWorkspace.ts";
 import {
   createResearchRoute,
+  openContinuousOptimizer,
   openBuilderFromSetup,
   openBuild,
   openOptimizerFromSetup,
@@ -459,6 +460,13 @@ test("navigates to saved optimizer run and saved combo comparison pages", () => 
   assert.deepEqual(returnToPrevious(runRoute), buildRoute);
   assert.equal(comboRoute.page, "savedCombos");
   assert.deepEqual(returnToPrevious(comboRoute), buildRoute);
+});
+
+test("navigates to the dedicated continuous optimizer page", () => {
+  const route = openContinuousOptimizer(createResearchRoute());
+
+  assert.equal(route.page, "continuous-optimizer");
+  assert.deepEqual(returnToPrevious(route), createResearchRoute());
 });
 
 test("setup snapshots are versioned instead of mutated", () => {

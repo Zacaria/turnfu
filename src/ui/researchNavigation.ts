@@ -41,6 +41,12 @@ export type ResearchRoute =
       buildId?: string;
       setupSnapshotId?: string;
       returnTo?: ResearchRoute;
+    }
+  | {
+      page: "continuous-optimizer";
+      buildId?: undefined;
+      setupSnapshotId?: undefined;
+      returnTo?: ResearchRoute;
     };
 
 export function createResearchRoute(): ResearchRoute {
@@ -102,6 +108,13 @@ export function openSavedComboComparison(_route: ResearchRoute, buildId: string)
   };
 }
 
+export function openContinuousOptimizer(route: ResearchRoute): ResearchRoute {
+  return {
+    page: "continuous-optimizer",
+    returnTo: route,
+  };
+}
+
 export function openBuilderFromSetup(_route: ResearchRoute, buildId: string, setupSnapshotId: string): ResearchRoute {
   return {
     page: "builder",
@@ -144,6 +157,7 @@ export function retargetSetupRoute(route: ResearchRoute, setupSnapshotId: string
     case "build":
     case "optimizerRun":
     case "savedCombos":
+    case "continuous-optimizer":
       return returnTo ? { ...route, returnTo } : route;
   }
 }

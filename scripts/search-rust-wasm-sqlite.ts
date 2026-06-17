@@ -16,6 +16,15 @@ import {
 import { createResources } from "../src/core/simulation/index.ts";
 import type { ComboSimulationOptions, SimulatedCharacter } from "../src/core/simulation/types.ts";
 import { sublimationCatalog } from "../src/core/sublimations/index.ts";
+import {
+  createContinuousSearchSchema,
+  ensureContinuousSearchSession,
+  promoteContinuousSearchSeeds,
+  recordContinuousSearchCandidate,
+  recordContinuousSearchCheckpoint,
+  recordContinuousSearchMotif,
+  resetContinuousSearchSession,
+} from "./continuous-search-store.ts";
 
 type HybridSearchScenario = {
   id: string;
@@ -158,10 +167,20 @@ const workerSource = `
 mkdirSync(dirname(dbPath), { recursive: true });
 const db = new DatabaseSync(dbPath);
 createSchema(db);
+createContinuousSearchSchema(db);
 if (reset) {
   resetSession(db, sessionId);
+  resetContinuousSearchSession(db, sessionId);
 }
 const session = ensureSession(db, sessionId, fingerprint);
+ensureContinuousSearchSession(db, {
+  id: sessionId,
+  fingerprint,
+  scenarioId,
+  setupHash: fingerprint,
+  seed,
+  workerCount,
+});
 
 let stopRequested = false;
 process.on("SIGINT", () => {
@@ -229,6 +248,25 @@ while (!stopRequested) {
     ...oracleSummary,
     metrics,
   };
+  const persistedTopCandidateIds = topCandidates.slice(0, 20).map((candidate, index) =>
+    recordContinuousSearchCandidate(db, {
+      sessionId,
+      candidate,
+      score: candidate.score.score,
+      valid: true,
+      violationCategory: null,
+      finalState: null,
+      descriptor: {
+        passiveCount: candidate.passiveIds.length,
+        sublimationCount: candidate.sublimationIds.length,
+        actionCount: countActions(candidate),
+        checkpointRank: index + 1,
+      },
+      sourceKind: "checkpoint-top",
+      sourceRef: String(totalAttempts),
+      attempt: totalAttempts,
+    })
+  );
 
   db.exec("BEGIN IMMEDIATE");
   try {
@@ -237,6 +275,41 @@ while (!stopRequested) {
     }
     updateSession(db, sessionId, totalAttempts, bestCandidate, summary);
     insertCheckpoint(db, summary);
+    recordContinuousSearchCheckpoint(db, {
+      sessionId,
+      totalAttempts,
+      score: bestCandidate?.score.score ?? 0,
+      validRate: validCandidates / Math.max(1, attempts),
+      bestCandidateId: persistedTopCandidateIds[0] ?? null,
+      summary,
+    });
+    for (const candidate of topCandidates.slice(0, 10)) {
+      const motifKey = candidate.plan.turns
+        .flatMap((turn) => turn.actions.map((action) => action.spellId))
+        .slice(0, 4)
+        .join(">");
+      if (!motifKey) {
+        continue;
+      }
+      recordContinuousSearchMotif(db, {
+        sessionId,
+        motifKey,
+        motif: {
+          spellPrefix: motifKey.split(">"),
+          passiveIds: candidate.passiveIds,
+          sublimationIds: candidate.sublimationIds.slice(0, 4),
+        },
+        supportCount: 1,
+        bestScore: candidate.score.score,
+        averageScore: candidate.score.score,
+        rediscoveryCount: 1,
+      });
+    }
+    promoteContinuousSearchSeeds(db, {
+      sessionId,
+      minConfidence: 0.5,
+      maxSeeds: 8,
+    });
     db.exec("COMMIT");
   } catch (error) {
     db.exec("ROLLBACK");

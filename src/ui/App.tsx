@@ -81,6 +81,7 @@ import {
 } from "./optimizerSessionPersistence.ts";
 import {
   BuildPage,
+  ContinuousOptimizerPage,
   createOptimizerWorkspaceSession,
   OptimizerWorkspacePage,
   OptimizerRunDetailPage,
@@ -117,6 +118,7 @@ import {
 } from "./researchWorkspacePersistence.ts";
 import {
   createResearchRoute,
+  openContinuousOptimizer,
   openBuilderFromSetup,
   openBuild,
   openOptimizerFromSetup,
@@ -972,8 +974,18 @@ export function App() {
           onClassFilterChange={setBuildClassFilter}
           onCreateBuild={createResearchBuild}
           onOpenBuild={(buildId) => setResearchRoute(openBuild(researchRoute, buildId))}
+          onOpenContinuousOptimizer={() => setResearchRoute(openContinuousOptimizer(researchRoute))}
           onOpenQuickBuilder={() => setResearchRoute({ page: "builder" })}
         />
+      </>
+    );
+  }
+
+  if (researchRoute.page === "continuous-optimizer") {
+    return (
+      <>
+        <AppHeader locale={locale} onChangeLocale={changeLocale} />
+        <ContinuousOptimizerPage onBack={() => setResearchRoute(returnToPrevious(researchRoute))} />
       </>
     );
   }
