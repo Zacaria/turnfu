@@ -526,6 +526,8 @@ function createMultiTurnFixtures(): RustWasmDifferentialFixture[] {
       before: 1,
       after: 0,
       recoveredRunes: ["aquatic", "telluric", "aerial"],
+      recoveredRuneApGain: 3,
+      recoveredRuneBqGain: 75,
       temporaryUnlockedSpellElement: "air",
     },
   });
