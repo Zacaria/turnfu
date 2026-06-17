@@ -63,6 +63,15 @@ export type OptimizerLiveRunProgress = {
   results: OptimizerCandidateViewModel[];
 };
 
+type OptimizerRunStreamPayload = {
+  schemaVersion: 1;
+  attempts: number;
+  validCandidates: number;
+  invalidCandidates: number;
+  topCandidates: OptimizerCandidateSource[];
+  metrics: Record<string, number>;
+};
+
 export type OptimizerCandidateSpellIcon = {
   spellId: string;
   label: string;
@@ -192,7 +201,10 @@ export async function runOptimizerForControlsLive(
   signal?: AbortSignal,
 ): Promise<OptimizerCandidateViewModel[]> {
   const normalizedControls = normalizeOptimizerControls(controls);
-  if (normalizedControls.searchMethod === "genetic" || normalizedControls.searchMethod === "hybrid") {
+  if (normalizedControls.searchMethod === "hybrid") {
+    return runRustWasmOptimizerForControlsLive(setup, catalog, normalizedControls, onProgress, signal);
+  }
+  if (normalizedControls.searchMethod === "genetic") {
     return runGeneticOptimizerForControlsLive(setup, catalog, normalizedControls, onProgress, signal);
   }
 
@@ -252,6 +264,57 @@ export async function runOptimizerForControlsLive(
   }
 
   return rankOptimizerCandidateViewModels([...candidates.values()]).slice(0, normalizedControls.maxResultsPerDuration);
+}
+
+async function runRustWasmOptimizerForControlsLive(
+  setup: SetupSnapshot,
+  catalog: CatalogEntry[],
+  controls: OptimizerWorkspaceControls,
+  onProgress: (progress: OptimizerLiveRunProgress) => void,
+  signal?: AbortSignal,
+): Promise<OptimizerCandidateViewModel[]> {
+  const normalizedControls = normalizeOptimizerControls(controls);
+  const candidates = new Map<string, OptimizerCandidateViewModel>();
+  let latestResults: OptimizerCandidateViewModel[] = [];
+  let progressBatch = 0;
+
+  await streamOptimizerRun({
+    options: {
+      ...createOptimizerExperimentOptionsForSetup(setup, catalog, normalizedControls),
+      backend: "rustWasm",
+      rustWasmOracle: "finalTopCandidates",
+      seed: `${normalizedControls.searchMethod}:${normalizedControls.duration}:${normalizedControls.targetElement}`,
+    },
+    progressIntervalMs: 500,
+    signal,
+    onProgress: (payload) => {
+      progressBatch += 1;
+      for (const candidate of payload.topCandidates) {
+        const viewModel = createOptimizerResultViewModel({
+          duration: normalizedControls.duration,
+          result: candidate,
+        });
+        candidates.set(viewModel.id, viewModel);
+      }
+
+      latestResults = rankOptimizerCandidateViewModels([...candidates.values()]).slice(0, normalizedControls.maxResultsPerDuration);
+      onProgress({
+        batch: progressBatch,
+        attempts: payload.attempts,
+        validCandidates: payload.validCandidates,
+        invalidCandidates: payload.invalidCandidates,
+        bestScore: latestResults[0]?.score,
+        bestCandidate: latestResults[0],
+        metrics: {
+          ...payload.metrics,
+          backend: 1,
+        },
+        results: latestResults,
+      });
+    },
+  });
+
+  return latestResults;
 }
 
 async function runGeneticOptimizerForControlsLive(
@@ -506,6 +569,82 @@ function rankOptimizerCandidateViewModels(candidates: OptimizerCandidateViewMode
     }
     return left.id.localeCompare(right.id);
   });
+}
+
+async function streamOptimizerRun({
+  onProgress,
+  options,
+  progressIntervalMs,
+  signal,
+}: {
+  onProgress: (payload: OptimizerRunStreamPayload) => void;
+  options: OptimizerExperimentOptions;
+  progressIntervalMs: number;
+  signal?: AbortSignal;
+}): Promise<void> {
+  const response = await fetch("/api/optimizer-runs/stream", {
+    body: JSON.stringify({ options, progressIntervalMs }),
+    headers: { "Content-Type": "application/json" },
+    method: "POST",
+    signal,
+  });
+  if (!response.ok) {
+    throw new Error(await readOptimizerStreamError(response));
+  }
+  if (!response.body) {
+    throw new Error("Optimizer stream response is missing a readable body.");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+
+    buffer += decoder.decode(value, { stream: true });
+    const events = buffer.split("\n\n");
+    buffer = events.pop() ?? "";
+    for (const eventChunk of events) {
+      const event = parseServerSentEvent(eventChunk);
+      if (!event) {
+        continue;
+      }
+      if (event.event === "error") {
+        const parsed = JSON.parse(event.data) as { error?: string };
+        throw new Error(parsed.error ?? "Optimizer stream failed.");
+      }
+      if (event.event === "progress" || event.event === "complete") {
+        onProgress(JSON.parse(event.data) as OptimizerRunStreamPayload);
+      }
+    }
+  }
+}
+
+function parseServerSentEvent(chunk: string): { event: string; data: string } | null {
+  let event = "message";
+  const data: string[] = [];
+  for (const line of chunk.split("\n")) {
+    if (line.startsWith("event:")) {
+      event = line.slice("event:".length).trim();
+    } else if (line.startsWith("data:")) {
+      data.push(line.slice("data:".length).trimStart());
+    }
+  }
+
+  return data.length > 0 ? { event, data: data.join("\n") } : null;
+}
+
+async function readOptimizerStreamError(response: Response): Promise<string> {
+  try {
+    const parsed = await response.json() as { error?: string };
+    return parsed.error ?? `Optimizer stream failed with status ${response.status}.`;
+  } catch {
+    return `Optimizer stream failed with status ${response.status}.`;
+  }
 }
 
 function waitForUiFrame(): Promise<void> {

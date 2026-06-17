@@ -1,13 +1,35 @@
+import { createRequire } from "node:module";
 import { mkdirSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { availableParallelism } from "node:os";
 import { dirname, resolve } from "node:path";
+import { performance } from "node:perf_hooks";
 import { DatabaseSync } from "node:sqlite";
+import { Worker } from "node:worker_threads";
 import react from "@vitejs/plugin-react";
 import { defineConfig, type Plugin } from "vite";
+import {
+  createOptimizerExperimentEvaluator,
+  type OptimizerExperimentCandidate,
+  type OptimizerExperimentOptions,
+} from "./src/core/optimizer/index.ts";
+import {
+  createRustWasmOptimizerRequest,
+  type RustWasmHybridSearchResumeState,
+  type RustWasmOptimizerRequest,
+  type RustWasmOptimizerScoredCandidate,
+} from "./src/core/optimizer/rustWasmBackendTypes.ts";
 
 const optimizerSessionsApiPrefix = "/api/optimizer-sessions";
+const optimizerRunsStreamApiPath = "/api/optimizer-runs/stream";
 const researchWorkspaceApiPath = "/api/research-workspace";
 const optimizerSearchDatabasePath = resolve(process.env.WAKFU_OPTIMIZER_DB ?? ".optimizer/rust-wasm-search.sqlite");
+const optimizerWasmPackagePath = resolve("src/wasm/optimizer_wasm_pkg/optimizer_wasm.js");
+const optimizerWorkerSource = `
+  const { parentPort, workerData } = require("node:worker_threads");
+  const wasm = require(workerData.wasmPackagePath);
+  parentPort.postMessage(JSON.parse(wasm.run_hybrid_search_json(workerData.requestJson)));
+`;
 
 export default defineConfig({
   plugins: [optimizerSessionsSqliteApi(), react()],
@@ -19,7 +41,11 @@ function optimizerSessionsSqliteApi(): Plugin {
     configureServer(server) {
       server.middlewares.use(async (request, response, next) => {
         const requestUrl = new URL(request.url ?? "/", "http://localhost");
-        if (!requestUrl.pathname.startsWith(optimizerSessionsApiPrefix) && requestUrl.pathname !== researchWorkspaceApiPath) {
+        if (
+          !requestUrl.pathname.startsWith(optimizerSessionsApiPrefix)
+          && requestUrl.pathname !== researchWorkspaceApiPath
+          && requestUrl.pathname !== optimizerRunsStreamApiPath
+        ) {
           next();
           return;
         }
@@ -27,6 +53,12 @@ function optimizerSessionsSqliteApi(): Plugin {
         try {
           if (request.method === "GET" && requestUrl.pathname === researchWorkspaceApiPath) {
             sendJson(response, 200, { schemaVersion: 1, workspace: readResearchWorkspace() });
+            return;
+          }
+
+          if (request.method === "POST" && requestUrl.pathname === optimizerRunsStreamApiPath) {
+            const body = await readJsonBody(request);
+            await streamRustWasmOptimizerRun(request, response, body);
             return;
           }
 
@@ -73,6 +105,11 @@ function optimizerSessionsSqliteApi(): Plugin {
 
           sendJson(response, 405, { error: "Unsupported optimizer session API method." });
         } catch (error) {
+          if (response.headersSent) {
+            response.end();
+            return;
+          }
+
           sendJson(response, 500, {
             error: error instanceof Error ? error.message : "Unexpected optimizer session API error.",
           });
@@ -80,6 +117,301 @@ function optimizerSessionsSqliteApi(): Plugin {
       });
     },
   };
+}
+
+type OptimizerRunStreamRequest = {
+  options?: OptimizerExperimentOptions;
+  progressIntervalMs?: number;
+  workerCount?: number;
+};
+
+type OptimizerWorkerSearchResponse = {
+  attempts: number;
+  validCandidates: number;
+  invalidCandidates: number;
+  topCandidates: RustWasmOptimizerScoredCandidate[];
+  metrics: Record<string, number>;
+  resumeState?: RustWasmHybridSearchResumeState;
+};
+
+async function streamRustWasmOptimizerRun(
+  request: IncomingMessage,
+  response: ServerResponse,
+  body: unknown,
+): Promise<void> {
+  const payload = body as OptimizerRunStreamRequest | null;
+  const options = payload?.options;
+  if (!options || typeof options !== "object") {
+    sendJson(response, 400, { error: "Missing optimizer options." });
+    return;
+  }
+  if (options.engines.length !== 1 || options.engines[0] !== "hybrid") {
+    sendJson(response, 400, { error: "Rust/WASM streaming only supports the hybrid optimizer engine." });
+    return;
+  }
+
+  const require = createRequire(import.meta.url);
+  try {
+    require.resolve(optimizerWasmPackagePath);
+  } catch {
+    sendJson(response, 500, { error: "Build WASM first with `pnpm wasm:build`." });
+    return;
+  }
+
+  response.statusCode = 200;
+  response.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  response.setHeader("Cache-Control", "no-cache, no-transform");
+  response.setHeader("Connection", "keep-alive");
+  response.flushHeaders?.();
+
+  let cancelled = false;
+
+  request.on("aborted", () => {
+    cancelled = true;
+  });
+
+  try {
+    const progressIntervalMs = clampInteger(payload?.progressIntervalMs ?? 500, 100, 5_000);
+    const workerCount = clampInteger(payload?.workerCount ?? Math.min(4, availableParallelism()), 1, Math.max(1, availableParallelism()));
+    const totalBudget = clampInteger(options.budget.iterations, 1, 1_000_000_000);
+    const maxCandidates = clampInteger(options.maxCandidates ?? 20, 1, 50);
+    const evaluator = createOptimizerExperimentEvaluator(options);
+    const resumeStates: Array<RustWasmHybridSearchResumeState | undefined> = Array.from({ length: workerCount });
+    const topCandidates = new Map<string, RustWasmOptimizerScoredCandidate>();
+    const metrics: Record<string, number> = {};
+    let attempts = 0;
+    let validCandidates = 0;
+    let invalidCandidates = 0;
+    let nextChunkIterations = Math.max(workerCount, 10_000);
+    let lastProgressAt = performance.now();
+
+    sendSse(response, "progress", createOptimizerRunProgressPayload({
+      attempts,
+      validCandidates,
+      invalidCandidates,
+      metrics,
+      topCandidates,
+      evaluator,
+      maxCandidates,
+    }));
+
+    while (!cancelled && attempts < totalBudget) {
+      const remaining = totalBudget - attempts;
+      const roundIterations = Math.min(nextChunkIterations, remaining);
+      const startedAt = performance.now();
+      const workerIterations = splitIterations(roundIterations, workerCount);
+      const results = await Promise.all(workerIterations.map((iterations, workerIndex) => {
+        if (iterations <= 0) {
+          return undefined;
+        }
+
+        const rustRequest = createRustWasmOptimizerRequest({
+          ...options,
+          backend: "rustWasm",
+          rustWasmOracle: "disabled",
+          engines: ["hybrid"],
+          seed: `${options.seed ?? "optimizer-ui"}:worker:${workerIndex}`,
+          budget: { iterations },
+          maxCandidates,
+        });
+        const requestWithResume: RustWasmOptimizerRequest = {
+          ...rustRequest,
+          resumeState: resumeStates[workerIndex],
+        };
+        return runRustWasmWorker(requestWithResume);
+      }));
+
+      for (const [workerIndex, result] of results.entries()) {
+        if (!result) {
+          continue;
+        }
+        resumeStates[workerIndex] = result.resumeState;
+        attempts += result.attempts;
+        validCandidates += result.validCandidates;
+        invalidCandidates += result.invalidCandidates;
+        mergeNumericMetrics(metrics, result.metrics);
+        mergeTopCandidates(topCandidates, result.topCandidates, maxCandidates);
+      }
+
+      const elapsedMs = performance.now() - startedAt;
+      nextChunkIterations = tuneChunkIterations(roundIterations, elapsedMs, progressIntervalMs, workerCount);
+
+      if (performance.now() - lastProgressAt >= progressIntervalMs || attempts >= totalBudget) {
+        sendSse(response, "progress", createOptimizerRunProgressPayload({
+          attempts,
+          validCandidates,
+          invalidCandidates,
+          metrics,
+          topCandidates,
+          evaluator,
+          maxCandidates,
+        }));
+        lastProgressAt = performance.now();
+      }
+    }
+
+    sendSse(response, "complete", createOptimizerRunProgressPayload({
+      attempts,
+      validCandidates,
+      invalidCandidates,
+      metrics,
+      topCandidates,
+      evaluator,
+      maxCandidates,
+    }));
+    response.end();
+  } catch (error) {
+    sendSse(response, "error", {
+      error: error instanceof Error ? error.message : "Unexpected optimizer stream error.",
+    });
+    response.end();
+  }
+}
+
+function runRustWasmWorker(request: RustWasmOptimizerRequest): Promise<OptimizerWorkerSearchResponse> {
+  return new Promise((resolveResult, reject) => {
+    const worker = new Worker(optimizerWorkerSource, {
+      eval: true,
+      workerData: {
+        requestJson: JSON.stringify(request),
+        wasmPackagePath: optimizerWasmPackagePath,
+      },
+    });
+    worker.once("message", (message: OptimizerWorkerSearchResponse) => resolveResult(message));
+    worker.once("error", reject);
+    worker.once("exit", (code) => {
+      if (code !== 0) {
+        reject(new Error(`Rust/WASM optimizer worker exited with code ${code}.`));
+      }
+    });
+  });
+}
+
+function createOptimizerRunProgressPayload({
+  attempts,
+  evaluator,
+  invalidCandidates,
+  maxCandidates,
+  metrics,
+  topCandidates,
+  validCandidates,
+}: {
+  attempts: number;
+  evaluator: ReturnType<typeof createOptimizerExperimentEvaluator>;
+  invalidCandidates: number;
+  maxCandidates: number;
+  metrics: Record<string, number>;
+  topCandidates: Map<string, RustWasmOptimizerScoredCandidate>;
+  validCandidates: number;
+}) {
+  const verifiedTopCandidates = [...topCandidates.values()]
+    .sort(compareRustWasmCandidates)
+    .slice(0, maxCandidates)
+    .map((candidate) => evaluator.evaluate({
+      passiveIds: candidate.passiveIds,
+      sublimationIds: candidate.sublimationIds,
+      plan: candidate.plan,
+    }))
+    .filter((candidate): candidate is OptimizerExperimentCandidate => Boolean(candidate))
+    .sort(compareOptimizerCandidates)
+    .slice(0, maxCandidates);
+
+  return {
+    schemaVersion: 1,
+    attempts,
+    validCandidates,
+    invalidCandidates,
+    topCandidates: verifiedTopCandidates,
+    metrics,
+  };
+}
+
+function splitIterations(total: number, workerCount: number): number[] {
+  const base = Math.floor(total / workerCount);
+  const remainder = total % workerCount;
+  return Array.from({ length: workerCount }, (_, index) => base + (index < remainder ? 1 : 0));
+}
+
+function tuneChunkIterations(currentIterations: number, elapsedMs: number, targetMs: number, workerCount: number): number {
+  if (elapsedMs <= 0) {
+    return currentIterations;
+  }
+
+  const ratio = targetMs / elapsedMs;
+  const tuned = Math.round(currentIterations * Math.max(0.5, Math.min(2, ratio)));
+  return Math.max(workerCount, Math.min(1_000_000, tuned));
+}
+
+function mergeTopCandidates(
+  target: Map<string, RustWasmOptimizerScoredCandidate>,
+  candidates: RustWasmOptimizerScoredCandidate[],
+  maxCandidates: number,
+): void {
+  for (const candidate of candidates) {
+    const existing = target.get(candidate.id);
+    if (!existing || compareRustWasmCandidates(candidate, existing) < 0) {
+      target.set(candidate.id, candidate);
+    }
+  }
+
+  const ranked = [...target.values()].sort(compareRustWasmCandidates).slice(0, Math.max(maxCandidates, 50));
+  target.clear();
+  for (const candidate of ranked) {
+    target.set(candidate.id, candidate);
+  }
+}
+
+function compareOptimizerCandidates(left: OptimizerExperimentCandidate, right: OptimizerExperimentCandidate): number {
+  return compareRankedCandidateValues(left.score.score, left.passiveIds.length, left.id, right.score.score, right.passiveIds.length, right.id);
+}
+
+function compareRustWasmCandidates(left: RustWasmOptimizerScoredCandidate, right: RustWasmOptimizerScoredCandidate): number {
+  return compareRankedCandidateValues(left.score.score, left.passiveIds.length, left.id, right.score.score, right.passiveIds.length, right.id);
+}
+
+function compareRankedCandidateValues(
+  leftScore: number,
+  leftPassiveCount: number,
+  leftId: string,
+  rightScore: number,
+  rightPassiveCount: number,
+  rightId: string,
+): number {
+  const scoreDifference = rightScore - leftScore;
+  if (scoreDifference !== 0) {
+    return scoreDifference;
+  }
+
+  const passiveCountDifference = leftPassiveCount - rightPassiveCount;
+  if (passiveCountDifference !== 0) {
+    return passiveCountDifference;
+  }
+
+  return leftId.localeCompare(rightId);
+}
+
+function mergeNumericMetrics(target: Record<string, number>, source: Record<string, number>): void {
+  for (const [key, value] of Object.entries(source)) {
+    if (Number.isFinite(value)) {
+      target[key] = (target[key] ?? 0) + value;
+    }
+  }
+}
+
+function sendSse(response: ServerResponse, event: string, data: unknown): void {
+  if (response.destroyed || response.writableEnded) {
+    return;
+  }
+
+  response.write(`event: ${event}\n`);
+  response.write(`data: ${JSON.stringify(data)}\n\n`);
+}
+
+function clampInteger(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) {
+    return min;
+  }
+  return Math.min(max, Math.max(min, Math.floor(value)));
 }
 
 function readResearchWorkspace(): unknown | null {
