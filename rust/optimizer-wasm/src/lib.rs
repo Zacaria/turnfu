@@ -325,7 +325,7 @@ pub struct InitialPassiveResult {
     pub resources: ResourcePool,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "camelCase")]
 pub enum ActionTargetKind {
     EmptyCell,
@@ -690,6 +690,46 @@ pub struct CandidateEvaluationResult {
     pub score: Option<CandidateScoreBreakdown>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub first_violation: Option<CandidateEvaluationViolation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub causal_trace: Option<CausalTrace>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CausalTrace {
+    pub events: Vec<CausalTraceEvent>,
+    pub links: Vec<CausalTraceLink>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CausalTraceEvent {
+    pub turn_index: u32,
+    pub action_index: u32,
+    pub action_ordinal: u32,
+    pub spell_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<ActionTargetKind>,
+    pub produced_resources: ResourcePool,
+    pub consumed_resources: ResourcePool,
+    pub states_created: Vec<String>,
+    pub states_removed: Vec<String>,
+    pub options_unlocked: Vec<String>,
+    pub options_consumed: Vec<String>,
+    pub damage: f64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CausalTraceLink {
+    pub cause_feature: String,
+    pub consequence_feature: String,
+    pub cause_turn_index: u32,
+    pub cause_action_index: u32,
+    pub consequence_turn_index: u32,
+    pub consequence_action_index: u32,
+    pub distance_actions: u32,
+    pub distance_turns: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -3414,25 +3454,60 @@ fn get_search_actions(
             context: None,
         });
 
-        if entry.constraints.iter().any(|constraint| {
-            read_string_field(constraint, "type").is_some_and(|constraint_type| {
-                constraint_type == "maxCastsPerTarget"
-                    || (constraint_type == "requiresTarget"
-                        && read_string_field(constraint, "target")
-                            .is_some_and(|target| target == "emptyCell"))
-            })
-        }) {
+        for target_kind in collect_search_action_target_variants(entry) {
             actions.push(CandidateAction {
-                spell_id,
-                target: Some(CandidateActionTarget {
-                    kind: ActionTargetKind::EmptyCell,
-                }),
+                spell_id: spell_id.clone(),
+                target: Some(CandidateActionTarget { kind: target_kind }),
                 context: None,
             });
         }
     }
 
     actions
+}
+
+fn collect_search_action_target_variants(entry: &SearchCatalogEntry) -> Vec<ActionTargetKind> {
+    let mut target_variants = BTreeSet::new();
+
+    for constraint in &entry.constraints {
+        match read_string_field(constraint, "type").as_deref() {
+            Some("requiresTarget") => {
+                if let Some(target_kind) = read_action_target_kind(constraint.get("target")) {
+                    target_variants.insert(target_kind);
+                }
+            }
+            Some("maxCastsPerTarget") => {
+                target_variants.insert(ActionTargetKind::EmptyCell);
+            }
+            _ => {}
+        }
+    }
+
+    collect_target_variants_from_effects(&entry.effects, &mut target_variants);
+    target_variants.into_iter().collect()
+}
+
+fn collect_target_variants_from_effects(
+    effects: &[Value],
+    target_variants: &mut BTreeSet<ActionTargetKind>,
+) {
+    for effect in effects {
+        if read_string_field(effect, "type").as_deref() != Some("conditional") {
+            continue;
+        }
+
+        if let Some(target_kind) = effect
+            .get("condition")
+            .filter(|condition| read_string_field(condition, "type").as_deref() == Some("targetIs"))
+            .and_then(|condition| read_action_target_kind(condition.get("value")))
+        {
+            target_variants.insert(target_kind);
+        }
+
+        if let Some(nested_effects) = effect.get("effects").and_then(Value::as_array) {
+            collect_target_variants_from_effects(nested_effects, target_variants);
+        }
+    }
 }
 
 fn pick_random_passives(
@@ -5042,11 +5117,20 @@ pub fn convert_wp_to_bq(resources: ResourcePool) -> ResourcePool {
 }
 
 pub fn apply_generated_rune(
+    state: HuppermageState,
+    resources: ResourcePool,
+    rune: Rune,
+) -> RuneGenerationResult {
+    apply_generated_rune_internal(state, resources, rune, false)
+}
+
+fn apply_generated_rune_internal(
     mut state: HuppermageState,
     mut resources: ResourcePool,
     rune: Rune,
+    force: bool,
 ) -> RuneGenerationResult {
-    if is_rune_active(&state.runes.active, &rune) {
+    if is_rune_active(&state.runes.active, &rune) && !force {
         return RuneGenerationResult {
             state,
             resources,
@@ -5065,6 +5149,11 @@ pub fn apply_generated_rune(
         resources.ap += 1.0;
     }
 
+    if !is_rune_bq_blocked_by_extension_des_sens(&state) {
+        resources.bq += f64::from(apply_bq_gain_multiplier(25, &state));
+    }
+    state = add_abundance(state, 15).state;
+
     let antithese_bq_gain = if has_passive(&state, "antithese") {
         apply_bq_gain_multiplier(20, &state)
     } else {
@@ -5078,6 +5167,20 @@ pub fn apply_generated_rune(
         generated: true,
         granted_ap,
         antithese_bq_gain,
+    }
+}
+
+fn is_rune_bq_blocked_by_extension_des_sens(state: &HuppermageState) -> bool {
+    has_passive(state, "extension-des-sens") && state.active_heart.is_some()
+}
+
+fn get_removed_heart_rune(state: &HuppermageState, removed_runes: &[Rune]) -> Option<Rune> {
+    let heart = state.active_heart.as_ref()?;
+    let heart_rune = heart_to_rune(heart);
+    if removed_runes.contains(&heart_rune) {
+        Some(heart_rune)
+    } else {
+        None
     }
 }
 
@@ -5142,10 +5245,20 @@ pub fn apply_cycle_elementaire(
             false,
         );
     }
-    let mut result = apply_generated_rune(prepared_state, resources, restored_rune);
+    let mut result =
+        apply_generated_rune_internal(prepared_state, resources, restored_rune, was_active);
 
     if was_active && has_passive(&result.state, "combinaison-elementaire") {
         result.state = add_abundance(result.state, 15).state;
+    }
+
+    if was_active {
+        if let Some(heart_rune) = get_removed_heart_rune(&result.state, &[last_generated_rune]) {
+            let heart_result =
+                apply_generated_rune_internal(result.state, result.resources, heart_rune, false);
+            result.state = heart_result.state;
+            result.resources = heart_result.resources;
+        }
     }
 
     result
@@ -5180,7 +5293,14 @@ pub fn apply_feu_follet_place(mut state: HuppermageState) -> FeuFolletResult {
     }
 }
 
-pub fn apply_feu_follet_recover(mut state: HuppermageState) -> FeuFolletResult {
+pub fn apply_feu_follet_recover(state: HuppermageState) -> FeuFolletResult {
+    apply_feu_follet_recover_with_resources(state, ResourcePool::default()).0
+}
+
+fn apply_feu_follet_recover_with_resources(
+    mut state: HuppermageState,
+    mut resources: ResourcePool,
+) -> (FeuFolletResult, ResourcePool) {
     let before = state.feu_follets_active;
     let should_recover_rune = !has_passive(&state, "plenitude");
     let recovered_runes = if state.feu_follet_stored_runes.is_empty() {
@@ -5201,20 +5321,16 @@ pub fn apply_feu_follet_recover(mut state: HuppermageState) -> FeuFolletResult {
     let mut recovered_rune_ap_gain = 0;
     let mut recovered_rune_bq_gain = 0;
 
-    if should_recover_rune {
-        let generation = apply_recovered_runes_as_generated(state, &recovered_runes);
-        state = generation.state;
-        recovered_rune_ap_gain += generation.ap_gain;
-        recovered_rune_bq_gain += generation.bq_gain;
-
-        if let Some(rune) = recovered_last_rune.clone() {
-            let generation = apply_recovered_runes_as_generated(state, std::slice::from_ref(&rune));
+    if should_recover_rune && !recovered_runes.is_empty() {
+        for rune in sort_runes_for_application(&recovered_runes) {
+            let before_ap = resources.ap;
+            let before_bq = resources.bq;
+            let generation = apply_generated_rune_internal(state, resources, rune, true);
             state = generation.state;
-            recovered_rune_ap_gain += generation.ap_gain;
-            recovered_rune_bq_gain += generation.bq_gain;
+            resources = generation.resources;
+            recovered_rune_ap_gain += positive_delta(resources.ap - before_ap) as u32;
+            recovered_rune_bq_gain += positive_delta(resources.bq - before_bq) as i32;
         }
-    } else {
-        state = add_abundance(state, 25).state;
     }
 
     let recovered_any = !recovered_runes.is_empty() || recovered_last_rune.is_some();
@@ -5225,18 +5341,35 @@ pub fn apply_feu_follet_recover(mut state: HuppermageState) -> FeuFolletResult {
     };
     state.temporary_unlocked_spell_element = unlocked_rune.as_ref().map(rune_to_element);
 
+    if should_recover_rune {
+        if let Some(rune) = recovered_last_rune {
+            let before_ap = resources.ap;
+            let before_bq = resources.bq;
+            let generation = apply_generated_rune_internal(state, resources, rune, false);
+            state = generation.state;
+            resources = generation.resources;
+            recovered_rune_ap_gain += positive_delta(resources.ap - before_ap) as u32;
+            recovered_rune_bq_gain += positive_delta(resources.bq - before_bq) as i32;
+        }
+    } else {
+        resources.ap += 2.0;
+    }
+
     let unlocked_element = state.temporary_unlocked_spell_element.clone();
     let after = state.feu_follets_active;
-    FeuFolletResult {
-        state,
-        operation: "recovered".to_string(),
-        before,
-        after,
-        recovered_runes: sort_runes_for_application(&recovered_runes),
-        recovered_rune_ap_gain,
-        recovered_rune_bq_gain,
-        temporary_unlocked_spell_element: unlocked_element,
-    }
+    (
+        FeuFolletResult {
+            state,
+            operation: "recovered".to_string(),
+            before,
+            after,
+            recovered_runes: sort_runes_for_application(&recovered_runes),
+            recovered_rune_ap_gain,
+            recovered_rune_bq_gain,
+            temporary_unlocked_spell_element: unlocked_element,
+        },
+        resources,
+    )
 }
 
 pub fn apply_turn_end_bq(
@@ -5846,53 +5979,6 @@ fn get_feu_follet_stored_rune(state: &HuppermageState) -> Option<Rune> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
-struct RecoveredRuneGeneration {
-    state: HuppermageState,
-    ap_gain: u32,
-    bq_gain: i32,
-}
-
-fn apply_recovered_runes_as_generated(
-    mut state: HuppermageState,
-    recovered_runes: &[Rune],
-) -> RecoveredRuneGeneration {
-    let sorted_runes = sort_runes_for_application(recovered_runes);
-    if sorted_runes.is_empty() {
-        return RecoveredRuneGeneration {
-            state,
-            ap_gain: 0,
-            bq_gain: 0,
-        };
-    }
-
-    let mut ap_gain = 0;
-    let mut bq_gain = 0;
-    for rune in &sorted_runes {
-        if is_rune_active(&state.runes.active, rune) {
-            continue;
-        }
-
-        if !is_rune_active(&state.rune_ap_gains_this_turn, rune) {
-            set_rune_active(&mut state.rune_ap_gains_this_turn, rune, true);
-            ap_gain += 1;
-        }
-
-        set_rune_active(&mut state.runes.active, rune, true);
-        state.runes.last_generated_rune = Some(rune.clone());
-
-        if has_passive(&state, "antithese") {
-            bq_gain += apply_bq_gain_multiplier(20, &state);
-        }
-    }
-
-    RecoveredRuneGeneration {
-        state,
-        ap_gain,
-        bq_gain,
-    }
-}
-
 fn sort_runes_for_application(runes: &[Rune]) -> Vec<Rune> {
     rune_application_order()
         .into_iter()
@@ -6010,6 +6096,15 @@ fn rune_to_heart(rune: &Rune) -> HuppermageHeart {
         Rune::Aquatic => HuppermageHeart::Water,
         Rune::Telluric => HuppermageHeart::Earth,
         Rune::Aerial => HuppermageHeart::Air,
+    }
+}
+
+fn heart_to_rune(heart: &HuppermageHeart) -> Rune {
+    match heart {
+        HuppermageHeart::Fire => Rune::Incandescent,
+        HuppermageHeart::Water => Rune::Aquatic,
+        HuppermageHeart::Earth => Rune::Telluric,
+        HuppermageHeart::Air => Rune::Aerial,
     }
 }
 
@@ -6709,6 +6804,15 @@ fn evaluate_and_track_hybrid_candidate(
         accumulator.valid_candidates += 1;
         if let Some(score) = evaluation.score.clone() {
             let id = encode_candidate(&candidate);
+            let causal_bonus = causal_exploration_bonus(evaluation.causal_trace.as_ref());
+            if causal_bonus > 0.0 {
+                increment_metric(&mut accumulator.metrics, "causalExplorationCandidates", 1);
+                increment_metric(
+                    &mut accumulator.metrics,
+                    "causalMotifLinks",
+                    causal_motif_link_count(evaluation.causal_trace.as_ref()),
+                );
+            }
             add_scored_top_candidate(
                 &mut accumulator.top_candidates,
                 max_candidates,
@@ -6731,7 +6835,7 @@ fn evaluate_and_track_hybrid_candidate(
                 population_entry: Some(HybridPopulationEntry {
                     id,
                     candidate,
-                    score: score.score,
+                    score: score.score + causal_bonus,
                     valid: true,
                 }),
                 improved,
@@ -7360,7 +7464,12 @@ fn project_domain_seed_turn(
 fn huppermage_domain_seed_candidates() -> Vec<DomainSeedCandidate> {
     vec![
         DomainSeedCandidate {
-            passive_ids: vec!["carnage", "extension-des-sens", "plenitude", "profusion-runique"],
+            passive_ids: vec![
+                "carnage",
+                "extension-des-sens",
+                "plenitude",
+                "profusion-runique",
+            ],
             turns: vec![
                 vec![
                     "halo-chatoyant",
@@ -7397,7 +7506,12 @@ fn huppermage_domain_seed_candidates() -> Vec<DomainSeedCandidate> {
             min_passive_count: None,
         },
         DomainSeedCandidate {
-            passive_ids: vec!["carnage", "extension-des-sens", "plenitude", "profusion-runique"],
+            passive_ids: vec![
+                "carnage",
+                "extension-des-sens",
+                "plenitude",
+                "profusion-runique",
+            ],
             turns: vec![
                 vec![
                     "eboulement",
@@ -7434,7 +7548,12 @@ fn huppermage_domain_seed_candidates() -> Vec<DomainSeedCandidate> {
             min_passive_count: None,
         },
         DomainSeedCandidate {
-            passive_ids: vec!["carnage", "extension-des-sens", "plenitude", "profusion-runique"],
+            passive_ids: vec![
+                "carnage",
+                "extension-des-sens",
+                "plenitude",
+                "profusion-runique",
+            ],
             turns: vec![
                 vec![
                     "halo-chatoyant",
@@ -7471,7 +7590,12 @@ fn huppermage_domain_seed_candidates() -> Vec<DomainSeedCandidate> {
             min_passive_count: None,
         },
         DomainSeedCandidate {
-            passive_ids: vec!["carnage", "extension-des-sens", "plenitude", "profusion-runique"],
+            passive_ids: vec![
+                "carnage",
+                "extension-des-sens",
+                "plenitude",
+                "profusion-runique",
+            ],
             turns: vec![
                 vec![
                     "halo-chatoyant",
@@ -7498,7 +7622,12 @@ fn huppermage_domain_seed_candidates() -> Vec<DomainSeedCandidate> {
             min_passive_count: None,
         },
         DomainSeedCandidate {
-            passive_ids: vec!["carnage", "extension-des-sens", "plenitude", "profusion-runique"],
+            passive_ids: vec![
+                "carnage",
+                "extension-des-sens",
+                "plenitude",
+                "profusion-runique",
+            ],
             turns: vec![
                 vec![
                     "eboulement",
@@ -7523,7 +7652,12 @@ fn huppermage_domain_seed_candidates() -> Vec<DomainSeedCandidate> {
             min_passive_count: Some(3),
         },
         DomainSeedCandidate {
-            passive_ids: vec!["carnage", "extension-des-sens", "plenitude", "profusion-runique"],
+            passive_ids: vec![
+                "carnage",
+                "extension-des-sens",
+                "plenitude",
+                "profusion-runique",
+            ],
             turns: vec![
                 vec![
                     "eboulement",
@@ -7548,7 +7682,12 @@ fn huppermage_domain_seed_candidates() -> Vec<DomainSeedCandidate> {
             min_passive_count: None,
         },
         DomainSeedCandidate {
-            passive_ids: vec!["carnage", "extension-des-sens", "plenitude", "profusion-runique"],
+            passive_ids: vec![
+                "carnage",
+                "extension-des-sens",
+                "plenitude",
+                "profusion-runique",
+            ],
             turns: vec![
                 vec![
                     "eboulement",
@@ -7600,7 +7739,12 @@ fn huppermage_domain_seed_candidates() -> Vec<DomainSeedCandidate> {
             min_passive_count: None,
         },
         DomainSeedCandidate {
-            passive_ids: vec!["carnage", "extension-des-sens", "plenitude", "profusion-runique"],
+            passive_ids: vec![
+                "carnage",
+                "extension-des-sens",
+                "plenitude",
+                "profusion-runique",
+            ],
             turns: vec![
                 vec![
                     "halo-chatoyant",
@@ -7887,6 +8031,7 @@ fn evaluate_candidate_with_catalog<'a>(
                 available: None,
                 scope: None,
             }),
+            None,
         ));
     }
 
@@ -7915,6 +8060,8 @@ fn evaluate_candidate_with_catalog<'a>(
     let mut total_damage = 0.0;
     let mut damage_by_resolved_element = DamageByElement::default();
     let mut sublimation_state = create_sublimation_combat_state(&request.character);
+    let mut causal_events = Vec::new();
+    let mut action_ordinal = 0_u32;
 
     for (turn_index, turn) in candidate.plan.turns.iter().enumerate() {
         let mut turn_damage = 0.0;
@@ -7935,6 +8082,7 @@ fn evaluate_candidate_with_catalog<'a>(
                         turn_index as u32,
                         &create_unknown_spell_violation(&action.spell_id, action_index as u32),
                     )),
+                    None,
                 ));
             };
 
@@ -7966,9 +8114,12 @@ fn evaluate_candidate_with_catalog<'a>(
                     huppermage,
                     None,
                     Some(violation_with_turn(turn_index as u32, &violation)),
+                    None,
                 ));
             }
 
+            let resources_before_action = resources;
+            let huppermage_before_action = huppermage.clone();
             let effective_cost =
                 resolve_search_effective_cost(spell, &huppermage, action, &casts_by_spell_id);
             let resource_validation = validate_resource_cost(
@@ -7987,6 +8138,7 @@ fn evaluate_candidate_with_catalog<'a>(
                     huppermage,
                     None,
                     Some(resource_violation_with_turn(turn_index as u32, &violation)),
+                    None,
                 ));
             }
             resources = resource_validation.resources_after_cost;
@@ -8019,10 +8171,10 @@ fn evaluate_candidate_with_catalog<'a>(
                         huppermage = apply_feu_follet_place(huppermage).state;
                     }
                     Some(ActionTargetKind::FeuFollet) => {
-                        let recovery = apply_feu_follet_recover(huppermage);
-                        resources.ap += f64::from(recovery.recovered_rune_ap_gain);
-                        resources.bq += f64::from(recovery.recovered_rune_bq_gain);
-                        huppermage = recovery.state;
+                        let (feu_follet, next_resources) =
+                            apply_feu_follet_recover_with_resources(huppermage, resources);
+                        huppermage = feu_follet.state;
+                        resources = next_resources;
                     }
                     _ => {}
                 }
@@ -8056,6 +8208,7 @@ fn evaluate_candidate_with_catalog<'a>(
             );
 
             let mut action_damage = 0.0;
+            let mut trace_damage = 0.0;
             if !is_empty_cell_action(action) {
                 for effect in collect_search_damage_effects(spell) {
                     let mut damage_stats = action_stats.clone();
@@ -8064,6 +8217,7 @@ fn evaluate_candidate_with_catalog<'a>(
                     }
                     let damage = compute_raw_damage(&damage_stats, &effect, action_context.clone());
                     action_damage = round_damage(action_damage + damage.result);
+                    trace_damage = round_damage(trace_damage + damage.result);
                     turn_damage = round_damage(turn_damage + damage.result);
                     damage_by_resolved_element = add_resolved_element_damage(
                         damage_by_resolved_element,
@@ -8083,6 +8237,7 @@ fn evaluate_candidate_with_catalog<'a>(
             for (element, damage) in
                 collect_search_delayed_damage(spell, &huppermage, action, action_damage)
             {
+                trace_damage = round_damage(trace_damage + damage);
                 turn_damage = round_damage(turn_damage + damage);
                 damage_by_resolved_element =
                     add_resolved_element_damage(damage_by_resolved_element, &element, damage);
@@ -8091,6 +8246,7 @@ fn evaluate_candidate_with_catalog<'a>(
             if let Some(halo_damage) = apply_halo_chatoyant_damage(spell, &mut huppermage, action) {
                 let damage =
                     compute_raw_damage(&action_stats, &halo_damage, action_context.clone());
+                trace_damage = round_damage(trace_damage + damage.result);
                 turn_damage = round_damage(turn_damage + damage.result);
                 damage_by_resolved_element = add_resolved_element_damage(
                     damage_by_resolved_element,
@@ -8103,6 +8259,12 @@ fn evaluate_candidate_with_catalog<'a>(
             if !consumed_runes.is_empty() {
                 let consumed_count = consumed_runes.len();
                 huppermage = consume_runes(huppermage, &consumed_runes);
+                if !is_rune_bq_blocked_by_extension_des_sens(&huppermage) {
+                    resources.bq += f64::from(apply_bq_gain_multiplier(
+                        (consumed_count as i32) * 25,
+                        &huppermage,
+                    ));
+                }
                 huppermage = add_abundance(huppermage, (consumed_count as i32) * 15).state;
             }
 
@@ -8137,6 +8299,11 @@ fn evaluate_candidate_with_catalog<'a>(
                     resources = generation.resources;
                 }
             }
+            if let Some(heart_rune) = get_removed_heart_rune(&huppermage, &consumed_runes) {
+                let generation = apply_generated_rune(huppermage, resources, heart_rune);
+                huppermage = generation.state;
+                resources = generation.resources;
+            }
             store_sublimation_after_action(
                 candidate,
                 spell,
@@ -8144,6 +8311,18 @@ fn evaluate_candidate_with_catalog<'a>(
                 action_damage,
                 &mut sublimation_state,
             );
+            causal_events.push(create_causal_trace_event(
+                turn_index as u32,
+                action_index as u32,
+                action_ordinal,
+                action,
+                resources_before_action,
+                resources,
+                &huppermage_before_action,
+                &huppermage,
+                trace_damage,
+            ));
+            action_ordinal += 1;
         }
 
         let turn_end = apply_turn_end_bq(huppermage, resources);
@@ -8186,6 +8365,7 @@ fn evaluate_candidate_with_catalog<'a>(
             read_score_criterion(request),
         )),
         None,
+        Some(create_causal_trace(causal_events)),
     ))
 }
 
@@ -8218,6 +8398,284 @@ pub fn evaluate_candidate_batch(
         .collect()
 }
 
+fn create_causal_trace(events: Vec<CausalTraceEvent>) -> CausalTrace {
+    let links = create_causal_trace_links(&events);
+    CausalTrace { events, links }
+}
+
+fn causal_exploration_bonus(trace: Option<&CausalTrace>) -> f64 {
+    let Some(trace) = trace else {
+        return 0.0;
+    };
+
+    let motif_count = causal_motif_features(trace).len();
+    if motif_count == 0 {
+        0.0
+    } else {
+        (motif_count.min(5) as f64) * 0.001
+    }
+}
+
+fn causal_motif_link_count(trace: Option<&CausalTrace>) -> u32 {
+    trace
+        .map(causal_motif_features)
+        .map(|features| features.len() as u32)
+        .unwrap_or(0)
+}
+
+fn causal_motif_features(trace: &CausalTrace) -> BTreeSet<String> {
+    trace
+        .links
+        .iter()
+        .filter(|link| {
+            (link.cause_feature.starts_with("resource.")
+                || link.cause_feature.starts_with("class.")
+                || link.cause_feature.starts_with("option."))
+                && (link.consequence_feature.starts_with("damage.")
+                    || link.consequence_feature.starts_with("resource.")
+                    || link.consequence_feature.starts_with("class.")
+                    || link.consequence_feature.starts_with("option."))
+        })
+        .map(|link| format!("{}->{}", link.cause_feature, link.consequence_feature))
+        .collect()
+}
+
+fn create_causal_trace_event(
+    turn_index: u32,
+    action_index: u32,
+    action_ordinal: u32,
+    action: &CandidateAction,
+    resources_before: ResourcePool,
+    resources_after: ResourcePool,
+    huppermage_before: &HuppermageState,
+    huppermage_after: &HuppermageState,
+    damage: f64,
+) -> CausalTraceEvent {
+    let before_features = collect_huppermage_state_features(huppermage_before);
+    let after_features = collect_huppermage_state_features(huppermage_after);
+    let states_created = after_features
+        .difference(&before_features)
+        .cloned()
+        .collect::<Vec<_>>();
+    let states_removed = before_features
+        .difference(&after_features)
+        .cloned()
+        .collect::<Vec<_>>();
+    let before_options = collect_huppermage_options(huppermage_before);
+    let after_options = collect_huppermage_options(huppermage_after);
+    let options_unlocked = after_options
+        .difference(&before_options)
+        .cloned()
+        .collect::<Vec<_>>();
+    let options_consumed = before_options
+        .difference(&after_options)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    CausalTraceEvent {
+        turn_index,
+        action_index,
+        action_ordinal,
+        spell_id: action.spell_id.clone(),
+        target: action.target.as_ref().map(|target| target.kind.clone()),
+        produced_resources: resource_gain(resources_before, resources_after),
+        consumed_resources: resource_loss(resources_before, resources_after),
+        states_created,
+        states_removed,
+        options_unlocked,
+        options_consumed,
+        damage,
+    }
+}
+
+fn create_causal_trace_links(events: &[CausalTraceEvent]) -> Vec<CausalTraceLink> {
+    let mut links = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for cause in events {
+        let cause_features = causal_producer_features(cause);
+        if cause_features.is_empty() {
+            continue;
+        }
+
+        for consequence in events {
+            if consequence.action_ordinal <= cause.action_ordinal {
+                continue;
+            }
+
+            for cause_feature in &cause_features {
+                for consequence_feature in causal_consequence_features(consequence) {
+                    let key = format!(
+                        "{}|{}|{}|{}",
+                        cause.action_ordinal,
+                        consequence.action_ordinal,
+                        cause_feature,
+                        consequence_feature
+                    );
+                    if !seen.insert(key) {
+                        continue;
+                    }
+                    links.push(CausalTraceLink {
+                        cause_feature: cause_feature.clone(),
+                        consequence_feature,
+                        cause_turn_index: cause.turn_index,
+                        cause_action_index: cause.action_index,
+                        consequence_turn_index: consequence.turn_index,
+                        consequence_action_index: consequence.action_index,
+                        distance_actions: consequence.action_ordinal - cause.action_ordinal,
+                        distance_turns: consequence.turn_index.saturating_sub(cause.turn_index),
+                    });
+                }
+            }
+        }
+    }
+
+    links
+}
+
+fn causal_producer_features(event: &CausalTraceEvent) -> Vec<String> {
+    let mut features = resource_features(&event.produced_resources, 1.0);
+    features.extend(event.states_created.iter().cloned());
+    features.extend(event.options_unlocked.iter().cloned());
+    features
+}
+
+fn causal_consequence_features(event: &CausalTraceEvent) -> Vec<String> {
+    let mut features = resource_features(&event.consumed_resources, -1.0);
+    features.extend(resource_features(&event.produced_resources, 1.0));
+    features.extend(event.states_removed.iter().cloned());
+    features.extend(event.states_created.iter().cloned());
+    features.extend(event.options_consumed.iter().cloned());
+    features.extend(event.options_unlocked.iter().cloned());
+    if event.damage > 0.0 {
+        features.push(format!(
+            "damage.total:+{}",
+            format_feature_amount(event.damage)
+        ));
+    }
+    features
+}
+
+fn resource_gain(before: ResourcePool, after: ResourcePool) -> ResourcePool {
+    ResourcePool {
+        ap: positive_delta(after.ap - before.ap),
+        mp: positive_delta(after.mp - before.mp),
+        wp: positive_delta(after.wp - before.wp),
+        bq: positive_delta(after.bq - before.bq),
+    }
+}
+
+fn resource_loss(before: ResourcePool, after: ResourcePool) -> ResourcePool {
+    ResourcePool {
+        ap: positive_delta(before.ap - after.ap),
+        mp: positive_delta(before.mp - after.mp),
+        wp: positive_delta(before.wp - after.wp),
+        bq: positive_delta(before.bq - after.bq),
+    }
+}
+
+fn positive_delta(delta: f64) -> f64 {
+    if delta > 0.000_001 {
+        round_damage(delta)
+    } else {
+        0.0
+    }
+}
+
+fn resource_features(resources: &ResourcePool, sign: f64) -> Vec<String> {
+    [
+        ("ap", resources.ap),
+        ("mp", resources.mp),
+        ("wp", resources.wp),
+        ("bq", resources.bq),
+    ]
+    .into_iter()
+    .filter(|(_, amount)| *amount > 0.0)
+    .map(|(resource, amount)| {
+        let sign_prefix = if sign >= 0.0 { "+" } else { "-" };
+        format!(
+            "resource.{resource}:{sign_prefix}{}",
+            format_feature_amount(amount)
+        )
+    })
+    .collect()
+}
+
+fn format_feature_amount(amount: f64) -> String {
+    if (amount.fract()).abs() < 0.000_001 {
+        format!("{}", amount as i64)
+    } else {
+        format!("{amount:.2}")
+    }
+}
+
+fn collect_huppermage_state_features(state: &HuppermageState) -> BTreeSet<String> {
+    let mut features = BTreeSet::new();
+    for rune in active_rune_names(&state.runes.active) {
+        features.insert(format!("class.rune.{rune}"));
+    }
+    if state.runes.last_generated_rune.is_some() {
+        features.insert("class.rune.lastGenerated".to_string());
+    }
+    if state.abundance_level > 0 {
+        features.insert("class.abundance".to_string());
+    }
+    if state.feu_follets_active > 0 {
+        features.insert("class.feuFollet.active".to_string());
+    }
+    if !state.feu_follet_stored_runes.is_empty()
+        || state
+            .feu_follet_stored_last_runes
+            .iter()
+            .any(Option::is_some)
+    {
+        features.insert("class.feuFollet.storedRunes".to_string());
+    }
+    if state.active_heart.is_some() {
+        features.insert("class.heart.active".to_string());
+    }
+    if state.stored_bq > 0 {
+        features.insert("class.storedBq".to_string());
+    }
+    features
+}
+
+fn collect_huppermage_options(state: &HuppermageState) -> BTreeSet<String> {
+    let mut options = BTreeSet::new();
+    if let Some(element) = &state.temporary_unlocked_spell_element {
+        options.insert(format!("option.spellElement.{}", element_key(element)));
+    }
+    options
+}
+
+fn active_rune_names(runes: &RuneTracker) -> Vec<&'static str> {
+    let mut names = Vec::new();
+    if runes.incandescent {
+        names.push("incandescent");
+    }
+    if runes.aquatic {
+        names.push("aquatic");
+    }
+    if runes.telluric {
+        names.push("telluric");
+    }
+    if runes.aerial {
+        names.push("aerial");
+    }
+    names
+}
+
+fn element_key(element: &Element) -> &'static str {
+    match element {
+        Element::Fire => "fire",
+        Element::Water => "water",
+        Element::Earth => "earth",
+        Element::Air => "air",
+        Element::Light => "light",
+        Element::Neutral => "neutral",
+    }
+}
+
 fn create_candidate_evaluation_result(
     candidate_id: &str,
     valid: bool,
@@ -8226,6 +8684,7 @@ fn create_candidate_evaluation_result(
     final_huppermage: HuppermageState,
     score: Option<CandidateScoreBreakdown>,
     first_violation: Option<CandidateEvaluationViolation>,
+    causal_trace: Option<CausalTrace>,
 ) -> CandidateEvaluationResult {
     CandidateEvaluationResult {
         candidate_id: candidate_id.to_string(),
@@ -8235,6 +8694,7 @@ fn create_candidate_evaluation_result(
         final_huppermage,
         score,
         first_violation,
+        causal_trace,
     }
 }
 
@@ -8655,7 +9115,7 @@ mod tests {
         let evaluation = evaluate_candidate(&request, &candidate, "candidate:hit")
             .expect("candidate should evaluate");
 
-        assert!(evaluation.valid);
+        assert!(evaluation.valid, "{evaluation:?}");
         assert_eq!(evaluation.candidate_id, "candidate:hit");
         assert_eq!(evaluation.total_damage, 40.0);
         assert_eq!(evaluation.final_resources.ap, 5.0);
@@ -8672,6 +9132,278 @@ mod tests {
             })
         );
         assert!(evaluation.first_violation.is_none());
+    }
+
+    #[test]
+    fn causal_trace_links_utility_resource_setup_to_distant_payoff() {
+        let request = parse_optimizer_request(
+            r#"{
+              "schemaVersion":1,
+              "engine":"hybrid",
+              "seed":"causal-trace",
+              "duration":3,
+              "iterations":10,
+              "maxActionsPerTurn":2,
+              "maxPassiveCount":0,
+              "availableSpellIds":["setup","burst"],
+              "availablePassiveIds":[],
+              "catalog":[
+                {
+                  "kind":"spell",
+                  "id":"setup",
+                  "cost":{"ap":1},
+                  "effects":[{"type":"resourceDelta","resource":"wp","amount":1}],
+                  "constraints":[],
+                  "tags":[]
+                },
+                {
+                  "kind":"spell",
+                  "id":"burst",
+                  "cost":{"ap":1,"wp":1},
+                  "effects":[{"type":"damage","base":100,"element":"fire"}],
+                  "constraints":[],
+                  "tags":["burst"]
+                }
+              ],
+              "character":{"id":"test","resources":{"ap":6,"mp":3,"wp":0,"bq":100}}
+            }"#,
+        )
+        .expect("request should parse");
+        let candidate = OptimizerCandidateInput {
+            passive_ids: vec![],
+            sublimation_ids: vec![],
+            plan: CandidatePlan {
+                turns: vec![
+                    CandidateTurn {
+                        actions: vec![action("setup")],
+                    },
+                    CandidateTurn { actions: vec![] },
+                    CandidateTurn {
+                        actions: vec![action("burst")],
+                    },
+                ],
+            },
+        };
+
+        let evaluation = evaluate_candidate(&request, &candidate, "setup-burst")
+            .expect("candidate should evaluate");
+
+        assert!(evaluation.valid, "{evaluation:?}");
+        assert_eq!(evaluation.total_damage, 100.0);
+        let trace = evaluation.causal_trace.expect("trace should be recorded");
+        assert_eq!(trace.events.len(), 2);
+        assert_eq!(trace.events[0].spell_id, "setup");
+        assert_eq!(trace.events[0].produced_resources.wp, 1.0);
+        assert_eq!(trace.events[1].spell_id, "burst");
+        assert_eq!(trace.events[1].consumed_resources.wp, 1.0);
+        assert_eq!(trace.events[1].damage, 100.0);
+        assert!(trace.links.iter().any(|link| {
+            link.cause_feature == "resource.wp:+1"
+                && link.consequence_feature == "damage.total:+100"
+                && link.distance_turns == 2
+                && link.distance_actions == 1
+        }));
+    }
+
+    #[test]
+    fn causal_exploration_bonus_guides_population_without_changing_top_score() {
+        let request = parse_optimizer_request(
+            r#"{
+              "schemaVersion":1,
+              "engine":"hybrid",
+              "seed":"causal-selection",
+              "duration":3,
+              "iterations":10,
+              "maxActionsPerTurn":2,
+              "maxPassiveCount":0,
+              "availableSpellIds":["setup","burst"],
+              "availablePassiveIds":[],
+              "catalog":[
+                {
+                  "kind":"spell",
+                  "id":"setup",
+                  "cost":{"ap":1},
+                  "effects":[{"type":"resourceDelta","resource":"wp","amount":1}],
+                  "constraints":[],
+                  "tags":[]
+                },
+                {
+                  "kind":"spell",
+                  "id":"burst",
+                  "cost":{"ap":1,"wp":1},
+                  "effects":[{"type":"damage","base":100,"element":"fire"}],
+                  "constraints":[],
+                  "tags":["burst"]
+                }
+              ],
+              "character":{"id":"test","resources":{"ap":6,"mp":3,"wp":0,"bq":100}}
+            }"#,
+        )
+        .expect("request should parse");
+        let candidate = OptimizerCandidateInput {
+            passive_ids: vec![],
+            sublimation_ids: vec![],
+            plan: CandidatePlan {
+                turns: vec![
+                    CandidateTurn {
+                        actions: vec![action("setup")],
+                    },
+                    CandidateTurn { actions: vec![] },
+                    CandidateTurn {
+                        actions: vec![action("burst")],
+                    },
+                ],
+            },
+        };
+        let catalog = read_search_catalog(&request).expect("catalog should parse");
+        let spells_by_id = catalog
+            .iter()
+            .filter(|entry| entry.kind == "spell")
+            .map(|entry| (entry.id.as_str(), entry))
+            .collect::<BTreeMap<_, _>>();
+        let mut cache = DirectEvaluatorCache::new(16);
+        let mut accumulator = HybridSearchAccumulator {
+            attempts: 0,
+            valid_candidates: 0,
+            invalid_candidates: 0,
+            top_candidates: vec![],
+            metrics: BTreeMap::new(),
+            resume_state: None,
+        };
+
+        let tracked = evaluate_and_track_hybrid_candidate(
+            &request,
+            candidate,
+            &mut accumulator,
+            10,
+            &catalog,
+            &spells_by_id,
+            &mut cache,
+        )
+        .expect("candidate should track");
+
+        assert_eq!(accumulator.top_candidates[0].score.score, 100.0);
+        let population_entry = tracked
+            .population_entry
+            .expect("valid candidate should enter population");
+        assert!(population_entry.score > 100.0);
+        assert!(population_entry.score < 100.01);
+        assert_eq!(
+            accumulator.metrics.get("causalExplorationCandidates"),
+            Some(&1)
+        );
+    }
+
+    #[test]
+    fn feu_follet_place_recover_burst_line_uses_generated_target_variants() {
+        let request = parse_optimizer_request(
+            r#"{
+              "schemaVersion":1,
+              "engine":"hybrid",
+              "seed":"feu-follet-validation",
+              "duration":1,
+              "iterations":20,
+              "maxActionsPerTurn":4,
+              "maxPassiveCount":1,
+              "availableSpellIds":["fire-rune","feu-follet","air-burst"],
+              "availablePassiveIds":["sauvegarde-runique"],
+              "catalog":[
+                {
+                  "kind":"spell",
+                  "id":"fire-rune",
+                  "element":"fire",
+                  "cost":{"ap":1},
+                  "effects":[],
+                  "constraints":[],
+                  "tags":[]
+                },
+                {
+                  "kind":"spell",
+                  "id":"feu-follet",
+                  "cost":{"ap":1},
+                  "effects":[
+                    {
+                      "type":"conditional",
+                      "condition":{"type":"targetIs","value":"emptyCell"},
+                      "effects":[{"type":"tag","tag":"placesClassState","value":"feuFollet"}]
+                    },
+                    {
+                      "type":"conditional",
+                      "condition":{"type":"targetIs","value":"feuFollet"},
+                      "effects":[{"type":"tag","tag":"recoversClassState","value":"feuFollet"}]
+                    }
+                  ],
+                  "constraints":[],
+                  "tags":[]
+                },
+                {
+                  "kind":"spell",
+                  "id":"air-burst",
+                  "element":"air",
+                  "cost":{"ap":1},
+                  "effects":[{"type":"damage","base":100,"element":"air"}],
+                  "constraints":[],
+                  "tags":["burst"]
+                },
+                {
+                  "kind":"passive",
+                  "id":"sauvegarde-runique",
+                  "effects":[],
+                  "constraints":[],
+                  "tags":[]
+                }
+              ],
+              "character":{"id":"test","resources":{"ap":3,"mp":3,"wp":0,"bq":100}}
+            }"#,
+        )
+        .expect("request should parse");
+        let catalog = read_search_catalog(&request).expect("catalog should parse");
+        let action_keys = get_search_actions(&request, &catalog)
+            .iter()
+            .map(encode_candidate_action)
+            .collect::<Vec<_>>();
+        assert!(action_keys.contains(&"feu-follet@emptyCell".to_string()));
+        assert!(action_keys.contains(&"feu-follet@feuFollet".to_string()));
+
+        let candidate = OptimizerCandidateInput {
+            passive_ids: vec!["sauvegarde-runique".to_string()],
+            sublimation_ids: vec![],
+            plan: CandidatePlan {
+                turns: vec![CandidateTurn {
+                    actions: vec![
+                        action("fire-rune"),
+                        empty_cell_action("feu-follet"),
+                        CandidateAction {
+                            spell_id: "feu-follet".to_string(),
+                            target: Some(CandidateActionTarget {
+                                kind: ActionTargetKind::FeuFollet,
+                            }),
+                            context: None,
+                        },
+                        action("air-burst"),
+                    ],
+                }],
+            },
+        };
+
+        let evaluation = evaluate_candidate(&request, &candidate, "feu-follet-line")
+            .expect("candidate should evaluate");
+
+        assert!(evaluation.valid, "{evaluation:?}");
+        assert_eq!(evaluation.total_damage, 120.0);
+        assert_eq!(
+            evaluation.final_huppermage.temporary_unlocked_spell_element,
+            Some(Element::Air)
+        );
+        let trace = evaluation.causal_trace.expect("trace should be recorded");
+        assert!(trace.links.iter().any(|link| {
+            link.cause_feature == "class.feuFollet.active"
+                && link.consequence_feature == "option.spellElement.air"
+        }));
+        assert!(trace.links.iter().any(|link| {
+            link.cause_feature == "option.spellElement.air"
+                && link.consequence_feature == "damage.total:+120"
+        }));
     }
 
     #[test]
@@ -9469,6 +10201,57 @@ mod tests {
             ids.sort();
             ids
         });
+    }
+
+    #[test]
+    fn search_actions_include_target_variants_from_conditional_effects() {
+        let request = parse_optimizer_request(
+            r#"{
+              "schemaVersion":1,
+              "engine":"hybrid",
+              "seed":"target-variants",
+              "duration":1,
+              "iterations":10,
+              "maxActionsPerTurn":3,
+              "maxPassiveCount":0,
+              "availableSpellIds":["utility"],
+              "availablePassiveIds":[],
+              "catalog":[
+                {
+                  "kind":"spell",
+                  "id":"utility",
+                  "cost":{"ap":1},
+                  "effects":[
+                    {
+                      "type":"conditional",
+                      "condition":{"type":"targetIs","value":"emptyCell"},
+                      "effects":[{"type":"tag","tag":"resourceDelta","value":"bq:100"}]
+                    },
+                    {
+                      "type":"conditional",
+                      "condition":{"type":"targetIs","value":"feuFollet"},
+                      "effects":[{"type":"tag","tag":"resourceDelta","value":"ap:2"}]
+                    }
+                  ],
+                  "constraints":[],
+                  "tags":[]
+                }
+              ],
+              "character":{"id":"test","resources":{"ap":6,"mp":3,"wp":2,"bq":100}}
+            }"#,
+        )
+        .expect("request should parse");
+        let catalog = read_search_catalog(&request).expect("catalog should parse");
+
+        let action_keys = get_search_actions(&request, &catalog)
+            .iter()
+            .map(encode_candidate_action)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            action_keys,
+            vec!["utility", "utility@emptyCell", "utility@feuFollet"]
+        );
     }
 
     #[test]
@@ -10532,7 +11315,7 @@ mod tests {
             vec![Rune::Incandescent, Rune::Aquatic, Rune::Telluric]
         );
         assert_eq!(recovered.recovered_rune_ap_gain, 3);
-        assert_eq!(recovered.recovered_rune_bq_gain, 0);
+        assert_eq!(recovered.recovered_rune_bq_gain, 75);
         assert_eq!(
             recovered.state.runes.last_generated_rune,
             Some(Rune::Telluric)

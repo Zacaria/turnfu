@@ -307,7 +307,7 @@ test("uses deterministic beam search for richer action counts", () => {
     "light-hit",
   ]);
   assert.ok((firstRun[0]?.plan.turns[0]?.actions.length ?? 0) > character.resources.ap);
-  assert.equal(firstRun[0]?.score.score, 260);
+  assert.equal(firstRun[0]?.score.score, 266);
 });
 
 test("beam search prefers greater resource use when scores tie", () => {

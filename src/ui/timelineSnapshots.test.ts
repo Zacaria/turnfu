@@ -57,7 +57,7 @@ test("creates one initial snapshot and one snapshot per completed action", () =>
   assert.equal(snapshots[0].totalDamageSoFar, 0);
   assert.equal(snapshots[1].kind, "action");
   assert.equal(snapshots[1].resources.ap, 5);
-  assert.equal(snapshots[1].resources.bq, 20);
+  assert.equal(snapshots[1].resources.bq, 45);
   assert.equal(snapshots[1].totalDamageSoFar, 20);
   assert.equal(snapshots[2].resources.ap, 3);
   assert.equal(snapshots[2].totalDamageSoFar, 44);

@@ -490,11 +490,11 @@ test("updates BQ in state and action breakdown during the turn", () => {
   });
 
   assert.equal(result.valid, true);
-  assert.equal(result.finalState.remainingResources.bq, 35);
+  assert.equal(result.finalState.remainingResources.bq, 85);
   assert.equal(result.breakdown[0].resourceBefore.bq, 0);
-  assert.equal(result.breakdown[0].resourceAfter.bq, 15);
-  assert.equal(result.breakdown[1].resourceBefore.bq, 15);
-  assert.equal(result.breakdown[1].resourceAfter.bq, 35);
+  assert.equal(result.breakdown[0].resourceAfter.bq, 40);
+  assert.equal(result.breakdown[1].resourceBefore.bq, 40);
+  assert.equal(result.breakdown[1].resourceAfter.bq, 85);
 });
 
 test("updates active runes and last generated rune during the turn", () => {
@@ -580,6 +580,39 @@ test("does not grant rune AP or update last generated rune when the rune is alre
   assert.equal(result.finalState.classState.huppermage?.runes.lastGeneratedRune, null);
   assert.equal(result.finalState.classState.huppermage?.runeApGainsThisTurn.incandescent, false);
   assert.equal(result.breakdown[0].appliedEffects.some((effect) => effect.type === "runeGenerated"), false);
+});
+
+test("normal rune generation grants BQ and Abundance only when the rune is absent", () => {
+  const firstGeneration = simulateTurn({
+    catalog: testCatalog,
+    character,
+    sequence: { actions: [{ spellId: "elemental-no-bq-test" }] },
+  });
+
+  assert.equal(firstGeneration.valid, true);
+  assert.equal(firstGeneration.finalState.remainingResources.bq, 25);
+  assert.equal(firstGeneration.finalState.classState.huppermage?.abundanceLevel, 15);
+
+  const repeatedGeneration = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      classState: {
+        huppermage: {
+          runes: {
+            incandescent: true,
+          },
+          lastGeneratedRune: null,
+        },
+      },
+    },
+    sequence: { actions: [{ spellId: "elemental-no-bq-test" }] },
+  });
+
+  assert.equal(repeatedGeneration.valid, true);
+  assert.equal(repeatedGeneration.finalState.remainingResources.bq, 0);
+  assert.equal(repeatedGeneration.finalState.classState.huppermage?.abundanceLevel, 0);
+  assert.equal(repeatedGeneration.finalState.classState.huppermage?.runes.lastGeneratedRune, null);
 });
 
 test("allows rune AP after an initially active rune is consumed then generated", () => {
@@ -669,6 +702,68 @@ test("does not regenerate Disque Luminescent's fire rune when it consumed three 
   assert.equal(result.breakdown[0].appliedEffects.some((effect) => effect.type === "runeGenerated"), false);
 });
 
+test("regenerates the active heart rune after it is consumed with all runes", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      classState: {
+        huppermage: {
+          activeHeart: "fire",
+          runes: {
+            incandescent: true,
+            aquatic: true,
+            telluric: true,
+          },
+          lastGeneratedRune: "incandescent",
+        },
+      },
+    },
+    sequence: { actions: [{ spellId: "disque-luminescent-test" }] },
+  });
+
+  assert.equal(result.valid, true);
+  assert.deepEqual(result.finalState.classState.huppermage?.runes.active, {
+    incandescent: true,
+    aquatic: false,
+    telluric: false,
+    aerial: false,
+  });
+  assert.equal(result.finalState.classState.huppermage?.runes.lastGeneratedRune, "incandescent");
+  assert.equal(result.finalState.remainingResources.bq, 100);
+  assert.equal(result.finalState.classState.huppermage?.abundanceLevel, 60);
+});
+
+test("does not regenerate an absent heart rune when another rune is consumed", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      resources: createResources({ ap: 6, mp: 3, wp: 2, bq: 200 }),
+      classState: {
+        huppermage: {
+          activeHeart: "fire",
+          runes: {
+            aquatic: true,
+            telluric: true,
+          },
+          lastGeneratedRune: "telluric",
+        },
+      },
+    },
+    sequence: { actions: [{ spellId: "runification-test" }] },
+  });
+
+  assert.equal(result.valid, true);
+  assert.deepEqual(result.finalState.classState.huppermage?.runes.active, {
+    incandescent: false,
+    aquatic: false,
+    telluric: false,
+    aerial: false,
+  });
+  assert.notEqual(result.finalState.classState.huppermage?.runes.lastGeneratedRune, "incandescent");
+});
+
 test("keeps existing runes and generates fire when Disque Luminescent starts below three runes", () => {
   const result = simulateTurn({
     catalog: testCatalog,
@@ -717,7 +812,7 @@ test("applies dynamic costs from active runes before paying spell cost", () => {
   });
 
   assert.equal(result.valid, true);
-  assert.equal(result.breakdown[0].resourceAfter.bq, 120);
+  assert.equal(result.breakdown[0].resourceAfter.bq, 170);
   assert.equal(result.finalState.classState.huppermage?.runes.active.incandescent, false);
   assert.equal(result.finalState.classState.huppermage?.runes.active.aquatic, false);
 });
@@ -1051,7 +1146,7 @@ test("Cycle Elementaire rune restoration triggers rune generation rewards", () =
 
   assert.equal(result.valid, true);
   assert.equal(result.finalState.remainingResources.ap, 6);
-  assert.equal(result.finalState.remainingResources.bq, 20);
+  assert.equal(result.finalState.remainingResources.bq, 45);
   assert.equal(result.finalState.classState.huppermage?.runeApGainsThisTurn.incandescent, true);
 });
 
@@ -1089,6 +1184,60 @@ test("Cycle Elementaire transforms the active last generated rune into its oppos
   }
 });
 
+test("Cycle Elementaire force-generates an existing nemesis rune and regenerates each active heart", () => {
+  const cases = [
+    {
+      activeHeart: "fire",
+      lastGeneratedRune: "incandescent",
+      nemesisRune: "aquatic",
+    },
+    {
+      activeHeart: "water",
+      lastGeneratedRune: "aquatic",
+      nemesisRune: "incandescent",
+    },
+    {
+      activeHeart: "earth",
+      lastGeneratedRune: "telluric",
+      nemesisRune: "aerial",
+    },
+    {
+      activeHeart: "air",
+      lastGeneratedRune: "aerial",
+      nemesisRune: "telluric",
+    },
+  ] as const;
+
+  for (const { activeHeart, lastGeneratedRune, nemesisRune } of cases) {
+    const result = simulateTurn({
+      catalog: testCatalog,
+      character: {
+        ...character,
+        classState: {
+          huppermage: {
+            activeHeart,
+            runes: {
+              [lastGeneratedRune]: true,
+              [nemesisRune]: true,
+            },
+            lastGeneratedRune,
+          },
+        },
+      },
+      sequence: {
+        actions: [{ spellId: "cycle-elementaire" }],
+      },
+    });
+
+    assert.equal(result.valid, true);
+    assert.equal(result.finalState.classState.huppermage?.runes.active[lastGeneratedRune], true);
+    assert.equal(result.finalState.classState.huppermage?.runes.active[nemesisRune], true);
+    assert.equal(result.finalState.classState.huppermage?.runes.lastGeneratedRune, lastGeneratedRune);
+    assert.equal(result.finalState.remainingResources.bq, 50);
+    assert.equal(result.finalState.classState.huppermage?.abundanceLevel, 30);
+  }
+});
+
 test("Cycle Elementaire nemesis generation grants Combinaison Elementaire abundance", () => {
   const result = simulateTurn({
     catalog: testCatalog,
@@ -1111,7 +1260,7 @@ test("Cycle Elementaire nemesis generation grants Combinaison Elementaire abunda
 
   assert.equal(result.valid, true);
   assert.equal(result.finalState.classState.huppermage?.runes.active.aquatic, true);
-  assert.equal(result.finalState.classState.huppermage?.abundanceLevel, 15);
+  assert.equal(result.finalState.classState.huppermage?.abundanceLevel, 30);
 });
 
 test("validates catalog target constraints", () => {
@@ -1143,7 +1292,7 @@ test("uses max casts per target instead of max casts per turn when both exist", 
   assert.equal(result.breakdown.length, 2);
   assert.ok(result.breakdown[0]?.damage);
   assert.equal(result.breakdown[1]?.damage, 0);
-  assert.equal(result.finalState.remainingResources.bq, 10);
+  assert.equal(result.finalState.remainingResources.bq, 35);
 });
 
 test("rejects repeated casts on the same target when max casts per target is reached", () => {
@@ -1590,7 +1739,7 @@ test("recovers the rune transferred to a Feu-Follet", () => {
   assert.deepEqual(result.finalState.classState.huppermage?.feuFolletStoredLastRunes, []);
 });
 
-test("Plenitude consumes a Feu-Follet without recovering its rune and grants abundance", () => {
+test("Plenitude consumes a Feu-Follet without recovering its rune and grants AP", () => {
   const result = simulateTurn({
     catalog: testCatalog,
     character: {
@@ -1616,7 +1765,8 @@ test("Plenitude consumes a Feu-Follet without recovering its rune and grants abu
   assert.equal(result.valid, true);
   assert.equal(result.finalState.classState.huppermage?.feuFolletsActive, 0);
   assert.equal(result.finalState.classState.huppermage?.runes.active.incandescent, false);
-  assert.equal(result.finalState.classState.huppermage?.abundanceLevel, 25);
+  assert.equal(result.finalState.remainingResources.ap, 6);
+  assert.equal(result.finalState.classState.huppermage?.abundanceLevel, 0);
   assert.deepEqual(result.finalState.classState.huppermage?.feuFolletStoredLastRunes, []);
 });
 
@@ -1664,6 +1814,43 @@ test("stores and recovers missing runes with Sauvegarde Runique", () => {
   assert.ok(recoverEffect && recoverEffect.type === "feuFolletRunesRecovered");
   assert.deepEqual(recoverEffect.runes, ["incandescent", "aquatic", "telluric"]);
   assert.equal(recoverEffect.lastGeneratedRuneAfter, "telluric");
+});
+
+test("Sauvegarde Runique recovery force-generates stored runes even when already active", () => {
+  const result = simulateTurn({
+    catalog: testCatalog,
+    character: {
+      ...character,
+      classState: {
+        huppermage: {
+          activePassives: ["sauvegarde-runique"],
+          runes: {
+            incandescent: true,
+            aquatic: true,
+            telluric: true,
+            aerial: true,
+          },
+          lastGeneratedRune: "aerial",
+          feuFolletsActive: 1,
+          feuFolletStoredRunes: [["incandescent", "aquatic", "telluric"]],
+        },
+      },
+    },
+    sequence: {
+      actions: [{ spellId: "feu-follet-test", target: { kind: "feuFollet" } }],
+    },
+  });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.finalState.remainingResources.bq, 75);
+  assert.equal(result.finalState.classState.huppermage?.abundanceLevel, 45);
+  assert.equal(result.finalState.classState.huppermage?.runes.lastGeneratedRune, "telluric");
+
+  const generated = result.breakdown[0].appliedEffects.filter((effect) => effect.type === "runeGenerated");
+  assert.deepEqual(
+    generated.map((effect) => effect.type === "runeGenerated" ? effect.rune : null),
+    ["incandescent", "aquatic", "telluric"],
+  );
 });
 
 test("regenerates BQ through Extension des sens in fire and earth hearts", () => {
@@ -2439,7 +2626,7 @@ test("stores secondary elemental sublimation damage for the next matching non-li
   });
 
   assert.equal(result.valid, true);
-  assert.deepEqual(result.breakdown.map((action) => action.damage), [0, 0, 30, 0, 0, 0, 0, 13]);
+  assert.deepEqual(result.breakdown.map((action) => action.damage), [0, 0, 39, 0, 0, 0, 0, 13]);
   assert.equal(result.finalState.sublimationElementalCarryover.fire, 0);
   assert.equal(result.breakdown[2].appliedEffects.some((effect) => effect.type === "sublimationEffect" && effect.status === "applied"), false);
   assert.equal(

@@ -190,7 +190,7 @@ export type AppliedEffect =
       rune: Rune;
       before: boolean;
       after: boolean;
-      source: "elementalSpellCast" | "cycleElementaire";
+      source: "elementalSpellCast" | "cycleElementaire" | "elementalHeart" | "feuFollet";
     }
   | {
       type: "runeConsumed";

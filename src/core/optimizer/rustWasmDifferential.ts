@@ -312,10 +312,10 @@ function runRustFixture(wasm: RustWasmDifferentialWasmExports, fixture: RustWasm
 
   if (fixture.kind === "candidateBatch") {
     const requestJson = JSON.stringify(fixture.request);
-    return JSON.parse(wasm.evaluate_candidate_batch_json(
+    return normalizeCandidateBatchResults(JSON.parse(wasm.evaluate_candidate_batch_json(
       requestJson,
       JSON.stringify(fixture.candidates),
-    ));
+    )));
   }
 
   return JSON.parse(wasm.apply_initial_passive_effects_json(
@@ -323,6 +323,20 @@ function runRustFixture(wasm: RustWasmDifferentialWasmExports, fixture: RustWasm
     JSON.stringify(fixture.resources),
     JSON.stringify(fixture.passives),
   ));
+}
+
+function normalizeCandidateBatchResults(results: unknown): unknown {
+  if (!Array.isArray(results)) {
+    return results;
+  }
+
+  return results.map((result) => {
+    if (!isRecord(result) || !("causalTrace" in result)) {
+      return result;
+    }
+    const { causalTrace: _causalTrace, ...normalizedResult } = result;
+    return normalizedResult;
+  });
 }
 
 function normalizeRustViolation(violation: Record<string, unknown> | null): Record<string, unknown> | null {
