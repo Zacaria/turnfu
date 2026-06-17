@@ -76,6 +76,7 @@ const chunkSize = readIntegerOption("--chunk-size", 100_000);
 const maxRounds = readIntegerOption("--max-rounds", 0);
 const timeboxMs = readIntegerOption("--timebox-ms", 0);
 const reset = process.argv.includes("--reset");
+const promotedSeedReuseEnabled = !process.argv.includes("--no-promoted-seeds");
 const scenario = scenarios.find((entry) => entry.id === scenarioId);
 if (!scenario) {
   throw new Error(`Unknown scenario '${scenarioId}'. Expected one of: ${scenarios.map((entry) => entry.id).join(", ")}.`);
@@ -202,7 +203,9 @@ while (!stopRequested) {
   }
 
   const workerStates = readWorkerStates(db, sessionId);
-  const promotedSeeds = listContinuousSearchPromotedCandidateSeeds(db, sessionId, workerCount * 4);
+  const promotedSeeds = promotedSeedReuseEnabled
+    ? listContinuousSearchPromotedCandidateSeeds(db, sessionId, workerCount * 4)
+    : [];
   const workerSeedSelections = Array.from({ length: workerCount }, (_, workerIndex) =>
     selectWorkerSeedCandidates(promotedSeeds, workerIndex, workerCount, 4)
   );
@@ -257,6 +260,7 @@ while (!stopRequested) {
     invalidCandidates,
     validRate: round(validCandidates / Math.max(1, attempts), 4),
     score: round(bestCandidate?.score.score ?? 0),
+    promotedSeedReuseEnabled,
     promotedSeedCandidates: promotedSeeds.length,
     usedPromotedSeedCandidates: usedPromotedSeedIds.length,
     finalOracleCandidates: topCandidates.length,
