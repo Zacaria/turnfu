@@ -576,6 +576,8 @@ pub struct OptimizerRequest {
     #[serde(default)]
     pub max_candidates: Option<u32>,
     #[serde(default)]
+    pub seed_candidates: Vec<OptimizerCandidateInput>,
+    #[serde(default)]
     pub resume_state: Option<HybridSearchResumeState>,
 }
 
@@ -6660,12 +6662,18 @@ fn create_hybrid_fresh_candidate(
     actions: &[CandidateAction],
     rng: &mut SeededRandom,
     warmup_candidates: &[OptimizerCandidateInput],
+    promoted_warmup_count: usize,
     warmup_index: &mut usize,
     metrics: &mut BTreeMap<String, u32>,
 ) -> OptimizerCandidateInput {
     if let Some(candidate) = warmup_candidates.get(*warmup_index) {
+        let metric = if *warmup_index < promoted_warmup_count {
+            "hybridPromotedSeedCandidates"
+        } else {
+            "hybridDomainWarmupCandidates"
+        };
         *warmup_index += 1;
-        increment_metric(metrics, "hybridDomainWarmupCandidates", 1);
+        increment_metric(metrics, metric, 1);
         return candidate.clone();
     }
 
@@ -6697,6 +6705,7 @@ fn create_hybrid_offspring_candidate(
     population: &[HybridPopulationEntry],
     rng: &mut SeededRandom,
     warmup_candidates: &[OptimizerCandidateInput],
+    promoted_warmup_count: usize,
     warmup_index: &mut usize,
     metrics: &mut BTreeMap<String, u32>,
 ) -> Result<OptimizerCandidateInput, String> {
@@ -6707,6 +6716,7 @@ fn create_hybrid_offspring_candidate(
             actions,
             rng,
             warmup_candidates,
+            promoted_warmup_count,
             warmup_index,
             metrics,
         ));
@@ -6918,8 +6928,20 @@ fn run_hybrid_island_search(
     let mut rng = resume_state
         .map(|state| SeededRandom::from_state(state.rng_state))
         .unwrap_or_else(|| SeededRandom::new(&format!("{}:hybrid:run", request.seed)));
-    let warmup_candidates = create_domain_warmup_candidates(request, catalog, actions);
-    let mut warmup_index = resume_state.map(|state| state.warmup_index).unwrap_or(0);
+    let promoted_warmup_candidates = create_promoted_seed_warmup_candidates(request, actions);
+    let promoted_warmup_count = promoted_warmup_candidates.len();
+    let domain_warmup_candidates = create_domain_warmup_candidates(request, catalog, actions);
+    let domain_warmup_offset = resume_state
+        .map(|state| state.warmup_index)
+        .unwrap_or(0)
+        .min(domain_warmup_candidates.len());
+    let mut warmup_candidates = promoted_warmup_candidates;
+    warmup_candidates.extend(
+        domain_warmup_candidates
+            .into_iter()
+            .skip(domain_warmup_offset),
+    );
+    let mut warmup_index = 0;
     let mut population: Vec<HybridPopulationEntry> = resume_state
         .map(|state| truncate_population(state.population.clone(), config.population_size))
         .unwrap_or_default();
@@ -6955,6 +6977,7 @@ fn run_hybrid_island_search(
             actions,
             &mut rng,
             &warmup_candidates,
+            promoted_warmup_count,
             &mut warmup_index,
             &mut accumulator.metrics,
         );
@@ -7006,6 +7029,7 @@ fn run_hybrid_island_search(
                 actions,
                 &mut rng,
                 &warmup_candidates,
+                promoted_warmup_count,
                 &mut warmup_index,
                 &mut accumulator.metrics,
             );
@@ -7170,6 +7194,7 @@ fn run_hybrid_island_search(
                 &population,
                 &mut rng,
                 &warmup_candidates,
+                promoted_warmup_count,
                 &mut warmup_index,
                 &mut accumulator.metrics,
             )?
@@ -7239,7 +7264,7 @@ fn run_hybrid_island_search(
         island_index: restart_index_offset,
         seed: request.seed.clone(),
         rng_state: rng.state_snapshot(),
-        warmup_index,
+        warmup_index: domain_warmup_offset + warmup_index.saturating_sub(promoted_warmup_count),
         restart_index,
         attempts_since_improvement,
         consecutive_repair_attempts,
@@ -7250,6 +7275,76 @@ fn run_hybrid_island_search(
     });
 
     Ok(accumulator)
+}
+
+fn create_promoted_seed_warmup_candidates(
+    request: &OptimizerRequest,
+    actions: &[CandidateAction],
+) -> Vec<OptimizerCandidateInput> {
+    let supported_action_keys = actions
+        .iter()
+        .map(encode_candidate_action)
+        .collect::<BTreeSet<_>>();
+    let available_passives = request
+        .available_passive_ids
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let available_sublimations = request
+        .available_sublimation_ids
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut seen = BTreeSet::new();
+    let mut candidates = Vec::new();
+
+    for seed in request.seed_candidates.iter().take(64) {
+        let mut candidate = normalize_candidate(seed.clone());
+        candidate.passive_ids = candidate
+            .passive_ids
+            .into_iter()
+            .filter(|passive_id| available_passives.contains(passive_id))
+            .take(request.max_passive_count as usize)
+            .collect();
+        candidate.sublimation_ids = candidate
+            .sublimation_ids
+            .into_iter()
+            .filter(|sublimation_id| available_sublimations.contains(sublimation_id))
+            .take(request.max_sublimation_count as usize)
+            .collect();
+
+        let mut turns = candidate
+            .plan
+            .turns
+            .into_iter()
+            .take(request.duration as usize)
+            .map(|turn| {
+                let actions = turn
+                    .actions
+                    .into_iter()
+                    .filter(|action| {
+                        supported_action_keys.contains(&encode_candidate_action(action))
+                    })
+                    .take(request.max_actions_per_turn as usize)
+                    .collect();
+                CandidateTurn { actions }
+            })
+            .collect::<Vec<_>>();
+        while turns.len() < request.duration as usize {
+            turns.push(CandidateTurn { actions: vec![] });
+        }
+        if turns.iter().all(|turn| turn.actions.is_empty()) {
+            continue;
+        }
+        candidate.plan.turns = turns;
+
+        let key = encode_candidate(&candidate);
+        if seen.insert(key) {
+            candidates.push(candidate);
+        }
+    }
+
+    candidates
 }
 
 fn create_domain_warmup_candidates(
@@ -9497,15 +9592,15 @@ mod tests {
             .expect("candidate should evaluate");
 
         assert!(evaluation.valid);
-        assert_eq!(evaluation.total_damage, 195.0);
+        assert_eq!(evaluation.total_damage, 210.0);
         assert_eq!(
             evaluation.score,
             Some(CandidateScoreBreakdown {
-                score: 195.0,
-                total_damage: 195.0,
+                score: 210.0,
+                total_damage: 210.0,
                 damage_by_resolved_element: DamageByElement {
                     air: 60.0,
-                    fire: 135.0,
+                    fire: 150.0,
                     ..DamageByElement::default()
                 },
             })
@@ -9578,17 +9673,17 @@ mod tests {
             .expect("candidate should evaluate");
 
         assert!(evaluation.valid);
-        assert_eq!(evaluation.total_damage, 162.0);
+        assert_eq!(evaluation.total_damage, 186.3);
         assert_eq!(evaluation.final_huppermage.halo_chatoyant_marks, 0);
         assert!(!evaluation.final_huppermage.runes.active.aerial);
         assert_eq!(evaluation.final_huppermage.abundance_level, 15);
         assert_eq!(
             evaluation.score,
             Some(CandidateScoreBreakdown {
-                score: 162.0,
-                total_damage: 162.0,
+                score: 186.3,
+                total_damage: 186.3,
                 damage_by_resolved_element: DamageByElement {
-                    fire: 162.0,
+                    fire: 186.3,
                     ..DamageByElement::default()
                 },
             })
@@ -9657,7 +9752,7 @@ mod tests {
             .expect("candidate should evaluate");
 
         assert!(evaluation.valid);
-        assert_eq!(evaluation.total_damage, 1365.0);
+        assert_eq!(evaluation.total_damage, 1530.0);
     }
 
     #[test]
@@ -9728,7 +9823,7 @@ mod tests {
         assert!(evaluation.valid);
         assert_eq!(evaluation.total_damage, 71.28);
         assert!(!evaluation.final_huppermage.runes.active.incandescent);
-        assert_eq!(evaluation.final_huppermage.abundance_level, 15);
+        assert_eq!(evaluation.final_huppermage.abundance_level, 30);
         assert_eq!(
             evaluation.score,
             Some(CandidateScoreBreakdown {
@@ -9812,7 +9907,7 @@ mod tests {
 
         assert!(evaluation.valid);
         assert_eq!(evaluation.total_damage, 19.0);
-        assert_eq!(evaluation.final_resources.bq, 240.0);
+        assert_eq!(evaluation.final_resources.bq, 290.0);
         assert_eq!(
             evaluation.score,
             Some(CandidateScoreBreakdown {
@@ -9879,7 +9974,7 @@ mod tests {
             .expect("candidate should evaluate");
 
         assert!(evaluation.valid);
-        assert_eq!(evaluation.final_resources.bq, 240.0);
+        assert_eq!(evaluation.final_resources.bq, 265.0);
     }
 
     #[test]
@@ -10563,6 +10658,23 @@ mod tests {
     }
 
     #[test]
+    fn consumes_request_seed_candidates_before_domain_warmups() {
+        let mut request = transformation_request();
+        request.iterations = 1;
+        request.max_candidates = Some(1);
+        request.seed_candidates = vec![candidate_from_actions(vec!["burst"], vec!["passive-a"])];
+
+        let result = run_hybrid_search(&request).expect("hybrid search should run");
+
+        assert_eq!(result.attempts, 1);
+        assert_eq!(result.metrics.get("hybridPromotedSeedCandidates"), Some(&1));
+        assert_eq!(
+            result.top_candidates[0].plan.turns[0].actions[0].spell_id,
+            "burst"
+        );
+    }
+
+    #[test]
     fn caches_evaluations_with_lru_metrics() {
         let candidate = candidate_from_actions(vec!["hit"], vec!["passive-a"]);
         assert_eq!(
@@ -11071,7 +11183,7 @@ mod tests {
         );
 
         assert_eq!(result.antithese_bq_gain, 40);
-        assert_eq!(result.resources.bq, 540.0);
+        assert_eq!(result.resources.bq, 590.0);
     }
 
     #[test]
@@ -11181,7 +11293,7 @@ mod tests {
             .expect("candidate should evaluate");
 
         assert!(evaluation.valid);
-        assert_eq!(evaluation.final_resources.bq, 140.0);
+        assert_eq!(evaluation.final_resources.bq, 165.0);
         assert_eq!(evaluation.final_huppermage.stored_bq, 75);
     }
 
@@ -11281,7 +11393,7 @@ mod tests {
         assert!(result.state.runes.active.aquatic);
         assert!(!result.state.runes.active.incandescent);
         assert_eq!(result.state.runes.last_generated_rune, Some(Rune::Aquatic));
-        assert_eq!(result.state.abundance_level, 15);
+        assert_eq!(result.state.abundance_level, 30);
     }
 
     #[test]

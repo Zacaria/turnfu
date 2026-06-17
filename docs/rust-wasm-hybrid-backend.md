@@ -35,13 +35,14 @@ Rust/WASM backend.
 rtk pnpm wasm:test
 rtk pnpm diff:rust-wasm
 rtk pnpm test
-rtk pnpm bench:hybrid -- --compare-backends --scenario t3-full --budget 100000 --seed smoke --no-build --no-oracle
 rtk pnpm bench:hybrid -- --compare-backends --scenario t3-full --budget 1000000 --seed smoke --no-build --no-oracle
 rtk openspec validate port-hybrid-engine-to-rust-wasm --strict --no-interactive
 ```
 
 `diff:rust-wasm` may require running outside the Codex sandbox because
 `wasm-pack` and `wasm-bindgen` use temporary directories outside the worktree.
+Budgets below `1_000_000` attempts are smoke checks only and should not be used
+as evidence for Rust/WASM search quality.
 
 ## Parallel Long-Run Commands
 

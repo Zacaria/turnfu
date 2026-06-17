@@ -10,6 +10,7 @@ import { createOptimizerExperimentEvaluator } from "../src/core/optimizer/index.
 import {
   createRustWasmOptimizerRequest,
   type RustWasmHybridSearchResumeState,
+  type RustWasmOptimizerCandidateInput,
   type RustWasmOptimizerRequest,
   type RustWasmOptimizerScoredCandidate,
 } from "../src/core/optimizer/rustWasmBackendTypes.ts";
@@ -19,6 +20,9 @@ import { sublimationCatalog } from "../src/core/sublimations/index.ts";
 import {
   createContinuousSearchSchema,
   ensureContinuousSearchSession,
+  listContinuousSearchPromotedCandidateSeeds,
+  markContinuousSearchPromotedSeedsUsed,
+  promoteContinuousSearchCandidateSeeds,
   promoteContinuousSearchSeeds,
   recordContinuousSearchCandidate,
   recordContinuousSearchCheckpoint,
@@ -198,15 +202,24 @@ while (!stopRequested) {
   }
 
   const workerStates = readWorkerStates(db, sessionId);
+  const promotedSeeds = listContinuousSearchPromotedCandidateSeeds(db, sessionId, workerCount * 4);
+  const workerSeedSelections = Array.from({ length: workerCount }, (_, workerIndex) =>
+    selectWorkerSeedCandidates(promotedSeeds, workerIndex, workerCount, 4)
+  );
+  const usedPromotedSeedIds = [
+    ...new Set(workerSeedSelections.flatMap((selection) => selection.seedIds)),
+  ];
   const roundStart = performance.now();
   const results = await Promise.all(Array.from({ length: workerCount }, (_, workerIndex) => {
     const resumeState = workerStates.get(workerIndex)?.resume_state_json
       ? JSON.parse(workerStates.get(workerIndex)!.resume_state_json!) as RustWasmHybridSearchResumeState
       : undefined;
+    const seedCandidates = workerSeedSelections[workerIndex].candidates;
     const request: RustWasmOptimizerRequest = {
       ...baseRequest,
       seed: `${baseRequest.seed}:worker:${workerIndex}`,
       iterations: chunkSize,
+      seedCandidates: seedCandidates.length > 0 ? seedCandidates : undefined,
       resumeState,
     };
     return runWorker(request);
@@ -244,6 +257,8 @@ while (!stopRequested) {
     invalidCandidates,
     validRate: round(validCandidates / Math.max(1, attempts), 4),
     score: round(bestCandidate?.score.score ?? 0),
+    promotedSeedCandidates: promotedSeeds.length,
+    usedPromotedSeedCandidates: usedPromotedSeedIds.length,
     finalOracleCandidates: topCandidates.length,
     ...oracleSummary,
     metrics,
@@ -273,6 +288,7 @@ while (!stopRequested) {
     for (const [workerIndex, result] of results.entries()) {
       upsertWorkerState(db, sessionId, workerIndex, result);
     }
+    markContinuousSearchPromotedSeedsUsed(db, usedPromotedSeedIds);
     updateSession(db, sessionId, totalAttempts, bestCandidate, summary);
     insertCheckpoint(db, summary);
     recordContinuousSearchCheckpoint(db, {
@@ -309,6 +325,11 @@ while (!stopRequested) {
       sessionId,
       minConfidence: 0.5,
       maxSeeds: 8,
+    });
+    promoteContinuousSearchCandidateSeeds(db, {
+      sessionId,
+      minScore: 1,
+      maxSeeds: 64,
     });
     db.exec("COMMIT");
   } catch (error) {
@@ -505,6 +526,65 @@ function compareRustCandidates(
 
 function countActions(candidate: RustWasmOptimizerScoredCandidate): number {
   return candidate.plan.turns.reduce((total, turn) => total + turn.actions.length, 0);
+}
+
+function selectWorkerSeedCandidates(
+  seeds: Array<{ id: number; candidate: unknown }>,
+  workerIndex: number,
+  workerCount: number,
+  limit: number,
+): { seedIds: number[]; candidates: RustWasmOptimizerCandidateInput[] } {
+  const selected: Array<{ id: number; candidate: RustWasmOptimizerCandidateInput }> = [];
+  const seen = new Set<string>();
+  for (let index = workerIndex; index < seeds.length && selected.length < limit; index += workerCount) {
+    addSeedCandidate(selected, seen, seeds[index]);
+  }
+  for (const seed of seeds) {
+    if (selected.length >= limit) {
+      break;
+    }
+    addSeedCandidate(selected, seen, seed);
+  }
+  return {
+    seedIds: selected.map((seed) => seed.id),
+    candidates: selected.map((seed) => seed.candidate),
+  };
+}
+
+function addSeedCandidate(
+  selected: Array<{ id: number; candidate: RustWasmOptimizerCandidateInput }>,
+  seen: Set<string>,
+  seed: { id: number; candidate: unknown },
+): void {
+  const candidate = toRustWasmCandidateInput(seed.candidate);
+  if (!candidate) {
+    return;
+  }
+  const key = stableStringify(candidate);
+  if (seen.has(key)) {
+    return;
+  }
+  seen.add(key);
+  selected.push({ id: seed.id, candidate });
+}
+
+function toRustWasmCandidateInput(candidate: unknown): RustWasmOptimizerCandidateInput | null {
+  if (!candidate || typeof candidate !== "object") {
+    return null;
+  }
+  const record = candidate as Record<string, unknown>;
+  if (!record.plan || typeof record.plan !== "object") {
+    return null;
+  }
+  return {
+    passiveIds: Array.isArray(record.passiveIds) ? record.passiveIds.filter(isString) : [],
+    sublimationIds: Array.isArray(record.sublimationIds) ? record.sublimationIds.filter(isString) : [],
+    plan: record.plan as RustWasmOptimizerCandidateInput["plan"],
+  };
+}
+
+function isString(value: unknown): value is string {
+  return typeof value === "string";
 }
 
 function mergeMetrics(metricSets: Array<Record<string, number>>): Record<string, number> {

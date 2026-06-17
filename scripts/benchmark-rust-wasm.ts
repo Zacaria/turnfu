@@ -4,7 +4,7 @@ import { huppermageCatalog } from "../src/core/catalog/index.ts";
 import { createResources } from "../src/core/simulation/index.ts";
 import { serializeRustWasmOptimizerRequest } from "../src/core/optimizer/rustWasmBackendTypes.ts";
 
-const iterations = parseIntegerArg("--iterations", 1000);
+const iterations = parseIntegerArg("--iterations", 1_000_000);
 const started = performance.now();
 let requestBytes = 0;
 

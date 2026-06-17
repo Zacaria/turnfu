@@ -8,7 +8,10 @@ import {
   createContinuousSearchSchema,
   ensureContinuousSearchSession,
   listContinuousSearchCheckpoints,
+  listContinuousSearchPromotedCandidateSeeds,
   listContinuousSearchPromotedSeeds,
+  markContinuousSearchPromotedSeedsUsed,
+  promoteContinuousSearchCandidateSeeds,
   promoteContinuousSearchSeeds,
   recordContinuousSearchCandidate,
   recordContinuousSearchCheckpoint,
@@ -206,6 +209,63 @@ test("promotes high-confidence motif seeds", () => {
     assert.equal(seeds[0].sourceKind, "motif");
     assert.equal(seeds[0].score, 150_000);
     assert.ok(seeds[0].confidence >= 0.5);
+  } finally {
+    cleanup();
+  }
+});
+
+test("promotes evaluated candidates as reusable search seeds", () => {
+  const { db, cleanup } = createTempDatabase();
+  try {
+    createContinuousSearchSchema(db);
+    ensureContinuousSearchSession(db, {
+      id: "session-a",
+      fingerprint: "fingerprint-a",
+      scenarioId: "t3-full",
+      setupHash: "setup-a",
+      seed: "continuous",
+      workerCount: 2,
+    });
+
+    const candidate = {
+      id: "candidate:one",
+      passiveIds: ["passive-a"],
+      sublimationIds: [],
+      plan: { turns: [{ actions: [{ spellId: "hit" }] }] },
+      score: { score: 120_000 },
+    };
+    recordContinuousSearchCandidate(db, {
+      sessionId: "session-a",
+      candidate,
+      score: 120_000,
+      valid: true,
+      violationCategory: null,
+      finalState: null,
+      descriptor: { checkpointRank: 1 },
+      sourceKind: "checkpoint-top",
+      sourceRef: "100",
+      attempt: 100,
+    });
+
+    assert.equal(promoteContinuousSearchCandidateSeeds(db, {
+      sessionId: "session-a",
+      minScore: 1,
+      maxSeeds: 4,
+    }), 1);
+    assert.equal(promoteContinuousSearchCandidateSeeds(db, {
+      sessionId: "session-a",
+      minScore: 1,
+      maxSeeds: 4,
+    }), 0);
+
+    const seeds = listContinuousSearchPromotedCandidateSeeds(db, "session-a", 4);
+    assert.equal(seeds.length, 1);
+    assert.equal(seeds[0].sourceKind, "candidate");
+    assert.deepEqual(seeds[0].candidate, candidate);
+    assert.equal(seeds[0].usageCount, 0);
+
+    markContinuousSearchPromotedSeedsUsed(db, [seeds[0].id]);
+    assert.equal(listContinuousSearchPromotedCandidateSeeds(db, "session-a", 4)[0].usageCount, 1);
   } finally {
     cleanup();
   }

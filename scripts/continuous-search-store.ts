@@ -79,6 +79,12 @@ export type ContinuousSearchPromotedSeed = {
   usageCount: number;
 };
 
+export type PromoteContinuousSearchCandidateSeedsInput = {
+  sessionId: string;
+  minScore: number;
+  maxSeeds: number;
+};
+
 export function createContinuousSearchSchema(database: DatabaseSync): void {
   database.exec(`
     CREATE TABLE IF NOT EXISTS continuous_sessions (
@@ -177,6 +183,9 @@ export function createContinuousSearchSchema(database: DatabaseSync): void {
       last_used_at TEXT,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS continuous_promoted_seeds_source_unique
+    ON continuous_promoted_seeds (session_id, source_kind, source_ref);
   `);
 }
 
@@ -349,6 +358,36 @@ export function promoteContinuousSearchSeeds(
   }
 }
 
+export function promoteContinuousSearchCandidateSeeds(
+  database: DatabaseSync,
+  input: PromoteContinuousSearchCandidateSeedsInput,
+): number {
+  const candidates = database.prepare(`
+    SELECT id, candidate_json, score
+    FROM continuous_candidate_evaluations
+    WHERE session_id = ? AND valid = 1 AND score >= ?
+    ORDER BY score DESC, attempt DESC, id ASC
+    LIMIT ?
+  `).all(input.sessionId, input.minScore, input.maxSeeds) as Record<string, unknown>[];
+
+  let promoted = 0;
+  for (const candidate of candidates) {
+    const result = database.prepare(`
+      INSERT OR IGNORE INTO continuous_promoted_seeds (
+        session_id, source_kind, source_ref, candidate_json, score, confidence
+      ) VALUES (?, 'candidate', ?, ?, ?, ?)
+    `).run(
+      input.sessionId,
+      String(candidate.id),
+      String(candidate.candidate_json),
+      Number(candidate.score),
+      calculateCandidateSeedConfidence(Number(candidate.score)),
+    );
+    promoted += Number(result.changes ?? 0);
+  }
+  return promoted;
+}
+
 export function listContinuousSearchPromotedSeeds(
   database: DatabaseSync,
   sessionId: string,
@@ -371,6 +410,49 @@ export function listContinuousSearchPromotedSeeds(
   }));
 }
 
+export function listContinuousSearchPromotedCandidateSeeds(
+  database: DatabaseSync,
+  sessionId: string,
+  limit: number,
+): ContinuousSearchPromotedSeed[] {
+  const rows = database.prepare(`
+    SELECT id, session_id, source_kind, source_ref, candidate_json, score, confidence, usage_count
+    FROM continuous_promoted_seeds
+    WHERE session_id = ? AND source_kind = 'candidate'
+    ORDER BY usage_count ASC, confidence DESC, score DESC, id ASC
+    LIMIT ?
+  `).all(sessionId, limit) as Record<string, unknown>[];
+  return rows.map((row) => ({
+    id: Number(row.id),
+    sessionId: String(row.session_id),
+    sourceKind: String(row.source_kind),
+    sourceRef: row.source_ref === null ? null : String(row.source_ref),
+    candidate: JSON.parse(String(row.candidate_json)),
+    score: Number(row.score),
+    confidence: Number(row.confidence),
+    usageCount: Number(row.usage_count),
+  }));
+}
+
+export function markContinuousSearchPromotedSeedsUsed(
+  database: DatabaseSync,
+  ids: number[],
+): void {
+  const uniqueIds = [...new Set(ids)].filter((id) => Number.isInteger(id) && id > 0);
+  if (uniqueIds.length === 0) {
+    return;
+  }
+  const statement = database.prepare(`
+    UPDATE continuous_promoted_seeds
+    SET usage_count = usage_count + 1,
+        last_used_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `);
+  for (const id of uniqueIds) {
+    statement.run(id);
+  }
+}
+
 export function hashContinuousCandidate(candidate: unknown): string {
   return createHash("sha256").update(JSON.stringify(candidate)).digest("hex");
 }
@@ -380,6 +462,10 @@ function calculateMotifConfidence(input: RecordContinuousSearchMotifInput): numb
   const rediscovery = Math.min(1, input.rediscoveryCount / 4);
   const score = Math.min(1, input.bestScore / 150_000);
   return Math.round(((support * 0.4) + (rediscovery * 0.3) + (score * 0.3)) * 1000) / 1000;
+}
+
+function calculateCandidateSeedConfidence(score: number): number {
+  return Math.round(Math.min(1, Math.max(0, score / 150_000)) * 1000) / 1000;
 }
 
 function mapSessionRow(row: Record<string, unknown>): ContinuousSearchSession {

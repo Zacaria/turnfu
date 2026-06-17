@@ -23,7 +23,14 @@ export type RustWasmOptimizerRequest = {
   requireSustainableCycle: boolean;
   defaultActionContext?: ComboSimulationOptions["defaultActionContext"];
   maxCandidates?: number;
+  seedCandidates?: RustWasmOptimizerCandidateInput[];
   resumeState?: RustWasmHybridSearchResumeState;
+};
+
+export type RustWasmOptimizerCandidateInput = {
+  passiveIds?: string[];
+  sublimationIds?: string[];
+  plan: ComboPlan;
 };
 
 export type RustWasmOptimizerResponse = {
@@ -92,24 +99,12 @@ export type RustWasmHybridIslandResumeState = {
   consecutiveEliteNeighborAttempts: number;
   population: Array<{
     id: string;
-    candidate: {
-      passiveIds?: string[];
-      sublimationIds?: string[];
-      plan: ComboPlan;
-    };
+    candidate: RustWasmOptimizerCandidateInput;
     score: number;
     valid?: boolean;
   }>;
-  repairQueue: Array<{
-    passiveIds?: string[];
-    sublimationIds?: string[];
-    plan: ComboPlan;
-  }>;
-  eliteNeighborQueue: Array<{
-    passiveIds?: string[];
-    sublimationIds?: string[];
-    plan: ComboPlan;
-  }>;
+  repairQueue: RustWasmOptimizerCandidateInput[];
+  eliteNeighborQueue: RustWasmOptimizerCandidateInput[];
 };
 
 export type RustWasmCandidateEvaluationInput = {
