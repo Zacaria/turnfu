@@ -299,6 +299,40 @@ test("live optimizer run reports intermediate best results and counters", async 
   assert.ok(results.length > 0);
 });
 
+test("live hybrid optimizer falls back locally when the stream endpoint is unavailable", async () => {
+  const setup = {
+    ...getSeedSetup(),
+    deckSpellIds: ["light-hit", "fire-hit"],
+  };
+  const snapshots: Array<{ attempts: number; resultCount: number }> = [];
+  const originalFetch = globalThis.fetch;
+  let streamRequests = 0;
+  globalThis.fetch = async () => {
+    streamRequests += 1;
+    return new Response("Not found", { status: 404 });
+  };
+
+  try {
+    const results = await runOptimizerForControlsLive(setup, catalog, {
+      ...createDefaultOptimizerControls(),
+      duration: 1,
+      iterationBudget: 25,
+      maxResultsPerDuration: 2,
+      searchMethod: "hybrid",
+    }, (progress) => {
+      snapshots.push({ attempts: progress.attempts, resultCount: progress.results.length });
+    });
+
+    assert.equal(streamRequests, 1);
+    assert.ok(snapshots.length > 0);
+    assert.ok(snapshots.at(-1)!.attempts >= 25);
+    assert.ok(snapshots.some((snapshot) => snapshot.resultCount > 0));
+    assert.ok(results.length > 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("live optimizer throttles progress for large genetic workspace runs", async () => {
   const setup = {
     ...getSeedSetup(),

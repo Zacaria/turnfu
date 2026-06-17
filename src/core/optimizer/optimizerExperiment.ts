@@ -12,6 +12,20 @@ import {
   type ComboSustainability,
 } from "./comboOptimizer.ts";
 import {
+  classifyDiscoveryViolation,
+  cloneDiscoveryCandidateInput,
+  createCandidateOnlyDiscoveryPayload,
+  createDiscoveryPayload,
+  isDiscoveryEnabled,
+  mergeDiscoveryMotif,
+  mineDiscoveryMotif,
+  rankDiscoveryMotifs,
+  type DiscoveryMotif,
+  type DiscoveryOptions,
+  type DiscoveryPayload,
+  type DiscoveryViolationCategory,
+} from "./discovery.ts";
+import {
   createRustWasmOptimizerRequest,
   type RustWasmCandidateEvaluationInput,
   type RustWasmCandidateEvaluationResult,
@@ -47,6 +61,7 @@ export type OptimizerExperimentCandidate = {
   score: ComboScoreBreakdown;
   simulation: ReturnType<typeof simulateCombo>;
   sustainability: ComboSustainability;
+  discovery?: DiscoveryPayload;
 };
 
 export type OptimizerExperimentProgress = {
@@ -101,6 +116,7 @@ export type OptimizerExperimentOptions = {
   defaultActionContext?: ComboSimulationOptions["defaultActionContext"];
   progressInterval?: number;
   maxCandidates?: number;
+  discovery?: DiscoveryOptions;
   onProgress?: (progress: OptimizerExperimentProgress) => void;
   yieldProgress?: () => Promise<void>;
   signal?: AbortSignal;
@@ -113,6 +129,7 @@ export type OptimizerExperimentEvaluatorOptions = {
   criterion?: ComboOptimizationCriterion;
   requireSustainableCycle?: boolean;
   defaultActionContext?: ComboSimulationOptions["defaultActionContext"];
+  discovery?: DiscoveryOptions;
 };
 
 export type OptimizerExperimentEvaluatorStats = {
@@ -131,6 +148,7 @@ type OptimizerExperimentEvaluation = {
   result: OptimizerExperimentCandidate | null;
   normalizedCandidate: OptimizerExperimentCandidateInput;
   simulation: ReturnType<typeof simulateCombo>;
+  discovery: DiscoveryPayload;
 };
 
 type OptimizerExperimentEvaluationCache = Map<string, OptimizerExperimentEvaluation>;
@@ -165,6 +183,7 @@ type EngineAccumulator = {
   rustWasmUnverifiedTopCandidates?: Map<string, RustWasmUnverifiedCandidate>;
   progress: OptimizerExperimentProgress[];
   metrics: Record<string, number>;
+  discovery?: DiscoveryAccumulator;
 };
 
 type RankedCandidate = Pick<OptimizerExperimentCandidate, "id" | "passiveIds" | "sublimationIds" | "plan" | "score">;
@@ -190,6 +209,17 @@ type ActionStat = {
 };
 
 type SoftResourcePool = Record<Resource, number>;
+
+type DiscoveryAccumulator = {
+  motifs: Map<string, DiscoveryMotif>;
+  motifSeedQueue: OptimizerExperimentCandidateInput[];
+  motifSeedKeys: Set<string>;
+};
+
+type HybridRepairCandidate = {
+  input: OptimizerExperimentCandidateInput;
+  category: DiscoveryViolationCategory;
+};
 
 type NoveltyArchiveEntry = {
   input: OptimizerExperimentCandidateInput;
@@ -484,6 +514,7 @@ function recordRustWasmCandidateEvaluationsWithOracle(
     const rustEvaluation = rustEvaluations[candidateIndex];
     const oracleEvaluation = context.evaluator.evaluateDetailed(candidate);
     assertRustWasmEvaluationMatchesOracle(rustEvaluation, oracleEvaluation);
+    recordDiscoveryEvaluation(context, accumulator, oracleEvaluation);
 
     if (oracleEvaluation.result && rustEvaluation.score) {
       const result = {
@@ -523,6 +554,7 @@ function recordRustWasmCandidateEvaluationsWithoutOracle(
     accumulator.metrics.rustWasmCandidateEvaluations = (accumulator.metrics.rustWasmCandidateEvaluations ?? 0) + 1;
 
     const rustEvaluation = rustEvaluations[candidateIndex];
+    recordRustWasmCandidateOnlyDiscovery(context, accumulator, candidate, rustEvaluation.score);
     if (rustEvaluation.valid && rustEvaluation.score) {
       const normalizedCandidate = normalizeCandidate(candidate);
       recordRustWasmUnverifiedTopCandidate(context, accumulator, {
@@ -580,6 +612,7 @@ function verifyRustWasmUnverifiedTopCandidates(
       sublimationIds: candidate.sublimationIds,
       plan: candidate.plan,
     });
+    recordDiscoveryEvaluation(context, accumulator, oracleEvaluation);
 
     if (!oracleEvaluation.result) {
       accumulator.metrics.rustWasmFinalOracleInvalid = (accumulator.metrics.rustWasmFinalOracleInvalid ?? 0) + 1;
@@ -696,7 +729,12 @@ export function createOptimizerExperimentEvaluator(
     });
 
     if (!simulation.valid) {
-      const evaluation = { result: null, normalizedCandidate, simulation };
+      const discovery = createDiscoveryPayload({
+        input: normalizedCandidate,
+        simulation,
+        discovery: options.discovery,
+      });
+      const evaluation = { result: null, normalizedCandidate, simulation, discovery };
       setEvaluationCacheEntry(cache, key, evaluation, stats);
       return evaluation;
     }
@@ -714,11 +752,27 @@ export function createOptimizerExperimentEvaluator(
       };
 
     if (!sustainability.sustainable) {
-      const evaluation = { result: null, normalizedCandidate, simulation };
+      const discovery = createDiscoveryPayload({
+        input: normalizedCandidate,
+        simulation,
+        sustainability,
+        discovery: options.discovery,
+      });
+      const evaluation = { result: null, normalizedCandidate, simulation, discovery };
       setEvaluationCacheEntry(cache, key, evaluation, stats);
       return evaluation;
     }
 
+    const score = options.requireSustainableCycle
+      ? scoreSustainableComboSimulation(simulation, character, options.criterion)
+      : scoreComboSimulation(simulation, options.criterion);
+    const discovery = createDiscoveryPayload({
+      input: normalizedCandidate,
+      simulation,
+      score,
+      sustainability,
+      discovery: options.discovery,
+    });
     const result = {
       id: serializeExperimentCandidate(normalizedCandidate),
       passiveIds: normalizedCandidate.passiveIds,
@@ -726,13 +780,12 @@ export function createOptimizerExperimentEvaluator(
       sublimations: createCandidateSublimationBuild(options.character.sublimations, normalizedCandidate.sublimationIds),
       plan: normalizedCandidate.plan,
       simulation,
-      score: options.requireSustainableCycle
-        ? scoreSustainableComboSimulation(simulation, character, options.criterion)
-        : scoreComboSimulation(simulation, options.criterion),
+      score,
       sustainability,
+      discovery,
     };
 
-    const evaluation = { result, normalizedCandidate, simulation };
+    const evaluation = { result, normalizedCandidate, simulation, discovery };
     setEvaluationCacheEntry(cache, key, evaluation, stats);
     return evaluation;
   };
@@ -975,7 +1028,7 @@ function runHybridSingleEngine(context: EngineContext): OptimizerExperimentEngin
   const repairBurstLimit = 2;
   let population: Array<{ input: OptimizerExperimentCandidateInput; result: OptimizerExperimentCandidate }> = [];
   const eliteNeighborQueue: OptimizerExperimentCandidateInput[] = [];
-  const repairQueue: OptimizerExperimentCandidateInput[] = [];
+  const repairQueue: HybridRepairCandidate[] = [];
   let attemptsSinceImprovement = 0;
   let consecutiveRepairAttempts = 0;
   let consecutiveEliteNeighborAttempts = 0;
@@ -1054,19 +1107,28 @@ function runHybridSingleEngine(context: EngineContext): OptimizerExperimentEngin
       && !shouldRefineLocally
       && shouldSkipHybridEliteNeighbor(context, eliteNeighborQueue, populationSize, consecutiveEliteNeighborAttempts);
     const eliteNeighbor = repairNeighbor || shouldRefineLocally || skipEliteNeighbor ? undefined : eliteNeighborQueue.shift();
-    const input = repairNeighbor
+    const motifSeed = repairNeighbor || shouldRefineLocally || eliteNeighbor ? undefined : shiftDiscoveryMotifSeed(accumulator);
+    const input = repairNeighbor?.input
       ?? (shouldRefineLocally
         ? createHybridLocalRefinement(population, context)
         : eliteNeighbor
+          ?? motifSeed
           ?? createHybridOffspring(population, context, accumulator));
     if (repairNeighbor) {
       accumulator.metrics.hybridRepairCandidates = (accumulator.metrics.hybridRepairCandidates ?? 0) + 1;
+      if (isDiscoveryEnabled(context.options.discovery)) {
+        accumulator.metrics[`discoveryRepairAttempt${toMetricSuffix(repairNeighbor.category)}`] =
+          (accumulator.metrics[`discoveryRepairAttempt${toMetricSuffix(repairNeighbor.category)}`] ?? 0) + 1;
+      }
       consecutiveRepairAttempts += 1;
     } else {
       consecutiveRepairAttempts = 0;
     }
     if (eliteNeighbor) {
       accumulator.metrics.hybridEliteNeighborCandidates = (accumulator.metrics.hybridEliteNeighborCandidates ?? 0) + 1;
+    }
+    if (motifSeed) {
+      accumulator.metrics.discoveryMotifCandidates = (accumulator.metrics.discoveryMotifCandidates ?? 0) + 1;
     }
     if (skipEliteNeighbor) {
       accumulator.metrics.hybridEliteNeighborDeferrals = (accumulator.metrics.hybridEliteNeighborDeferrals ?? 0) + 1;
@@ -1079,6 +1141,13 @@ function runHybridSingleEngine(context: EngineContext): OptimizerExperimentEngin
     attemptsSinceImprovement = improved ? 0 : attemptsSinceImprovement + 1;
     consecutiveEliteNeighborAttempts = eliteNeighbor && !improved ? consecutiveEliteNeighborAttempts + 1 : 0;
     if (result) {
+      if (repairNeighbor) {
+        if (isDiscoveryEnabled(context.options.discovery)) {
+          accumulator.metrics.discoveryRepairSuccesses = (accumulator.metrics.discoveryRepairSuccesses ?? 0) + 1;
+          accumulator.metrics[`discoveryRepairSuccess${toMetricSuffix(repairNeighbor.category)}`] =
+            (accumulator.metrics[`discoveryRepairSuccess${toMetricSuffix(repairNeighbor.category)}`] ?? 0) + 1;
+        }
+      }
       population.push({ input, result });
       if (improved) {
         enqueueHybridEliteNeighbors(eliteNeighborQueue, input, context, accumulator);
@@ -1172,7 +1241,7 @@ function evaluateAndTrackImprovement(
   context: EngineContext,
   accumulator: EngineAccumulator,
   input: OptimizerExperimentCandidateInput,
-): { result: OptimizerExperimentCandidate | null; improved: boolean; repairCandidate?: OptimizerExperimentCandidateInput } {
+): { result: OptimizerExperimentCandidate | null; improved: boolean; repairCandidate?: HybridRepairCandidate } {
   const previousBest = accumulator.bestCandidate;
   const evaluation = evaluateAndRecordDetailed(context, accumulator, input);
   const result = evaluation.result;
@@ -1190,7 +1259,7 @@ function evaluateAndTrackImprovement(
 function createHybridRepairCandidate(
   input: OptimizerExperimentCandidateInput,
   simulation: ReturnType<typeof simulateCombo>,
-): OptimizerExperimentCandidateInput | undefined {
+): HybridRepairCandidate | undefined {
   const violation = simulation.violations[0];
   if (!violation || violation.type === "unknownSpell") {
     return undefined;
@@ -1208,12 +1277,15 @@ function createHybridRepairCandidate(
     ? actions.length - violation.actionIndex
     : 1;
   actions.splice(violation.actionIndex, deleteCount);
-  return candidate;
+  return {
+    input: candidate,
+    category: classifyDiscoveryViolation(violation),
+  };
 }
 
 function enqueueHybridRepairCandidate(
-  queue: OptimizerExperimentCandidateInput[],
-  candidate: OptimizerExperimentCandidateInput | undefined,
+  queue: HybridRepairCandidate[],
+  candidate: HybridRepairCandidate | undefined,
   context: EngineContext,
   accumulator: EngineAccumulator,
 ) {
@@ -1221,13 +1293,18 @@ function enqueueHybridRepairCandidate(
     return;
   }
 
-  const key = serializeExperimentCandidate(normalizeCandidate(candidate));
-  if (queue.some((queued) => serializeExperimentCandidate(normalizeCandidate(queued)) === key)) {
+  const key = serializeExperimentCandidate(normalizeCandidate(candidate.input));
+  if (queue.some((queued) => serializeExperimentCandidate(normalizeCandidate(queued.input)) === key)) {
     return;
   }
 
   queue.push(candidate);
   accumulator.metrics.hybridRepairQueueCandidates = (accumulator.metrics.hybridRepairQueueCandidates ?? 0) + 1;
+  if (isDiscoveryEnabled(context.options.discovery)) {
+    accumulator.metrics.discoveryRepairSignals = (accumulator.metrics.discoveryRepairSignals ?? 0) + 1;
+    accumulator.metrics[`discoveryRepairSignal${toMetricSuffix(candidate.category)}`] =
+      (accumulator.metrics[`discoveryRepairSignal${toMetricSuffix(candidate.category)}`] ?? 0) + 1;
+  }
 }
 
 function injectHybridImmigrants(
@@ -1354,12 +1431,48 @@ function createHybridFreshCandidate(
   context: EngineContext,
   accumulator: EngineAccumulator,
 ): OptimizerExperimentCandidateInput {
+  const curriculumCandidate = createDiscoveryCurriculumCandidate(context, accumulator);
+  if (curriculumCandidate) {
+    return curriculumCandidate;
+  }
+
   if (context.rng.chance(0.12)) {
     accumulator.metrics.hybridResourceAwareCandidates = (accumulator.metrics.hybridResourceAwareCandidates ?? 0) + 1;
     return context.sampler.resourceAware();
   }
 
   return context.sampler.random();
+}
+
+function createDiscoveryCurriculumCandidate(
+  context: EngineContext,
+  accumulator: EngineAccumulator,
+): OptimizerExperimentCandidateInput | undefined {
+  const objectives = context.options.discovery?.curriculumObjectives ?? [];
+  if (!isDiscoveryEnabled(context.options.discovery) || objectives.length === 0 || !context.rng.chance(0.16)) {
+    return undefined;
+  }
+
+  const objective = context.rng.pick(objectives);
+  accumulator.metrics.discoveryCurriculumCandidates = (accumulator.metrics.discoveryCurriculumCandidates ?? 0) + 1;
+  accumulator.metrics[`discoveryCurriculum${toMetricSuffix(objective)}`] =
+    (accumulator.metrics[`discoveryCurriculum${toMetricSuffix(objective)}`] ?? 0) + 1;
+
+  const candidate = context.sampler.resourceAware();
+  if (objective === "validLongPlans") {
+    for (const turn of candidate.plan.turns) {
+      while (turn.actions.length < context.options.maxActionsPerTurn && context.rng.chance(0.45)) {
+        turn.actions.push(cloneAction(context.rng.pick(getSearchActions(context.options))));
+      }
+    }
+  } else if (objective === "conditionalUnlocks") {
+    const emptyCellAction = getSearchActions(context.options).find((action) => action.target?.kind === "emptyCell");
+    if (emptyCellAction) {
+      candidate.plan.turns[0]?.actions.unshift(cloneAction(emptyCellAction));
+    }
+  }
+
+  return candidate;
 }
 
 function enqueueHybridEliteNeighbors(
@@ -1865,7 +1978,7 @@ async function runHybridSingleEngineProgressive(context: EngineContext): Promise
   const repairBurstLimit = 2;
   let population: Array<{ input: OptimizerExperimentCandidateInput; result: OptimizerExperimentCandidate }> = [];
   const eliteNeighborQueue: OptimizerExperimentCandidateInput[] = [];
-  const repairQueue: OptimizerExperimentCandidateInput[] = [];
+  const repairQueue: HybridRepairCandidate[] = [];
   let attemptsSinceImprovement = 0;
   let consecutiveRepairAttempts = 0;
   let consecutiveEliteNeighborAttempts = 0;
@@ -1947,19 +2060,28 @@ async function runHybridSingleEngineProgressive(context: EngineContext): Promise
       && !shouldRefineLocally
       && shouldSkipHybridEliteNeighbor(context, eliteNeighborQueue, populationSize, consecutiveEliteNeighborAttempts);
     const eliteNeighbor = repairNeighbor || shouldRefineLocally || skipEliteNeighbor ? undefined : eliteNeighborQueue.shift();
-    const input = repairNeighbor
+    const motifSeed = repairNeighbor || shouldRefineLocally || eliteNeighbor ? undefined : shiftDiscoveryMotifSeed(accumulator);
+    const input = repairNeighbor?.input
       ?? (shouldRefineLocally
         ? createHybridLocalRefinement(population, context)
         : eliteNeighbor
+          ?? motifSeed
           ?? createHybridOffspring(population, context, accumulator));
     if (repairNeighbor) {
       accumulator.metrics.hybridRepairCandidates = (accumulator.metrics.hybridRepairCandidates ?? 0) + 1;
+      if (isDiscoveryEnabled(context.options.discovery)) {
+        accumulator.metrics[`discoveryRepairAttempt${toMetricSuffix(repairNeighbor.category)}`] =
+          (accumulator.metrics[`discoveryRepairAttempt${toMetricSuffix(repairNeighbor.category)}`] ?? 0) + 1;
+      }
       consecutiveRepairAttempts += 1;
     } else {
       consecutiveRepairAttempts = 0;
     }
     if (eliteNeighbor) {
       accumulator.metrics.hybridEliteNeighborCandidates = (accumulator.metrics.hybridEliteNeighborCandidates ?? 0) + 1;
+    }
+    if (motifSeed) {
+      accumulator.metrics.discoveryMotifCandidates = (accumulator.metrics.discoveryMotifCandidates ?? 0) + 1;
     }
     if (skipEliteNeighbor) {
       accumulator.metrics.hybridEliteNeighborDeferrals = (accumulator.metrics.hybridEliteNeighborDeferrals ?? 0) + 1;
@@ -1972,6 +2094,13 @@ async function runHybridSingleEngineProgressive(context: EngineContext): Promise
     attemptsSinceImprovement = improved ? 0 : attemptsSinceImprovement + 1;
     consecutiveEliteNeighborAttempts = eliteNeighbor && !improved ? consecutiveEliteNeighborAttempts + 1 : 0;
     if (result) {
+      if (repairNeighbor) {
+        if (isDiscoveryEnabled(context.options.discovery)) {
+          accumulator.metrics.discoveryRepairSuccesses = (accumulator.metrics.discoveryRepairSuccesses ?? 0) + 1;
+          accumulator.metrics[`discoveryRepairSuccess${toMetricSuffix(repairNeighbor.category)}`] =
+            (accumulator.metrics[`discoveryRepairSuccess${toMetricSuffix(repairNeighbor.category)}`] ?? 0) + 1;
+        }
+      }
       population.push({ input, result });
       if (improved) {
         enqueueHybridEliteNeighbors(eliteNeighborQueue, input, context, accumulator);
@@ -2067,6 +2196,7 @@ function evaluateAndRecordDetailed(
 ): OptimizerExperimentEvaluation {
   accumulator.attempts += 1;
   const evaluation = context.evaluator.evaluateDetailed(candidate);
+  recordDiscoveryEvaluation(context, accumulator, evaluation);
   if (evaluation.result) {
     accumulator.validCandidates += 1;
     addTopCandidate(context, accumulator, evaluation.result);
@@ -2083,6 +2213,140 @@ function evaluateAndRecordDetailed(
   }
 
   return evaluation;
+}
+
+function recordDiscoveryEvaluation(
+  context: EngineContext,
+  accumulator: EngineAccumulator,
+  evaluation: OptimizerExperimentEvaluation,
+) {
+  if (!isDiscoveryEnabled(context.options.discovery)) {
+    return;
+  }
+
+  const discovery = getDiscoveryAccumulator(accumulator);
+  accumulator.metrics.discoveryDescriptors = (accumulator.metrics.discoveryDescriptors ?? 0) + 1;
+  accumulator.metrics.discoveryScoreLeader = Math.max(
+    accumulator.metrics.discoveryScoreLeader ?? 0,
+    evaluation.discovery.discoveryScore.score,
+  );
+
+  if (evaluation.result) {
+    accumulator.metrics.discoveryFinalScoreLeader = Math.max(
+      accumulator.metrics.discoveryFinalScoreLeader ?? 0,
+      evaluation.result.score.score,
+    );
+  }
+
+  const violationCategory = evaluation.discovery.descriptor.violation?.category;
+  if (violationCategory) {
+    accumulator.metrics.discoveryBoundarySamples = (accumulator.metrics.discoveryBoundarySamples ?? 0) + 1;
+    accumulator.metrics[`discoveryBoundary${toMetricSuffix(violationCategory)}`] =
+      (accumulator.metrics[`discoveryBoundary${toMetricSuffix(violationCategory)}`] ?? 0) + 1;
+  }
+
+  const motif = mineDiscoveryMotif({
+    input: evaluation.normalizedCandidate,
+    payload: evaluation.discovery,
+    attempt: accumulator.attempts,
+  });
+  if (!motif) {
+    return;
+  }
+
+  const existing = discovery.motifs.get(motif.key);
+  const merged = existing ? mergeDiscoveryMotif(existing, motif) : motif;
+  discovery.motifs.set(motif.key, merged);
+  accumulator.metrics.discoveryMotifs = discovery.motifs.size;
+  accumulator.metrics.discoveryMotifBestSupport = Math.max(
+    accumulator.metrics.discoveryMotifBestSupport ?? 0,
+    merged.supportCount,
+  );
+
+  enqueueDiscoveryMotifSeed(context, accumulator, merged);
+  pruneDiscoveryMotifs(discovery);
+}
+
+function recordRustWasmCandidateOnlyDiscovery(
+  context: EngineContext,
+  accumulator: EngineAccumulator,
+  candidate: OptimizerExperimentCandidateInput,
+  score: ComboScoreBreakdown | undefined,
+) {
+  if (!isDiscoveryEnabled(context.options.discovery)) {
+    return;
+  }
+
+  const normalizedCandidate = normalizeCandidate(candidate);
+  const discovery = createCandidateOnlyDiscoveryPayload({
+    input: normalizedCandidate,
+    score,
+    discovery: context.options.discovery,
+  });
+
+  accumulator.metrics.discoveryDescriptors = (accumulator.metrics.discoveryDescriptors ?? 0) + 1;
+  accumulator.metrics.discoveryCandidateOnlyDescriptors = (accumulator.metrics.discoveryCandidateOnlyDescriptors ?? 0) + 1;
+  accumulator.metrics.discoveryScoreLeader = Math.max(
+    accumulator.metrics.discoveryScoreLeader ?? 0,
+    discovery.discoveryScore.score,
+  );
+}
+
+function getDiscoveryAccumulator(accumulator: EngineAccumulator): DiscoveryAccumulator {
+  accumulator.discovery ??= {
+    motifs: new Map(),
+    motifSeedQueue: [],
+    motifSeedKeys: new Set(),
+  };
+  return accumulator.discovery;
+}
+
+function enqueueDiscoveryMotifSeed(
+  context: EngineContext,
+  accumulator: EngineAccumulator,
+  motif: DiscoveryMotif,
+) {
+  if (motif.supportCount < 2 || motif.validationRate <= 0) {
+    return;
+  }
+
+  const discovery = getDiscoveryAccumulator(accumulator);
+  const budget = clampInteger(context.options.discovery?.motifSeedBudget ?? 16, 0, 256);
+  if (budget === 0 || discovery.motifSeedQueue.length >= budget) {
+    return;
+  }
+
+  const seed = cloneDiscoveryCandidateInput(motif.seed);
+  const key = serializeExperimentCandidate(normalizeCandidate(seed));
+  if (discovery.motifSeedKeys.has(key)) {
+    return;
+  }
+
+  discovery.motifSeedKeys.add(key);
+  discovery.motifSeedQueue.push(seed);
+  accumulator.metrics.discoveryMotifSeedCandidates = (accumulator.metrics.discoveryMotifSeedCandidates ?? 0) + 1;
+}
+
+function shiftDiscoveryMotifSeed(accumulator: EngineAccumulator): OptimizerExperimentCandidateInput | undefined {
+  const candidate = accumulator.discovery?.motifSeedQueue.shift();
+  if (candidate) {
+    accumulator.metrics.discoveryMotifSeedAttempts = (accumulator.metrics.discoveryMotifSeedAttempts ?? 0) + 1;
+  }
+  return candidate;
+}
+
+function pruneDiscoveryMotifs(discovery: DiscoveryAccumulator) {
+  const maxMotifs = 256;
+  if (discovery.motifs.size <= maxMotifs) {
+    return;
+  }
+
+  const keep = new Set(rankDiscoveryMotifs([...discovery.motifs.values()]).slice(0, maxMotifs).map((motif) => motif.key));
+  for (const key of discovery.motifs.keys()) {
+    if (!keep.has(key)) {
+      discovery.motifs.delete(key);
+    }
+  }
 }
 
 function recordProgress(context: EngineContext, accumulator: EngineAccumulator) {
@@ -3705,6 +3969,7 @@ function createCandidateCacheKeyPrefix(options: OptimizerExperimentEvaluatorOpti
     options.duration,
     JSON.stringify(options.criterion ?? { type: "totalDamage" }),
     options.requireSustainableCycle ? "sustainable" : "single",
+    JSON.stringify(options.discovery ?? {}),
     "",
   ].join("::");
 }
@@ -3797,6 +4062,14 @@ function countRankedCandidateActions(candidate: RankedCandidate): number {
 
 function roundMetric(value: number): number {
   return Math.round(value * 100) / 100;
+}
+
+function toMetricSuffix(value: string): string {
+  return value
+    .split(/[^a-zA-Z0-9]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join("");
 }
 
 function clampInteger(value: number, min: number, max: number): number {

@@ -1,202 +1,306 @@
-# HANDOFF - Rust/WASM Hybrid Engine Port
+# HANDOFF: Constraint Path Discovery
 
-Date: 2026-06-02
+## Current State
 
-## Worktree
+Worktree:
 
-- Path: `/Users/zacariachtatar/game_repos/wakfu-turn-optimizer/.worktrees/codex/port-hybrid-engine-rust-wasm-handoff`
-- Branch: `codex/port-hybrid-engine-rust-wasm-handoff`
-- Active OpenSpec change: `port-hybrid-engine-to-rust-wasm`
-- Current status at refresh: post-rebase sublimation integration stabilized.
-  The Rust/WASM backend is faster on the sublimation-enabled 100k smoke, finds
-  a better TypeScript-verified score than the TypeScript backend for the smoke
-  seed, and the Rust top candidates revalidate with score delta `0`.
+`/Users/zacariachtatar/game_repos/wakfu-turn-optimizer/.worktrees/codex/add-constraint-path-discovery`
 
-This worktree is intentionally separate from the main checkout. Do not touch the
-main checkout at `/Users/zacariachtatar/game_repos/wakfu-turn-optimizer`.
+Branch:
 
-Use `rtk` before manual shell commands in Codex. Use `pnpm` for Node dependency
-work. Keep this worktree's `node_modules` isolated.
+`codex/add-constraint-path-discovery`
 
-## Current Direction
+Active OpenSpec change:
 
-TypeScript remains the gameplay oracle. Rust/WASM owns large-search execution
-only when its business rules have been checked against TypeScript.
+`add-constraint-path-discovery`
 
-Current policy:
+This branch implements the first practical discovery layer for the optimizer. It is not meant to prove that discovery already beats master on final damage. The smoke benchmark currently shows equal final score to baseline at a tiny budget, while exposing new descriptors, motifs, motif seeds, and constraint-boundary samples. Treat this as a foundation for discovering hidden paths, not as a finished search-quality win.
 
-- Small validation runs can use per-candidate TypeScript oracle checks.
-- Large Rust/WASM runs can run without per-candidate oracle checks.
-- Rust top candidates from large runs must remain revalidable through
-  TypeScript before being trusted.
-- Rust/WASM remains an opt-in experimental backend.
+The main checkout is clean. The OpenSpec draft was removed from the main checkout and remains in this worktree under:
 
-## Completed State
+`openspec/changes/add-constraint-path-discovery/`
 
-The OpenSpec task list for `port-hybrid-engine-to-rust-wasm` is complete:
+## Why This Exists
 
-- Backend boundary and adapter routing.
-- Rust/WASM crate, serialization, and benchmark scripts.
-- Gameplay parity for supported optimizer scenarios.
-- Differential fixture and generated-candidate validation.
-- Direct Rust hybrid search loop with warmup/ranking, repair and elite queues,
-  local refinement, restarts/immigrants, direct evaluator cache, and metrics.
-- Parallel Rust/WASM benchmark harness.
-- SQLite-backed persistent search sessions and UI workspace/session state.
-- Rebase onto `master` with the TypeScript sublimation engine integrated into
-  Rust/WASM search transport, direct evaluation, and differential fixtures.
-- Documentation and archived benchmark evidence.
-- Verification pass before the latest Puissance Brute/replay investigation.
+The existing optimizer is already strong at exploitation once a high-value region is visible. It has deterministic simulator scoring, stochastic experiment engines, hybrid islands, warmups, resource-aware sampling, repair queues, local refinement, elite neighbors, restarts, and Rust/WASM throughput.
 
-The UI no longer exposes a bounded progress bar for unbounded search sessions.
-It stores optimizer workspace/session state in the SQLite-backed local API
-instead of browser-only storage.
+The weak point we discussed is discovery under constraints. Final damage or sustainable-cycle score can make a setup path look bad until the right constraints line up later: rune state, BQ, WP, cooldowns, targets, passives, sublimations, heart state, Feu-Follet state, or replay sustainability.
 
-## Recent Commits
+The Trackmania articles suggested the useful split:
 
-Most relevant recent commits after rebasing onto `master`:
+- Discovery: find rare or enabling rule states.
+- Optimization: exploit discovered states into high final score.
+- Consistency: verify candidates with the exact oracle.
 
-- `9c44374 feat(optimizer): carry sublimations through rust wasm search`
-  - Carries candidate `sublimationIds` through Rust/WASM request, search,
-    resume-state, scoring, and final top-candidate transport.
+For this optimizer, discovery should be cheap, inspectable, and simulator-derived. It should feed better candidates into the existing hybrid engine without replacing strict final scoring.
 
-- `e9d01d5 test(optimizer): archive rust wasm rollout benchmarks`
-  - Archives 100k, 1M, 10M, and 100M benchmark evidence.
-  - Records throughput, score, valid rate, cache, and memory metrics.
-- `cc39b91 fix(optimizer): remove bounded progress from ui runs`
-  - Replaces fixed progress with unbounded generation/evaluation counters.
-- `d584611 feat(optimizer): persist ui state in sqlite`
-  - Adds SQLite-backed local API routes for workspace and optimizer sessions.
-- `2e56654 feat(optimizer): persist rust wasm search sessions`
-  - Adds the resumable SQLite runner for long Rust/WASM searches.
-- `26a6af0 docs(optimizer): document rust wasm parallel rollout`
-  - Documents parallel backend usage, trust level, and limitations.
-- `711da97 perf(optimizer): borrow rust search effects`
-  - Ports the effective hybrid search behavior into the direct Rust path.
+## Research Takeaways To Preserve
 
-## Latest Validation Evidence
+1. Keep final scoring strict.
+   Returned candidates must still rank by simulator-backed damage or sustainable-cycle score. Heuristic discovery score must not make a low-damage plan win final ranking.
 
-Latest verification after aligning triggered Halo damage with Puissance Brute
-and resolving Light damage elements for Rust sublimation Alternance/carryover:
+2. Separate discovery score from final score.
+   Discovery score is a shaping signal for exploration and telemetry. It gives credit to enabling states such as rune setup, BQ recovery, WP preservation, conditional unlocks, valid long plans, and sustainable replay readiness.
+
+3. Learn motifs, not only whole winning plans.
+   Useful structures are often partial patterns such as "generate runes before burst", "recover BQ before spending", "unlock a temporary element", or "repair a sustainable replay". These should become reusable seeds or macros, but must still pass simulation.
+
+4. Use curriculum objectives.
+   Hidden techniques are easier to find when intermediate goals are searched directly. The first curricula are BQ generation, rune cycling, valid long plans, sustainable loops, and conditional unlocks.
+
+5. Treat failed candidates as boundary samples.
+   Invalid candidates are not only failures. A resource debt, cooldown lock, missing target, deck limit, cast limit, class-state gate, or replay debt tells search which constraint boundary it hit and what kind of repair may be nearby.
+
+6. Explore approximately, verify exactly.
+   Discovery can use approximate or partial descriptors, especially in Rust/WASM candidate-only paths, but final trusted candidates must be exact simulator/oracle-verified.
+
+7. Favor fast feedback over a perfect search stack.
+   Do not jump straight to neural guidance. First collect descriptors, motifs, boundary samples, and benchmark evidence. Only propose learned policy/value guidance after heuristic discovery plateaus against fixed-seed baselines.
+
+## What Was Implemented
+
+### Discovery Descriptor Layer
+
+Added `src/core/optimizer/discovery.ts`.
+
+It defines:
+
+- discovery options and curriculum objectives;
+- valid and invalid candidate descriptors;
+- compact final state descriptors for resources, Huppermage state, runes, heart, stored BQ, Feu-Follet, halo marks, cooldown count, and affordances;
+- violation categories for actionable failures;
+- bounded discovery scores and score reasons;
+- motif mining, motif merging, motif ranking, and motif seed cloning helpers.
+
+Descriptors are derived from simulator outputs. There is no parallel rules model.
+
+### Separate Discovery Score
+
+Discovery score is bounded and attached as metadata:
+
+- `runeSetup`
+- `runeCycle`
+- `bqRecovery`
+- `wpPreservation`
+- `conditionalUnlock`
+- `validLongPlan`
+- `sustainableReplay`
+- `boundary:<category>`
+- `curriculum:<objective>`
+
+Final ranking still uses the existing candidate comparison and simulator score helpers. `compareCandidates` and `compareRankedCandidates` were not converted to discovery scoring.
+
+### Constraint-Boundary Repair Signals
+
+Invalid candidates now produce classified repair signals when discovery is enabled. The hybrid repair queue carries:
+
+- candidate input;
+- violation category.
+
+Metrics record repair signals, attempts, and successes by category. This preserves the previous repair mechanism while making the boundary data inspectable.
+
+### Motif Mining And Reuse
+
+Motifs are mined from evaluated candidates and near-miss candidates. Motifs record:
+
+- action pattern;
+- required state;
+- resulting state;
+- support count;
+- valid count;
+- validation rate;
+- final-score contribution;
+- discovery-score contribution;
+- a seed candidate.
+
+Motif storage is bounded in memory and pruned by support, validation rate, score contribution, discovery contribution, and recency. Motif-derived candidates are only search hints. They still go through normal simulation, pruning, repair limits, and final ranking.
+
+Important limitation: motifs are not yet persisted across runs. Persistence remains a follow-up decision after benchmark evidence shows which motifs are actually predictive.
+
+### Curriculum Candidate Sampling
+
+Discovery-enabled hybrid search can sample curriculum candidates for:
+
+- `bqGeneration`
+- `runeCycling`
+- `validLongPlans`
+- `sustainableLoops`
+- `conditionalUnlocks`
+
+Curriculum sampling is opt-in and budget-limited. It currently enters the fresh-candidate path probabilistically, so it should be measured against baseline on fixed seeds and budgets before tuning further.
+
+### Rust/WASM Integration
+
+Rust/WASM search paths record discovery data in two ways:
+
+- full TypeScript oracle evaluations record normal descriptors;
+- no-oracle Rust/WASM batches can record candidate-only descriptors from normalized candidates and Rust scores.
+
+Final top-candidate verification still records exact discovery descriptors from the TypeScript oracle. The differential suite remains the safety check for Rust/WASM parity.
+
+### Benchmark Controls
+
+`scripts/benchmark-hybrid.ts` now supports:
+
+```bash
+rtk pnpm bench:hybrid -- --scenario t2-a8-p2 --budget 1000000 --seed a,b,c,d,e --discovery
+rtk pnpm bench:hybrid -- --scenario t2-a8-p2 --budget 1000000 --seed a,b,c,d,e --compare-discovery
+```
+
+`--compare-discovery` runs baseline and discovery under the same scenario, budget, seed, criterion, and backend options.
+Budgets below `1_000_000` attempts are smoke checks only. Do not use 1000-budget runs as search-quality evidence.
+
+## Initial Evidence
+
+Historical smoke check:
+
+```bash
+rtk pnpm bench:hybrid -- --scenario t2-a8-p2 --budget 100 --seed a --compare-discovery
+```
+
+Observed result:
+
+| Mode | Score | Valid rate | Discovery telemetry |
+| --- | ---: | ---: | --- |
+| Baseline | `93663.64` | `0.82` | none |
+| Discovery | `93663.64` | `0.82` | 100 descriptors, 32 motifs, 11 motif seed candidates, 18 boundary samples |
+
+Interpretation:
+
+- This does not prove discovery improves final score yet.
+- It only proves discovery can run without degrading the final score in this smoke case.
+- The new value is observability and new candidate sources: descriptors, motifs, curriculum candidates, and repair-boundary metrics.
+- Budgets of at least 1M attempts, multiple seeds, and harder scenarios are required before deciding whether discovery guidance improves score per iteration.
+
+## Relationship To Continuous SQLite Search
+
+Important: the real proof path should build on the existing continuous Rust/WASM SQLite search loop, not only on small one-shot benchmark commands.
+
+That infrastructure already exists in master/current branch:
+
+- `scripts/search-rust-wasm-sqlite.ts`
+- `rtk pnpm search:rust-wasm`
+- persistent sessions in `.optimizer/rust-wasm-search.sqlite`
+- per-worker Rust/WASM resume state;
+- saved best candidate and checkpoints;
+- final top-candidate TypeScript oracle verification.
+
+The current discovery implementation does not yet persist discovery descriptors, motifs, curriculum lineage, or boundary samples into the SQLite search database. It only wires discovery into the TypeScript experiment/hybrid layer and benchmark comparison path. That is enough to validate the shape of the discovery signals, but it is not enough to prove discovery improves long-running search.
+
+Next serious implementation step:
+
+1. Extend the SQLite search schema with discovery tables or JSON columns for descriptor summaries, motif summaries, boundary samples, curriculum counts, and motif seed outcomes.
+2. Add discovery options to `scripts/search-rust-wasm-sqlite.ts`, likely behind `--discovery` and `--compare-discovery`-style flags.
+3. Persist per-worker discovery state or at least aggregate checkpoint summaries across rounds.
+4. Keep Rust/WASM resume state compatible and exact-oracle final verification unchanged.
+5. Compare continuous baseline sessions and continuous discovery sessions with the same scenario, seed, worker count, chunk size, and timebox.
+
+Until this is done, discovery should be treated as a promising instrumentation and candidate-generation layer, not as a proven optimizer improvement.
+
+## What Is Intentionally Not Done
+
+- No neural network policy or value model.
+- No persistent descriptor or motif corpus.
+- No UI surface for discovery telemetry.
+- No replacement of exact simulator ranking.
+- No trusted macro-action system that bypasses validation.
+- No claim that this branch already improves final score versus master.
+- No broad retuning of hybrid probabilities beyond a conservative opt-in curriculum branch and motif seed budget.
+
+These omissions are deliberate. They keep the first change inspectable and make the next benchmark decision easier.
+
+## Follow-Up Directives
+
+Before implementing neural guidance or deeper search changes, run a benchmark matrix:
+
+```bash
+rtk pnpm bench:hybrid -- --scenario t2-a8-p2 --budget 1000000 --seed a,b,c,d,e --compare-discovery
+rtk pnpm bench:hybrid -- --scenario t3-a12-p3 --budget 1000000 --seed a,b,c,d,e --compare-discovery
+rtk pnpm bench:hybrid -- --scenario t3-full --budget 1000000 --seed a,b,c,d,e --compare-discovery
+```
+
+Track:
+
+- final score distribution;
+- valid rate;
+- score per iteration;
+- discovery descriptor count;
+- discovery-score leader versus final-score leader;
+- motif count, motif support, motif seed attempts, and motif seed successes;
+- boundary samples by category;
+- repair attempts and successes by category;
+- curriculum candidate counts by objective;
+- Rust/WASM final top-candidate verification deltas.
+
+If discovery helps, tune budgets and motif seed selection. If it only adds telemetry, use the descriptor corpus to decide whether a persisted corpus or learned guide is justified.
+
+For proof-quality evidence, prefer continuous SQLite sessions:
+
+```bash
+rtk pnpm search:rust-wasm -- --session baseline-t3-full-a --scenario t3-full --seed a --workers 6 --chunk-size 100000 --timebox-ms 600000
+rtk pnpm search:rust-wasm -- --session discovery-t3-full-a --scenario t3-full --seed a --workers 6 --chunk-size 100000 --timebox-ms 600000 --discovery
+```
+
+The `--discovery` flag shown above does not exist yet. Add it before using this command as a proof run.
+
+## Neural Guidance Gate
+
+Only propose neural guidance after all of these are true:
+
+- discovery-guided search has plateaued against baseline;
+- a sizable simulator-evaluated corpus exists;
+- descriptors or motifs show predictive value for final score or repair success;
+- a learned guide can be compared against heuristic discovery under identical seeds, budgets, and exact final oracle verification.
+
+Potential learned-guide roles later:
+
+- policy prior for action/passive/sublimation sampling;
+- value estimate for partial plans;
+- motif ranking or pruning;
+- repair-category prediction.
+
+Non-negotiable constraint: learned guidance must never replace exact simulator validation for final candidates.
+
+## Verification Status
+
+Passed:
 
 ```bash
 rtk pnpm test
 rtk pnpm wasm:test
-rtk env PATH=/Users/zacariachtatar/game_repos/wakfu-turn-optimizer/.worktrees/codex/port-hybrid-engine-rust-wasm-handoff/.local-cargo-bin/bin:$PATH wasm-pack build rust/optimizer-wasm --target nodejs --out-dir ../../src/wasm/optimizer_wasm_pkg --no-opt
-rtk pnpm diff:rust-wasm -- --no-build
-rtk pnpm diff:rust-wasm:soak -- --no-build
-rtk pnpm bench:hybrid -- --compare-backends --scenario t3-full --budget 100000 --seed smoke --no-build --no-oracle
-rtk openspec validate port-hybrid-engine-to-rust-wasm --strict --no-interactive
+rtk pnpm diff:rust-wasm
+rtk pnpm bench:hybrid -- --scenario t2-a8-p2 --budget 100 --seed a --compare-discovery # smoke only, not quality evidence
+rtk pnpm build
+rtk openspec validate add-constraint-path-discovery --strict --no-interactive
 rtk git diff --check
 ```
 
-Results:
+Rust/WASM verification:
 
-- TypeScript tests: 256 passed.
-- Rust tests: 56 passed.
-- CI differential: 94 fixtures, 102 generated candidates, 0 mismatches.
-- Soak differential: 122 fixtures, 1648 generated candidates, 0 mismatches.
-- OpenSpec strict validation: valid.
-- Diff whitespace check: passed.
-- `t3-full` 100k smoke with supported sublimations, no per-candidate oracle:
-  - TypeScript: `2572.80 it/s`, score `167490.44`.
-  - Rust/WASM: `4732.53 it/s`, Rust direct and TypeScript-verified score
-    `169698.63`.
-  - Final top oracle candidates: 50 valid, max score delta `0`, max total
-    damage delta `0`.
+- `rtk pnpm wasm:test`: 61 passed.
+- `rtk pnpm diff:rust-wasm`: 94 fixtures, 102 generated candidates, 0 mismatches.
 
-Notes:
+The Rust unit expectations in `rust/optimizer-wasm/src/lib.rs` were refreshed to match current simulator behavior for base rune-generation BQ, abundance retention, profusion turn-end abundance, and light-damage abundance consumption.
 
-- `wasm-pack` / `wasm-bindgen` may write temporary files outside the sandbox, so
-  `rtk pnpm diff:rust-wasm` can require escalated execution in Codex. In this
-  refresh, the full diff was run with `--no-build` after regenerating the local
-  WASM package with a worktree-local `wasm-bindgen 0.2.122` binary.
-- Node dependency work must use `pnpm`, not `npm`.
+## Important Files
 
-## Archived Benchmark Evidence
+- `src/core/optimizer/discovery.ts`
+- `src/core/optimizer/optimizerExperiment.ts`
+- `src/core/optimizer/optimizerExperiment.test.ts`
+- `scripts/benchmark-hybrid.ts`
+- `docs/constraint-path-discovery.md`
+- `openspec/changes/add-constraint-path-discovery/`
+- `rust/optimizer-wasm/src/lib.rs`
 
-Archived files live in `docs/benchmarks/`.
+## Current Git State
 
-Representative results:
+Expected uncommitted worktree changes:
 
-- `t3-full`, 1M, direct Rust/WASM no-oracle:
-  - TypeScript: about `7.4k it/s`, score `103545.66`.
-  - Rust/WASM direct: about `12.2k it/s`, score `103545.66`.
-  - Top Rust candidates revalidated in TypeScript with score delta `0`.
-- `t3-full`, 10M, Rust/WASM parallel:
-  - Throughput about `79.7k it/s`.
-  - Score `103545.66`.
-  - Top 5 revalidated in TypeScript with max score delta `0`.
-- `t3-full`, 100M, Rust/WASM parallel:
-  - Throughput about `97.2k it/s`.
-  - Score `103545.66`.
-  - Valid rate about `0.3736`.
-  - Evaluator cache limit `400000`.
-  - Parent RSS about `329 MB`.
-  - Peak worker RSS about `1012 MB`.
-  - Top 5 revalidated in TypeScript with max score delta `0`.
+- modified `HANDOFF.md`;
+- modified Rust unit expectations in `rust/optimizer-wasm/src/lib.rs`;
+- modified optimizer experiment code and tests;
+- added `src/core/optimizer/discovery.ts`;
+- added `docs/constraint-path-discovery.md`;
+- added OpenSpec change files under `openspec/changes/add-constraint-path-discovery/`.
 
-Archived conclusion before the sublimation-enabled benchmark correction:
-
-- Rust/WASM result quality was aligned for the archived no-sublimation rollout
-  matrix.
-- Direct Rust/WASM is faster than TypeScript, but not at the old simplified
-  spike's x12 ratio.
-- The parallel harness gives the useful speedup for long experimental runs.
-
-## Post-Rebase Sublimation Notes
-
-The branch has been rebased onto `origin/master`, which includes the TypeScript
-sublimation engine. TypeScript remains the oracle. Rust/WASM now:
-
-- accepts action-level context in candidate plans, including `criticalMode`;
-- applies supported sublimation effective levels for initial stat/resource
-  effects, per-action elemental bonuses, elemental carryover, Exces counters,
-  Puissance Brute spent-resource bonuses, and AP/MP carryover;
-- preserves fractional AP/MP/WP/BQ resources required by supported
-  sublimations such as Devastation and Armure Lourde;
-- mirrors TypeScript HP-assumption range overlap for threshold sublimations,
-  including berserk effects that overlap the `normal` 21-89% assumption;
-- reports global `invalidSublimation` candidate violations with the same
-  normalized `actionIndex: -1` shape as TypeScript;
-- keeps final Rust top candidates revalidated through TypeScript in no-oracle
-  benchmark mode.
-- asks Rust/WASM for a larger unverified finalist buffer in final-oracle mode,
-  so TypeScript can choose the best verified candidates instead of trusting the
-  first few Rust-ranked candidates blindly.
-
-Recent parity fixes:
-
-- Puissance Brute should reduce base/max PW at combat start, not subtract PW
-  again every turn. TypeScript combo replay now preserves carried PW by
-  precompensating initial `wp` sublimation deltas before each replayed turn.
-  Rust already carries PW without reapplying the malus.
-- Puissance Brute's spent-resource damage bonus now applies in the TypeScript
-  oracle to triggered Halo Chatoyant damage, matching the rule that the bonus
-  applies to the next damage line after spending PW or BQ.
-- Rust now resolves Light spell damage to the current effective elemental
-  damage element before applying/storing elemental sublimations such as
-  Alternance. This fixes Rust undercounting Light spells such as Orbes
-  Luisants when they resolve to earth/water/fire/air for scoring.
-
-Known open issue:
-
-- The branch is much closer to mergeable after the parity fixes, but still
-  needs a final review pass for untracked local build artifacts and any
-  remaining OpenSpec/archive expectations before merging into `master`.
-
-If TypeScript gameplay rules, catalog entries, or supported sublimation effects
-change again, reset incompatible persistent search sessions and re-run the
-differential suite before trusting Rust/WASM results.
-
-## Commands To Resume
-
-```bash
-cd /Users/zacariachtatar/game_repos/wakfu-turn-optimizer/.worktrees/codex/port-hybrid-engine-rust-wasm-handoff
-rtk git status --short --branch
-rtk pnpm wasm:test
-rtk pnpm diff:rust-wasm
-rtk pnpm diff:rust-wasm:soak
-rtk pnpm test
-rtk openspec validate port-hybrid-engine-to-rust-wasm --strict --no-interactive
-```
+Do not remove the OpenSpec draft from this worktree. It was intentionally removed only from the main checkout.

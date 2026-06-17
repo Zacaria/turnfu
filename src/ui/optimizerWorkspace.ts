@@ -202,12 +202,31 @@ export async function runOptimizerForControlsLive(
 ): Promise<OptimizerCandidateViewModel[]> {
   const normalizedControls = normalizeOptimizerControls(controls);
   if (normalizedControls.searchMethod === "hybrid") {
-    return runRustWasmOptimizerForControlsLive(setup, catalog, normalizedControls, onProgress, signal);
+    try {
+      return await runRustWasmOptimizerForControlsLive(setup, catalog, normalizedControls, onProgress, signal);
+    } catch (error) {
+      if (!isUnavailableOptimizerStreamError(error)) {
+        throw error;
+      }
+
+      return runLocalOptimizerForControlsLive(setup, catalog, normalizedControls, onProgress, signal);
+    }
   }
   if (normalizedControls.searchMethod === "genetic") {
     return runGeneticOptimizerForControlsLive(setup, catalog, normalizedControls, onProgress, signal);
   }
 
+  return runLocalOptimizerForControlsLive(setup, catalog, normalizedControls, onProgress, signal);
+}
+
+async function runLocalOptimizerForControlsLive(
+  setup: SetupSnapshot,
+  catalog: CatalogEntry[],
+  controls: OptimizerWorkspaceControls,
+  onProgress: (progress: OptimizerLiveRunProgress) => void,
+  signal?: AbortSignal,
+): Promise<OptimizerCandidateViewModel[]> {
+  const normalizedControls = normalizeOptimizerControls(controls);
   const batchSize = Math.min(200, Math.max(10, Math.floor(normalizedControls.iterationBudget / 10)));
   const totalBatches = Math.ceil(normalizedControls.iterationBudget / batchSize);
   const candidates = new Map<string, OptimizerCandidateViewModel>();
@@ -264,6 +283,10 @@ export async function runOptimizerForControlsLive(
   }
 
   return rankOptimizerCandidateViewModels([...candidates.values()]).slice(0, normalizedControls.maxResultsPerDuration);
+}
+
+function isUnavailableOptimizerStreamError(error: unknown): boolean {
+  return error instanceof Error && error.message === "Optimizer stream failed with status 404.";
 }
 
 async function runRustWasmOptimizerForControlsLive(

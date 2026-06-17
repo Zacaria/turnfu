@@ -10,6 +10,7 @@ import {
   runOptimizerExperimentProgressive,
   type OptimizerExperimentEngineKind,
 } from "./optimizerExperiment.ts";
+import { mergeDiscoveryMotif, mineDiscoveryMotif, rankDiscoveryMotifs } from "./discovery.ts";
 import type { CatalogEntry } from "../catalog/types.ts";
 import type { SimulatedCharacter } from "../simulation/types.ts";
 
@@ -363,6 +364,112 @@ test("memoizes duplicate complete plan evaluations", () => {
   assert.equal(second?.score.score, 144);
   assert.equal(stats.cacheMisses, 1);
   assert.equal(stats.cacheHits, 1);
+});
+
+test("extracts discovery descriptors for valid and invalid candidate evaluations", () => {
+  const evaluator = createOptimizerExperimentEvaluator({
+    catalog,
+    character,
+    duration: 2,
+    criterion: { type: "totalDamage" },
+    discovery: { enabled: true },
+  });
+
+  const valid = evaluator.evaluateDetailed({
+    passiveIds: [],
+    plan: {
+      turns: [
+        { actions: [{ spellId: "setup" }] },
+      ],
+    },
+  });
+  const invalid = evaluator.evaluateDetailed({
+    passiveIds: [],
+    plan: {
+      turns: [
+        { actions: [{ spellId: "burst" }] },
+      ],
+    },
+  });
+
+  assert.equal(valid.result?.score.score, 0);
+  assert.equal(valid.discovery.descriptor.valid, true);
+  assert.ok(valid.discovery.descriptor.affordances.includes("bq-ready"));
+  assert.ok(valid.discovery.discoveryScore.reasons.includes("bqRecovery"));
+  assert.equal(invalid.result, null);
+  assert.equal(invalid.discovery.descriptor.valid, false);
+  assert.equal(invalid.discovery.descriptor.violation?.category, "resourceDebt");
+  assert.ok(invalid.discovery.discoveryScore.reasons.includes("boundary:resourceDebt"));
+});
+
+test("reports discovery metrics without changing final ranking", () => {
+  const result = runOptimizerExperiment({
+    catalog,
+    character,
+    duration: 2,
+    availableSpellIds: ["setup", "hit", "burst"],
+    engines: ["hybrid"],
+    seed: "discovery-metrics-ranking",
+    budget: { iterations: 80 },
+    maxActionsPerTurn: 1,
+    discovery: {
+      enabled: true,
+      curriculumObjectives: ["bqGeneration", "validLongPlans"],
+      motifSeedBudget: 4,
+    },
+  });
+
+  const engine = result.engineResults[0];
+  assert.equal(result.bestCandidate?.score.score, 144);
+  assert.equal(result.bestCandidate?.plan.turns[0]?.actions[0]?.spellId, "setup");
+  assert.equal(result.bestCandidate?.plan.turns[1]?.actions[0]?.spellId, "burst");
+  assert.ok((engine?.metrics.discoveryDescriptors ?? 0) > 0);
+  assert.ok((engine?.metrics.discoveryScoreLeader ?? 0) > 0);
+  assert.ok((engine?.metrics.discoveryMotifs ?? 0) > 0);
+  assert.ok((engine?.metrics.discoveryMotifSeedCandidates ?? 0) > 0);
+  assert.ok((engine?.metrics.discoveryCurriculumCandidates ?? 0) > 0);
+  assert.equal(engine?.bestCandidate?.score.score, result.bestCandidate?.score.score);
+});
+
+test("mines and ranks discovery motifs from reusable evaluated patterns", () => {
+  const evaluator = createOptimizerExperimentEvaluator({
+    catalog,
+    character,
+    duration: 2,
+    criterion: { type: "totalDamage" },
+    discovery: { enabled: true },
+  });
+  const input = {
+    passiveIds: [],
+    plan: {
+      turns: [
+        { actions: [{ spellId: "setup" }] },
+        { actions: [{ spellId: "burst" }] },
+      ],
+    },
+  };
+  const evaluation = evaluator.evaluateDetailed(input);
+  const first = mineDiscoveryMotif({ input: evaluation.normalizedCandidate, payload: evaluation.discovery, attempt: 1 });
+  const second = mineDiscoveryMotif({ input: evaluation.normalizedCandidate, payload: evaluation.discovery, attempt: 2 });
+
+  assert.ok(first);
+  assert.ok(second);
+  const merged = mergeDiscoveryMotif(first, second);
+  const ranked = rankDiscoveryMotifs([
+    {
+      ...merged,
+      key: "lower-support",
+      supportCount: 1,
+      validationRate: 1,
+      discoveryScoreContribution: 1,
+      finalScoreContribution: 1,
+    },
+    merged,
+  ]);
+
+  assert.equal(merged.supportCount, 2);
+  assert.equal(merged.validationRate, 1);
+  assert.equal(ranked[0]?.key, merged.key);
 });
 
 test("novelty search evolves offspring from its archive", () => {
@@ -764,6 +871,7 @@ test("hybrid search repairs invalid three-turn Huppermage branches", () => {
     budget: { iterations: 100 },
     maxActionsPerTurn: 12,
     maxPassiveCount: 3,
+    discovery: { enabled: true },
     availablePassiveIds: huppermageCatalog.filter((entry) => entry.kind === "passive").map((entry) => entry.id),
     defaultActionContext: {
       position: "face",
@@ -778,6 +886,8 @@ test("hybrid search repairs invalid three-turn Huppermage branches", () => {
   assert.ok((result.bestCandidate?.score.score ?? 0) >= 92_000);
   assert.ok((engineResult?.metrics.hybridRepairQueueCandidates ?? 0) > 0);
   assert.ok((engineResult?.metrics.hybridRepairCandidates ?? 0) > 0);
+  assert.ok((engineResult?.metrics.discoveryRepairSignals ?? 0) > 0);
+  assert.ok((engineResult?.metrics.discoveryBoundarySamples ?? 0) > 0);
   assert.ok((engineResult?.validCandidates ?? 0) > (engineResult?.invalidCandidates ?? 0));
   assert.ok((engineResult?.metrics.hybridRelocateNeighborCandidates ?? 0) > 0);
 });
