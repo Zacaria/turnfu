@@ -11,6 +11,11 @@ import { validateSublimationBuild } from "../core/sublimations/index.ts";
 import {
   createContinuousOptimizerPageViewModel,
   createDefaultContinuousOptimizerControls,
+  streamContinuousOptimizerRun,
+  type ContinuousOptimizerCheckpointSummary,
+  type ContinuousOptimizerControls,
+  type ContinuousOptimizerSessionSummary,
+  type ContinuousOptimizerStatus,
 } from "./continuousOptimizerWorkspace.ts";
 import {
   createDefaultOptimizerControls,
@@ -128,7 +133,7 @@ export function ResearchLibraryPage({
         <div className="row-actions">
           <button className="secondary-button" type="button" onClick={onOpenContinuousOptimizer}>
             <Search size={16} />
-            Continuous
+            Continuous diagnostics
           </button>
           <button className="secondary-button" type="button" onClick={onOpenQuickBuilder}>
             <Wrench size={16} />
@@ -328,13 +333,104 @@ export function BuildPage({
 }
 
 export function ContinuousOptimizerPage({ onBack }: { onBack: () => void }) {
+  const [controls, setControls] = useState(() => createDefaultContinuousOptimizerControls());
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const [status, setStatus] = useState<ContinuousOptimizerStatus>("idle");
+  const [session, setSession] = useState<ContinuousOptimizerSessionSummary | null>(null);
+  const [checkpoints, setCheckpoints] = useState<ContinuousOptimizerCheckpointSummary[]>([]);
+  const [runMessages, setRunMessages] = useState<string[]>([]);
+  const [runError, setRunError] = useState<string | null>(null);
+  const displayedSession = session ? { ...session, status } : null;
   const view = createContinuousOptimizerPageViewModel({
-    controls: createDefaultContinuousOptimizerControls(),
-    session: null,
-    checkpoints: [],
-    promotedSeeds: [],
+    controls,
+    session: displayedSession,
+    checkpoints,
+    reuseTrials: [],
     motifs: [],
   });
+
+  useEffect(() => {
+    return () => {
+      abortControllerRef.current?.abort();
+    };
+  }, []);
+
+  function startContinuousRun() {
+    if (!view.operations.canStart || abortControllerRef.current) {
+      return;
+    }
+
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    const startedAt = new Date().toISOString();
+    setStatus("running");
+    setRunError(null);
+    setRunMessages([]);
+    setSession({
+      id: controls.sessionId,
+      status: "running",
+      totalAttempts: 0,
+      validRate: 0,
+      bestScore: null,
+      workerCount: controls.workerCount,
+      updatedAt: startedAt,
+    });
+
+    void streamContinuousOptimizerRun({
+      args: view.launchArgs,
+      onComplete: () => setStatus("stopped"),
+      onLog: (line) => {
+        setRunMessages((current) => [line, ...current].slice(0, 4));
+      },
+      onProgress: (payload) => {
+        const checkpoint = {
+          totalAttempts: payload.totalAttempts,
+          score: payload.score,
+          validRate: payload.validRate,
+        };
+        setCheckpoints((current) => {
+          const next = current.filter((entry) => entry.totalAttempts !== checkpoint.totalAttempts);
+          next.push(checkpoint);
+          return next.sort((left, right) => left.totalAttempts - right.totalAttempts);
+        });
+        setSession({
+          id: controls.sessionId,
+          status: "running",
+          totalAttempts: payload.totalAttempts,
+          validRate: payload.validRate,
+          bestScore: payload.score,
+          workerCount: controls.workerCount,
+          updatedAt: new Date().toISOString(),
+        });
+      },
+      onStopped: () => setStatus("stopped"),
+      signal: controller.signal,
+    }).catch((error: unknown) => {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        setStatus("stopped");
+        return;
+      }
+      setStatus("error");
+      setRunError(error instanceof Error ? error.message : "Continuous optimizer failed.");
+    }).finally(() => {
+      if (abortControllerRef.current === controller) {
+        abortControllerRef.current = null;
+      }
+    });
+  }
+
+  function stopContinuousRun() {
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
+    setStatus("stopped");
+  }
+
+  function updateControls(next: Partial<ContinuousOptimizerControls>) {
+    if (status === "running") {
+      return;
+    }
+    setControls((current) => ({ ...current, ...next }));
+  }
 
   return (
     <main className="research-shell optimizer-shell">
@@ -342,7 +438,7 @@ export function ContinuousOptimizerPage({ onBack }: { onBack: () => void }) {
       <section className="build-header">
         <div className="build-header-title">
           <span>Rust/WASM · {view.controls.dbPath}</span>
-          <h1>Continuous</h1>
+          <h1>Continuous diagnostics</h1>
         </div>
         <span className="status-pill">{view.statusLabel}</span>
       </section>
@@ -352,18 +448,82 @@ export function ContinuousOptimizerPage({ onBack }: { onBack: () => void }) {
           <h2>Session</h2>
           <div className="thin-row">
             <b>{view.controls.sessionId}</b>
-            <span>{view.controls.scenarioId} · {view.controls.workerCount} workers · chunk {view.controls.chunkSize}</span>
+            <span>
+              {view.controls.scenarioId} · {view.controls.workerCount} workers · chunk {view.controls.chunkSize} · {view.qualityPresetLabel}
+            </span>
           </div>
+          <label className="field">
+            Scenario
+            <select
+              disabled={status === "running"}
+              value={view.controls.scenarioId}
+              onChange={(event) => updateControls({
+                scenarioId: event.currentTarget.value as ContinuousOptimizerControls["scenarioId"],
+              })}
+            >
+              <option value="t2-a8-p2">t2-a8-p2</option>
+              <option value="t3-a12-p3">t3-a12-p3</option>
+              <option value="t3-full">t3-full</option>
+            </select>
+          </label>
+          <label className="field">
+            Policy
+            <select
+              disabled={status === "running"}
+              value={view.controls.qualityPreset}
+              onChange={(event) => updateControls({
+                qualityPreset: event.currentTarget.value as ContinuousOptimizerControls["qualityPreset"],
+              })}
+            >
+              <option value="validated-contextual">Validated contextual</option>
+              <option value="manual">Manual</option>
+            </select>
+          </label>
+          <label className="field">
+            Score
+            <select
+              disabled={status === "running"}
+              value={view.controls.scoreCriterion}
+              onChange={(event) => updateControls({
+                scoreCriterion: event.currentTarget.value as ContinuousOptimizerControls["scoreCriterion"],
+              })}
+            >
+              <option value="total-damage">Total damage</option>
+              <option value="element-damage">Element damage</option>
+            </select>
+          </label>
+          <label className="field">
+            Element
+            <select
+              disabled={status === "running" || view.controls.scoreCriterion === "total-damage"}
+              value={view.controls.targetElement}
+              onChange={(event) => updateControls({
+                targetElement: event.currentTarget.value as ContinuousOptimizerControls["targetElement"],
+              })}
+            >
+              <option value="fire">fire</option>
+              <option value="water">water</option>
+              <option value="earth">earth</option>
+              <option value="air">air</option>
+            </select>
+          </label>
+          <label className="field continuous-checkbox-row">
+            <input
+              checked={view.controls.requireSustainableCycle}
+              disabled={status === "running"}
+              type="checkbox"
+              onChange={(event) => updateControls({ requireSustainableCycle: event.currentTarget.checked })}
+            />
+            Sustainable cycle
+          </label>
           <div className="row-actions">
-            <button className="primary-button" type="button" disabled={!view.operations.canStart}>
+            <button className="primary-button" type="button" disabled={!view.operations.canStart} onClick={startContinuousRun}>
               <Play size={16} />
               Start
             </button>
-            <button className="secondary-button" type="button" disabled={!view.operations.canPause}>
-              Pause
-            </button>
-            <button className="secondary-button" type="button" disabled={!view.operations.canResume}>
-              Resume
+            <button className="secondary-button" type="button" disabled={!view.operations.canPause} onClick={stopContinuousRun}>
+              <X size={15} />
+              Stop
             </button>
           </div>
         </section>
@@ -377,17 +537,41 @@ export function ContinuousOptimizerPage({ onBack }: { onBack: () => void }) {
           {view.bestCombos.checkpoints.length === 0 ? (
             <EmptyState title="Aucun checkpoint" body="La session n'a pas encore publié de checkpoint." />
           ) : null}
+          {view.bestCombos.checkpoints.slice(-4).map((checkpoint) => (
+            <div className="thin-row" key={checkpoint.totalAttempts}>
+              <b>{checkpoint.score.toFixed(2)}</b>
+              <span>
+                {checkpoint.totalAttempts.toLocaleString("fr-FR")} attempts · valid {(checkpoint.validRate * 100).toFixed(1)}%
+              </span>
+            </div>
+          ))}
         </section>
+
+        {runError || runMessages.length > 0 ? (
+          <section className="workspace-section">
+            <h2>Runner</h2>
+            {runError ? <div className="thin-row"><b>Error</b><span>{runError}</span></div> : null}
+            {runMessages.map((message, index) => (
+              <div className="thin-row" key={`${index}-${message}`}>
+                <b>Log</b>
+                <span>{message}</span>
+              </div>
+            ))}
+          </section>
+        ) : null}
 
         <section className="workspace-section">
           <h2>Learned evidence</h2>
-          {view.learnedEvidence.promotedSeeds.length === 0 && view.learnedEvidence.motifs.length === 0 ? (
-            <EmptyState title="Aucune évidence promue" body="Les motifs et seeds promus apparaîtront ici après minage du corpus." />
+          {view.learnedEvidence.reuseTrials.length === 0 && view.learnedEvidence.motifs.length === 0 ? (
+            <EmptyState title="Aucune évidence" body="Les motifs et essais de réutilisation apparaîtront ici après minage du corpus." />
           ) : null}
-          {view.learnedEvidence.promotedSeeds.map((seed) => (
-            <div className="thin-row" key={seed.label}>
-              <b>{seed.label}</b>
-              <span>{seed.score.toFixed(2)} · confidence {(seed.confidence * 100).toFixed(0)}% · used {seed.usageCount}</span>
+          {view.learnedEvidence.reuseTrials.map((trial) => (
+            <div className="thin-row" key={trial.label}>
+              <b>{trial.label}</b>
+              <span>
+                source {trial.sourceScore?.toFixed(2) ?? "-"} · result {trial.resultScore?.toFixed(2) ?? "-"}
+                {trial.improvedGlobalBest ? " · improved" : ""}
+              </span>
             </div>
           ))}
           {view.learnedEvidence.motifs.map((motif) => (
@@ -973,6 +1157,7 @@ export function OptimizerWorkspacePage({
         invalidCandidates: 0,
         validCandidates: 0,
       };
+      const targetAttempts = runControls.iterationBudget;
       const results = await runOptimizerForControlsLive(setup, catalog, runControls, (progress) => {
         if (runSequenceRef.current !== runSequence) {
           return;
@@ -983,13 +1168,15 @@ export function OptimizerWorkspacePage({
           invalidCandidates: progress.invalidCandidates,
           validCandidates: progress.validCandidates,
         };
-        const percent = Math.min(99, Math.max(1, Math.round((progress.attempts / runControls.iterationBudget) * 100)));
+        const percent = Math.min(99, Math.max(1, Math.round((progress.attempts / targetAttempts) * 100)));
         setLastRun({ controls: runControls, results: progress.results });
         setRunProgress({
           attempts: progress.attempts,
           bestScore: progress.bestScore,
           invalidCandidates: progress.invalidCandidates,
-          label: `${runControls.searchMethod} · génération ${progress.batch}`,
+          label: runControls.searchMethod === "continuous"
+            ? `continuous · checkpoint ${progress.batch}`
+            : `${runControls.searchMethod} · génération ${progress.batch}`,
           percent,
           validCandidates: progress.validCandidates,
         });
@@ -1116,6 +1303,7 @@ export function OptimizerWorkspacePage({
             onChange={(event) => updateControls({ searchMethod: event.target.value as OptimizerWorkspaceControls["searchMethod"] })}
           >
             <option value="hybrid">Hybride</option>
+            <option value="continuous">Continuous</option>
             <option value="genetic">Génétique</option>
             <option value="mcts">MCTS</option>
             <option value="annealing">Recuit</option>
@@ -1127,9 +1315,9 @@ export function OptimizerWorkspacePage({
           Essais par lot
           <input
             type="number"
-            min={10}
-            max={1000000}
-            step={100}
+            min={controls.searchMethod === "continuous" ? 1000000 : 10}
+            max={controls.searchMethod === "continuous" ? 100000000 : 1000000}
+            step={controls.searchMethod === "continuous" ? 1000000 : 100}
             value={controls.iterationBudget}
             disabled={isRunning}
             onChange={(event) => updateControls({ iterationBudget: Number(event.target.value) })}

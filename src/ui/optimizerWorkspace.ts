@@ -11,16 +11,23 @@ import {
 import type { ComboPlan, ResourcePool, SimulatedCharacter } from "../core/simulation/types.ts";
 import { sublimationCatalog } from "../core/sublimations/index.ts";
 import type { SublimationBuild } from "../core/sublimations/types.ts";
+import {
+  createContinuousOptimizerLaunchArgs,
+  createDefaultContinuousOptimizerControls,
+  streamContinuousOptimizerRun,
+  type ContinuousOptimizerTargetElement,
+} from "./continuousOptimizerWorkspace.ts";
 import type { SetupSnapshot } from "./researchWorkspace.ts";
 
 export type OptimizerScoreCriterionId = "totalDamage" | "elementDamage";
+export type OptimizerWorkspaceSearchMethod = OptimizerExperimentEngineKind | "continuous";
 
 export type OptimizerWorkspaceControls = {
   duration: number;
   scoreCriterion: OptimizerScoreCriterionId;
   targetElement: Exclude<Element, "light" | "neutral">;
   requireSustainableCycle: boolean;
-  searchMethod: OptimizerExperimentEngineKind;
+  searchMethod: OptimizerWorkspaceSearchMethod;
   iterationBudget: number;
   beamWidth: number;
   maxResultsPerDuration: number;
@@ -61,6 +68,23 @@ export type OptimizerLiveRunProgress = {
   bestCandidate?: OptimizerCandidateViewModel;
   metrics: Record<string, number>;
   results: OptimizerCandidateViewModel[];
+};
+
+export type ContinuousVerifiedOptimizerCandidatePayload = {
+  schemaVersion: 1;
+  totalAttempts: number;
+  rank: number;
+  run: {
+    sessionId: string;
+    scenarioId: string;
+    seed: string;
+    workerCount: number;
+    chunkSize: number;
+    scoreCriterion: "total-damage" | "element-damage";
+    targetElement: ContinuousOptimizerTargetElement | null;
+    requireSustainableCycle: boolean;
+  };
+  candidate: OptimizerCandidateSource;
 };
 
 type OptimizerRunStreamPayload = {
@@ -104,10 +128,13 @@ export function createDefaultOptimizerControls(): OptimizerWorkspaceControls {
 }
 
 export function normalizeOptimizerControls(controls: OptimizerWorkspaceControls): OptimizerWorkspaceControls {
+  const searchMethod = normalizeOptimizerSearchMethod(controls.searchMethod);
+  const minIterations = searchMethod === "continuous" ? 1_000_000 : 10;
   return {
     ...controls,
+    searchMethod,
     duration: clampInteger(controls.duration, 1, 3),
-    iterationBudget: clampInteger(controls.iterationBudget, 10, 1_000_000),
+    iterationBudget: clampInteger(controls.iterationBudget, minIterations, 1_000_000_000),
     beamWidth: clampInteger(controls.beamWidth, 1, 200),
     maxResultsPerDuration: clampInteger(controls.maxResultsPerDuration, 1, 50),
   };
@@ -142,13 +169,14 @@ export function createOptimizerExperimentOptionsForSetup(
   controls: OptimizerWorkspaceControls,
 ): OptimizerExperimentOptions {
   const normalizedControls = normalizeOptimizerControls(controls);
+  const experimentEngine = normalizedControls.searchMethod === "continuous" ? "hybrid" : normalizedControls.searchMethod;
   const criterion = createOptimizationCriterion(normalizedControls);
 
   return {
     catalog,
     character: setup.character,
     duration: normalizedControls.duration,
-    engines: [normalizedControls.searchMethod],
+    engines: [experimentEngine],
     budget: { iterations: normalizedControls.iterationBudget },
     maxCandidates: normalizedControls.maxResultsPerDuration,
     maxPassiveCount: getSetupPassiveLimit(setup),
@@ -183,6 +211,9 @@ export function runOptimizerForControls(
   controls: OptimizerWorkspaceControls,
 ): OptimizerCandidateViewModel[] {
   const normalizedControls = normalizeOptimizerControls(controls);
+  if (normalizedControls.searchMethod === "continuous") {
+    return [];
+  }
   const duration = normalizedControls.duration;
   const experiment = runOptimizerExperiment(createOptimizerExperimentOptionsForSetup(setup, catalog, normalizedControls));
   const engineResult = experiment.engineResults[0];
@@ -201,6 +232,9 @@ export async function runOptimizerForControlsLive(
   signal?: AbortSignal,
 ): Promise<OptimizerCandidateViewModel[]> {
   const normalizedControls = normalizeOptimizerControls(controls);
+  if (normalizedControls.searchMethod === "continuous") {
+    return runContinuousOptimizerForControlsLive(setup, normalizedControls, onProgress, signal);
+  }
   if (normalizedControls.searchMethod === "hybrid") {
     try {
       return await runRustWasmOptimizerForControlsLive(setup, catalog, normalizedControls, onProgress, signal);
@@ -408,6 +442,63 @@ async function runGeneticOptimizerForControlsLive(
   return latestResults;
 }
 
+async function runContinuousOptimizerForControlsLive(
+  setup: SetupSnapshot,
+  controls: OptimizerWorkspaceControls,
+  onProgress: (progress: OptimizerLiveRunProgress) => void,
+  signal?: AbortSignal,
+): Promise<OptimizerCandidateViewModel[]> {
+  const normalizedControls = normalizeOptimizerControls(controls);
+  const continuousControls = createContinuousControlsForOptimizerRun(setup, normalizedControls);
+  const candidates = new Map<string, OptimizerCandidateViewModel>();
+  let latestResults: OptimizerCandidateViewModel[] = [];
+  let progressBatch = 0;
+  let latestAttempts = 0;
+  let latestValidCandidates = 0;
+  let latestInvalidCandidates = 0;
+  let latestCheckpointScore: number | undefined;
+
+  await streamContinuousOptimizerRun({
+    args: createContinuousOptimizerLaunchArgs(continuousControls),
+    signal,
+    onProgress: (payload) => {
+      progressBatch += 1;
+      latestAttempts = payload.totalAttempts;
+      latestCheckpointScore = payload.score;
+      latestValidCandidates = payload.validCandidates ?? Math.round(payload.totalAttempts * payload.validRate);
+      latestInvalidCandidates = payload.invalidCandidates ?? Math.max(0, payload.totalAttempts - latestValidCandidates);
+      reportContinuousProgress();
+    },
+    onCandidate: (payload) => {
+      const viewModel = createOptimizerResultViewModelFromContinuousCandidate(payload, normalizedControls.duration);
+      if (!viewModel) {
+        return;
+      }
+      candidates.set(viewModel.id, viewModel);
+      latestResults = rankOptimizerCandidateViewModels([...candidates.values()]).slice(0, normalizedControls.maxResultsPerDuration);
+      reportContinuousProgress();
+    },
+  });
+
+  return latestResults;
+
+  function reportContinuousProgress(): void {
+    onProgress({
+      batch: Math.max(1, progressBatch),
+      attempts: latestAttempts,
+      validCandidates: latestValidCandidates,
+      invalidCandidates: latestInvalidCandidates,
+      bestScore: latestResults[0]?.score ?? latestCheckpointScore,
+      bestCandidate: latestResults[0],
+      metrics: {
+        continuous: 1,
+        targetAttempts: normalizedControls.iterationBudget,
+      },
+      results: latestResults,
+    });
+  }
+}
+
 export function createOptimizerResultViewModel({
   duration,
   result,
@@ -442,6 +533,20 @@ export function createOptimizerResultViewModel({
   };
 }
 
+export function createOptimizerResultViewModelFromContinuousCandidate(
+  payload: unknown,
+  fallbackDuration?: number,
+): OptimizerCandidateViewModel | null {
+  if (!isContinuousVerifiedOptimizerCandidatePayload(payload)) {
+    return null;
+  }
+
+  return createOptimizerResultViewModel({
+    duration: fallbackDuration ?? payload.candidate.plan.turns.length,
+    result: payload.candidate,
+  });
+}
+
 export function createOptimizerCandidateId(plan: ComboPlan, passiveIds: string[] = [], sublimationIds: string[] = []): string {
   const passiveKey = [...passiveIds].sort().join("+");
   const sublimationKey = [...sublimationIds].sort().join("+");
@@ -461,7 +566,7 @@ export function summarizeOptimizerControls(controls: OptimizerWorkspaceControls)
     durationSummary,
     scoringSummary,
     cycleSummary,
-    methodLabels[normalizedControls.searchMethod],
+    optimizerMethodLabels[normalizedControls.searchMethod],
     `${normalizedControls.iterationBudget} essais`,
     `${normalizedControls.maxResultsPerDuration} résultats`,
   ].join(" · ");
@@ -570,10 +675,75 @@ const methodLabels: Record<OptimizerExperimentEngineKind, string> = {
   hybrid: "hybride",
 };
 
+const optimizerMethodLabels: Record<OptimizerWorkspaceSearchMethod, string> = {
+  ...methodLabels,
+  continuous: "continuous",
+};
+
 function createOptimizationCriterion(controls: OptimizerWorkspaceControls): ComboOptimizationCriterion {
   return controls.scoreCriterion === "totalDamage"
     ? { type: "totalDamage" }
     : { type: "elementDamage", element: controls.targetElement };
+}
+
+function normalizeOptimizerSearchMethod(method: OptimizerWorkspaceSearchMethod): OptimizerWorkspaceSearchMethod {
+  return method === "continuous"
+    || method === "genetic"
+    || method === "mcts"
+    || method === "novelty"
+    || method === "annealing"
+    || method === "random"
+    ? method
+    : "hybrid";
+}
+
+function createContinuousControlsForOptimizerRun(
+  setup: SetupSnapshot,
+  controls: OptimizerWorkspaceControls,
+) {
+  const defaults = createDefaultContinuousOptimizerControls();
+  const workerCount = defaults.workerCount;
+  const chunkSize = defaults.chunkSize;
+  const targetRounds = Math.max(1, Math.ceil(controls.iterationBudget / Math.max(1, workerCount * chunkSize)));
+
+  return {
+    ...defaults,
+    sessionId: createContinuousOptimizerSessionId(setup, controls),
+    scenarioId: createContinuousScenarioId(controls),
+    workerCount,
+    chunkSize,
+    qualityPreset: "validated-contextual" as const,
+    scoreCriterion: controls.scoreCriterion === "elementDamage" ? "element-damage" as const : "total-damage" as const,
+    targetElement: controls.targetElement,
+    requireSustainableCycle: controls.requireSustainableCycle,
+    maxRounds: targetRounds,
+  };
+}
+
+function createContinuousOptimizerSessionId(setup: SetupSnapshot, controls: OptimizerWorkspaceControls): string {
+  const scoreKey = controls.scoreCriterion === "elementDamage" ? controls.targetElement : "total";
+  const cycleKey = controls.requireSustainableCycle ? "sustainable" : "free";
+  return `optimizer-${setup.id}-${controls.duration}t-${scoreKey}-${cycleKey}`;
+}
+
+function createContinuousScenarioId(controls: OptimizerWorkspaceControls): "t2-a8-p2" | "t3-full" {
+  return controls.duration <= 2 ? "t2-a8-p2" : "t3-full";
+}
+
+function isContinuousVerifiedOptimizerCandidatePayload(
+  value: unknown,
+): value is ContinuousVerifiedOptimizerCandidatePayload {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const record = value as Record<string, unknown>;
+  const candidate = record.candidate as Partial<OptimizerCandidateSource> | undefined;
+  return record.schemaVersion === 1
+    && typeof record.totalAttempts === "number"
+    && typeof record.rank === "number"
+    && Boolean(record.run && typeof record.run === "object")
+    && Boolean(candidate?.plan && candidate.simulation && candidate.score && candidate.sustainability);
 }
 
 function getSetupPassiveLimit(setup: SetupSnapshot): number {

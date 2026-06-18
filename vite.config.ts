@@ -1,4 +1,5 @@
 import { createRequire } from "node:module";
+import { spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { availableParallelism } from "node:os";
@@ -22,6 +23,7 @@ import {
 
 const optimizerSessionsApiPrefix = "/api/optimizer-sessions";
 const optimizerRunsStreamApiPath = "/api/optimizer-runs/stream";
+const continuousOptimizerStreamApiPath = "/api/continuous-optimizer/stream";
 const researchWorkspaceApiPath = "/api/research-workspace";
 const optimizerSearchDatabasePath = resolve(process.env.WAKFU_OPTIMIZER_DB ?? ".optimizer/rust-wasm-search.sqlite");
 const optimizerWasmPackagePath = resolve("src/wasm/optimizer_wasm_pkg/optimizer_wasm.js");
@@ -45,6 +47,7 @@ function optimizerSessionsSqliteApi(): Plugin {
           !requestUrl.pathname.startsWith(optimizerSessionsApiPrefix)
           && requestUrl.pathname !== researchWorkspaceApiPath
           && requestUrl.pathname !== optimizerRunsStreamApiPath
+          && requestUrl.pathname !== continuousOptimizerStreamApiPath
         ) {
           next();
           return;
@@ -59,6 +62,12 @@ function optimizerSessionsSqliteApi(): Plugin {
           if (request.method === "POST" && requestUrl.pathname === optimizerRunsStreamApiPath) {
             const body = await readJsonBody(request);
             await streamRustWasmOptimizerRun(request, response, body);
+            return;
+          }
+
+          if (request.method === "POST" && requestUrl.pathname === continuousOptimizerStreamApiPath) {
+            const body = await readJsonBody(request);
+            await streamContinuousOptimizerRun(request, response, body);
             return;
           }
 
@@ -125,6 +134,10 @@ type OptimizerRunStreamRequest = {
   workerCount?: number;
 };
 
+type ContinuousOptimizerStreamRequest = {
+  args?: string[];
+};
+
 type OptimizerWorkerSearchResponse = {
   attempts: number;
   validCandidates: number;
@@ -133,6 +146,132 @@ type OptimizerWorkerSearchResponse = {
   metrics: Record<string, number>;
   resumeState?: RustWasmHybridSearchResumeState;
 };
+
+async function streamContinuousOptimizerRun(
+  request: IncomingMessage,
+  response: ServerResponse,
+  body: unknown,
+): Promise<void> {
+  const payload = body as ContinuousOptimizerStreamRequest | null;
+  const rawArgs = Array.isArray(payload?.args) ? payload.args : [];
+  const args = Array.isArray(payload?.args)
+    ? rawArgs.filter((arg): arg is string => typeof arg === "string")
+    : [];
+  if (args.length !== rawArgs.length) {
+    sendJson(response, 400, { error: "Continuous optimizer args must be strings." });
+    return;
+  }
+
+  response.statusCode = 200;
+  response.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  response.setHeader("Cache-Control", "no-cache, no-transform");
+  response.setHeader("Connection", "keep-alive");
+  response.flushHeaders?.();
+
+  const child = spawn(process.execPath, [
+    "--experimental-strip-types",
+    "scripts/search-rust-wasm-sqlite.ts",
+    "--",
+    ...args,
+  ], {
+    cwd: process.cwd(),
+    env: process.env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdoutBuffer = "";
+  let stderrBuffer = "";
+  let closed = false;
+
+  const stopChild = () => {
+    if (!closed && child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGTERM");
+    }
+  };
+
+  request.on("aborted", stopChild);
+  response.on("close", stopChild);
+
+  sendSse(response, "started", {
+    command: "node",
+    args: ["--experimental-strip-types", "scripts/search-rust-wasm-sqlite.ts", "--", ...args],
+  });
+
+  child.stdout.on("data", (chunk: Buffer) => {
+    stdoutBuffer += chunk.toString("utf8");
+    const lines = stdoutBuffer.split(/\r?\n/);
+    stdoutBuffer = lines.pop() ?? "";
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed.length === 0) {
+        continue;
+      }
+      try {
+        sendContinuousOptimizerSummaryEvents(response, JSON.parse(trimmed) as unknown);
+      } catch {
+        sendSse(response, "log", { stream: "stdout", line: trimmed });
+      }
+    }
+  });
+
+  child.stderr.on("data", (chunk: Buffer) => {
+    stderrBuffer += chunk.toString("utf8");
+    const lines = stderrBuffer.split(/\r?\n/);
+    stderrBuffer = lines.pop() ?? "";
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed.length > 0) {
+        sendSse(response, "log", { stream: "stderr", line: trimmed });
+      }
+    }
+  });
+
+  await new Promise<void>((resolveStream) => {
+    child.once("error", (error) => {
+      closed = true;
+      sendSse(response, "error", { error: error.message });
+      resolveStream();
+    });
+    child.once("close", (code, signal) => {
+      closed = true;
+      if (stdoutBuffer.trim().length > 0) {
+        try {
+          sendContinuousOptimizerSummaryEvents(response, JSON.parse(stdoutBuffer.trim()) as unknown);
+        } catch {
+          sendSse(response, "log", { stream: "stdout", line: stdoutBuffer.trim() });
+        }
+      }
+      if (stderrBuffer.trim().length > 0) {
+        sendSse(response, "log", { stream: "stderr", line: stderrBuffer.trim() });
+      }
+      if (code === 0) {
+        sendSse(response, "complete", { code });
+      } else if (signal === "SIGTERM") {
+        sendSse(response, "stopped", { signal });
+      } else {
+        sendSse(response, "error", { error: `Continuous optimizer exited with code ${code ?? "unknown"}.`, code, signal });
+      }
+      resolveStream();
+    });
+  });
+
+  response.end();
+}
+
+function sendContinuousOptimizerSummaryEvents(response: ServerResponse, summary: unknown): void {
+  if (!summary || typeof summary !== "object") {
+    sendSse(response, "progress", summary);
+    return;
+  }
+
+  const record = summary as Record<string, unknown>;
+  const verifiedCandidates = Array.isArray(record.verifiedCandidates) ? record.verifiedCandidates : [];
+  const progress = { ...record };
+  delete progress.verifiedCandidates;
+  sendSse(response, "progress", progress);
+  for (const candidate of verifiedCandidates) {
+    sendSse(response, "candidate", candidate);
+  }
+}
 
 async function streamRustWasmOptimizerRun(
   request: IncomingMessage,

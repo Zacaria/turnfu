@@ -10,6 +10,7 @@ import {
   createOptimizerExperimentOptionsForSetup,
   createOptimizerOptionsForSetup,
   createOptimizerResultViewModel,
+  createOptimizerResultViewModelFromContinuousCandidate,
   createPinnedCandidateComparison,
   createSavedComboName,
   groupOptimizerResultsByDuration,
@@ -89,6 +90,17 @@ test("normalizes optimizer controls to supported duration and result limits", ()
   assert.equal(controls.maxResultsPerDuration, 50);
 });
 
+test("normalizes Continuous optimizer method to a meaningful minimum budget", () => {
+  const controls = normalizeOptimizerControls({
+    ...createDefaultOptimizerControls(),
+    searchMethod: "continuous",
+    iterationBudget: 1_000,
+  });
+
+  assert.equal(controls.searchMethod, "continuous");
+  assert.equal(controls.iterationBudget, 1_000_000);
+});
+
 test("maps controls to experimental optimizer options with method and passive exploration", () => {
   const setup = {
     ...getSeedSetup(),
@@ -132,6 +144,17 @@ test("maps controls to experimental optimizer options with method and passive ex
   assert.deepEqual(options.availablePassiveIds, ["passive-a"]);
   assert.equal(options.criterion?.type, "elementDamage");
   assert.equal(options.criterion?.type === "elementDamage" ? options.criterion.element : null, "earth");
+});
+
+test("maps Continuous optimizer controls to the hybrid experiment engine for candidate verification", () => {
+  const setup = getSeedSetup();
+  const options = createOptimizerExperimentOptionsForSetup(setup, catalog, {
+    ...createDefaultOptimizerControls(),
+    searchMethod: "continuous",
+    iterationBudget: 1_000_000,
+  });
+
+  assert.deepEqual(options.engines, ["hybrid"]);
 });
 
 test("summarizes optimizer controls for saved run references", () => {
@@ -244,6 +267,82 @@ test("builds result view models with normalized metrics and resolved element dam
   assert.equal(candidate.score, candidate.damageByResolvedElement.water);
   assert.equal(candidate.damagePerTurn, candidate.totalDamage);
   assert.ok(candidate.damagePerAp > 0);
+});
+
+test("does not create optimizer candidates from metrics-only Continuous progress", () => {
+  const candidate = createOptimizerResultViewModelFromContinuousCandidate({
+    totalAttempts: 1_000_000,
+    score: 120_000,
+    validRate: 0.42,
+  });
+
+  assert.equal(candidate, null);
+});
+
+test("renders oracle-verified Continuous candidates through the optimizer result model", () => {
+  const setup = getSeedSetup();
+  const candidate = createOptimizerResultViewModelFromContinuousCandidate({
+    schemaVersion: 1,
+    totalAttempts: 1_000_000,
+    rank: 1,
+    run: {
+      sessionId: "optimizer-setup-1-2t-air-sustainable",
+      scenarioId: "t2-a8-p2",
+      seed: "optimizer-ui",
+      workerCount: 10,
+      chunkSize: 50_000,
+      scoreCriterion: "element-damage",
+      targetElement: "air",
+      requireSustainableCycle: true,
+    },
+    candidate: {
+      passiveIds: ["passive-a"],
+      sublimationIds: ["sauvegarde-6"],
+      plan: { turns: [{ actions: [{ spellId: "light-hit" }] }, { actions: [{ spellId: "fire-hit" }] }] },
+      simulation: {
+        valid: true,
+        combo: { turns: [{ actions: [{ spellId: "light-hit" }] }, { actions: [{ spellId: "fire-hit" }] }] },
+        turns: [],
+        totalDamage: 88,
+        finalState: {
+          remainingResources: setup.character.resources,
+          classState: setup.character.classState ?? {},
+          currentStats: setup.character.stats,
+          castsBySpellId: {},
+          targetCastsBySpellId: {},
+          totalDamage: 88,
+          actionLog: [],
+          turnEndEffects: [],
+        },
+        violations: [],
+      },
+      score: {
+        score: 44,
+        totalDamage: 88,
+        damageByResolvedElement: {
+          fire: 44,
+          water: 0,
+          earth: 0,
+          air: 44,
+          light: 0,
+          neutral: 0,
+        },
+      },
+      sustainability: {
+        required: true,
+        sustainable: true,
+      },
+    },
+  }, 2);
+
+  assert.ok(candidate);
+  assert.equal(candidate.duration, 2);
+  assert.equal(candidate.score, 44);
+  assert.equal(candidate.totalDamage, 88);
+  assert.equal(candidate.damagePerTurn, 44);
+  assert.equal(candidate.sustainable, true);
+  assert.deepEqual(candidate.passiveIds, ["passive-a"]);
+  assert.deepEqual(candidate.sublimationIds, ["sauvegarde-6"]);
 });
 
 test("creates pinned candidate comparisons from a completed run", () => {

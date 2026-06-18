@@ -13,20 +13,30 @@ import {
   type RustWasmOptimizerCandidateInput,
   type RustWasmOptimizerRequest,
   type RustWasmOptimizerScoredCandidate,
+  type RustWasmSeedCandidateEvaluation,
 } from "../src/core/optimizer/rustWasmBackendTypes.ts";
 import { createResources } from "../src/core/simulation/index.ts";
 import type { ComboSimulationOptions, SimulatedCharacter } from "../src/core/simulation/types.ts";
 import { sublimationCatalog } from "../src/core/sublimations/index.ts";
 import {
+  createContinuousReuseStrategyPolicy,
+  filterAndRankContinuousReuseTrialOptions,
+  type ContinuousReusePolicyMode,
+  type ContinuousReuseStrategyPolicy,
+} from "./continuous-reuse-policy.ts";
+import {
+  type ContinuousSearchCandidateEvidence,
+  type ContinuousSearchMotifEvidence,
+  type ContinuousSearchReuseStrategyEvidence,
   createContinuousSearchSchema,
   ensureContinuousSearchSession,
-  listContinuousSearchPromotedCandidateSeeds,
-  markContinuousSearchPromotedSeedsUsed,
-  promoteContinuousSearchCandidateSeeds,
-  promoteContinuousSearchSeeds,
+  listContinuousSearchCandidateEvidence,
+  listContinuousSearchMotifEvidence,
+  listContinuousSearchReuseStrategyEvidence,
   recordContinuousSearchCandidate,
   recordContinuousSearchCheckpoint,
   recordContinuousSearchMotif,
+  recordContinuousSearchReuseTrial,
   resetContinuousSearchSession,
 } from "./continuous-search-store.ts";
 
@@ -44,6 +54,7 @@ type WorkerSearchResponse = {
   invalidCandidates: number;
   topCandidates: RustWasmOptimizerScoredCandidate[];
   metrics: Record<string, number>;
+  seedCandidateEvaluations?: RustWasmSeedCandidateEvaluation[];
   resumeState?: RustWasmHybridSearchResumeState;
 };
 
@@ -61,6 +72,22 @@ type WorkerStateRow = {
   invalid_candidates: number;
 };
 
+type ReuseTrialCandidate = {
+  sourceCandidateId: number;
+  strategy: string;
+  sourceLabel: string;
+  candidate: RustWasmOptimizerCandidateInput;
+  sourceScore: number;
+};
+
+type MotifSeedCandidate = {
+  motifId: number;
+  motifKey: string;
+  sourceLabel: string;
+  candidate: RustWasmOptimizerCandidateInput;
+  bestScore: number;
+};
+
 const scenarios: HybridSearchScenario[] = [
   { id: "t2-a8-p2", duration: 2, maxActionsPerTurn: 8, maxPassiveCount: 2, maxSublimationCount: 12 },
   { id: "t3-a12-p3", duration: 3, maxActionsPerTurn: 12, maxPassiveCount: 3, maxSublimationCount: 12 },
@@ -76,11 +103,28 @@ const chunkSize = readIntegerOption("--chunk-size", 100_000);
 const maxRounds = readIntegerOption("--max-rounds", 0);
 const timeboxMs = readIntegerOption("--timebox-ms", 0);
 const reset = process.argv.includes("--reset");
-const promotedSeedReuseEnabled = !process.argv.includes("--no-promoted-seeds");
+const reuseTrialsEnabled = process.argv.includes("--reuse-trials");
+const reuseTrialsPerWorker = readIntegerOption("--reuse-trials-per-worker", 1);
+const reusePolicyMode = readReusePolicyMode(readOption("--reuse-policy") ?? "adaptive");
+const reusePolicyMinEvaluated = readIntegerOption("--reuse-policy-min-evaluated", 3);
+const motifSeedsEnabled = process.argv.includes("--motif-seeds");
+const motifSeedsPerWorker = readIntegerOption("--motif-seeds-per-worker", 1);
+const resourceAwareFreshChance = readOptionalNumberOption("--resource-aware-fresh-chance");
+const contextualAdjacentSwapsEnabled = process.argv.includes("--contextual-adjacent-swaps");
+const learnedLoadoutPriorEnabled = process.argv.includes("--learned-loadout-prior");
+const learnedActionSetPriorEnabled = process.argv.includes("--learned-action-set-prior");
+const plateauOrderChainNeighborsEnabled = process.argv.includes("--plateau-order-chain-neighbors");
+const plateauTriggerRounds = readNonNegativeIntegerOption("--plateau-trigger-rounds", 3);
+const scoreCriterion = readScoreCriterion(readOption("--score-criterion") ?? "total-damage");
+const targetElement = readTargetElement(readOption("--target-element") ?? "fire");
+const requireSustainableCycle = process.argv.includes("--sustainable-cycle");
 const scenario = scenarios.find((entry) => entry.id === scenarioId);
 if (!scenario) {
   throw new Error(`Unknown scenario '${scenarioId}'. Expected one of: ${scenarios.map((entry) => entry.id).join(", ")}.`);
 }
+const criterion = scoreCriterion === "total-damage"
+  ? { type: "totalDamage" as const }
+  : { type: "elementDamage" as const, element: targetElement };
 
 const wasmPackagePath = resolve("src/wasm/optimizer_wasm_pkg/optimizer_wasm.js");
 if (!existsSync(wasmPackagePath)) {
@@ -134,6 +178,39 @@ const availablePassiveIds = huppermageCatalog
 const availableSublimationIds = sublimationCatalog
   .filter((entry) => entry.supportStatus === "supported")
   .map((entry) => entry.id);
+const learnedLoadoutPassiveIds = [
+  "carnage",
+  "extension-des-sens",
+  "profusion-runique",
+];
+const learnedLoadoutSublimationIds = [
+  "alternance-ii",
+  "armure-lourde-ii",
+  "concentration-elementaire",
+  "expert-des-armes-legeres-i",
+  "expert-des-armes-legeres-ii",
+  "expert-des-armes-legeres-iii",
+  "longueur-i",
+  "longueur-ii",
+  "longueur-iii",
+  "puissance-brute-i",
+  "puissance-brute-iii",
+  "tellurisme-secondaire-iii",
+];
+const learnedActionSetSpellIds = [
+  "coeur-de-lumiere",
+  "debacle",
+  "eboulement",
+  "epee-de-lumiere",
+  "fleche-de-lumiere",
+  "flux-denergie",
+  "halo-chatoyant",
+  "lueur-de-laube",
+  "ombres-dansantes",
+  "orbes-luisants",
+  "papillons-diurnes",
+  "runification",
+];
 const baseRequest = createRustWasmOptimizerRequest({
   catalog: huppermageCatalog,
   character,
@@ -146,21 +223,39 @@ const baseRequest = createRustWasmOptimizerRequest({
   maxActionsPerTurn: scenario.maxActionsPerTurn,
   maxPassiveCount: scenario.maxPassiveCount,
   maxSublimationCount: scenario.maxSublimationCount,
-  availablePassiveIds,
-  availableSublimationIds,
+  availableSpellIds: learnedActionSetPriorEnabled ? learnedActionSetSpellIds : undefined,
+  availablePassiveIds: learnedLoadoutPriorEnabled ? learnedLoadoutPassiveIds : availablePassiveIds,
+  availableSublimationIds: learnedLoadoutPriorEnabled ? learnedLoadoutSublimationIds : availableSublimationIds,
+  criterion,
+  requireSustainableCycle,
   defaultActionContext,
   maxCandidates: 5,
 });
+if (resourceAwareFreshChance !== undefined) {
+  baseRequest.hybridResourceAwareFreshChance = clamp(resourceAwareFreshChance, 0, 1);
+}
+if (contextualAdjacentSwapsEnabled) {
+  baseRequest.hybridContextualAdjacentSwaps = true;
+}
+if (learnedLoadoutPriorEnabled) {
+  baseRequest.hybridLockedLoadout = true;
+}
 const fingerprint = createFingerprint({
   algorithm: "rust-wasm-resume-v1",
   scenario,
   workerCount,
   request: { ...baseRequest, iterations: 0 },
+  plateauOrderChainNeighbors: {
+    enabled: plateauOrderChainNeighborsEnabled,
+    triggerRounds: plateauTriggerRounds,
+  },
 });
 const oracle = createOptimizerExperimentEvaluator({
   catalog: huppermageCatalog,
   character,
   duration: scenario.duration,
+  criterion,
+  requireSustainableCycle,
   defaultActionContext,
 });
 const workerSource = `
@@ -194,6 +289,7 @@ process.on("SIGINT", () => {
 
 const startedAt = performance.now();
 let roundIndex = 0;
+let roundsSinceGlobalBestImprovement = 0;
 while (!stopRequested) {
   if (maxRounds > 0 && roundIndex >= maxRounds) {
     break;
@@ -203,34 +299,66 @@ while (!stopRequested) {
   }
 
   const workerStates = readWorkerStates(db, sessionId);
-  const promotedSeeds = promotedSeedReuseEnabled
-    ? listContinuousSearchPromotedCandidateSeeds(db, sessionId, workerCount * 4)
+  const previousBest = session.best_candidate_json
+    ? JSON.parse(session.best_candidate_json) as RustWasmOptimizerScoredCandidate
+    : undefined;
+  const previousBestScore = previousBest?.score.score ?? Number.NEGATIVE_INFINITY;
+  const plateauModeActive = plateauOrderChainNeighborsEnabled
+    && previousBest !== undefined
+    && roundsSinceGlobalBestImprovement >= plateauTriggerRounds;
+  const reuseStrategyPolicy = reuseTrialsEnabled
+    ? createContinuousReuseStrategyPolicy(
+        listContinuousSearchReuseStrategyEvidence(db, sessionId),
+        { mode: reusePolicyMode, minEvaluatedTrials: reusePolicyMinEvaluated },
+      )
+    : createContinuousReuseStrategyPolicy([], { mode: "off" });
+  const reuseCandidateEvidence = reuseTrialsEnabled
+    ? listContinuousSearchCandidateEvidence(db, sessionId, workerCount * reuseTrialsPerWorker * 4)
     : [];
-  const workerSeedSelections = Array.from({ length: workerCount }, (_, workerIndex) =>
-    selectWorkerSeedCandidates(promotedSeeds, workerIndex, workerCount, 4)
+  const reuseTrialCandidates = reuseTrialsEnabled
+    ? createReuseTrialCandidates(
+        reuseCandidateEvidence,
+        workerCount * reuseTrialsPerWorker,
+        scenario.maxActionsPerTurn,
+        reuseStrategyPolicy,
+      )
+    : [];
+  const motifSeedCandidates = motifSeedsEnabled
+    ? createMotifSeedCandidates(
+        listContinuousSearchMotifEvidence(db, sessionId, workerCount * motifSeedsPerWorker * 4),
+        workerCount * motifSeedsPerWorker,
+        scenario,
+      )
+    : [];
+  const workerReuseTrialSelections = Array.from({ length: workerCount }, (_, workerIndex) =>
+    selectWorkerReuseTrialCandidates(reuseTrialCandidates, workerIndex, workerCount, reuseTrialsPerWorker)
   );
-  const usedPromotedSeedIds = [
-    ...new Set(workerSeedSelections.flatMap((selection) => selection.seedIds)),
-  ];
+  const workerMotifSeedSelections = Array.from({ length: workerCount }, (_, workerIndex) =>
+    selectWorkerMotifSeedCandidates(motifSeedCandidates, workerIndex, workerCount, motifSeedsPerWorker)
+  );
+  const selectedReuseTrials = workerReuseTrialSelections.flatMap((selection) => selection.trials);
+  const selectedMotifSeeds = workerMotifSeedSelections.flatMap((selection) => selection.seeds);
   const roundStart = performance.now();
   const results = await Promise.all(Array.from({ length: workerCount }, (_, workerIndex) => {
     const resumeState = workerStates.get(workerIndex)?.resume_state_json
       ? JSON.parse(workerStates.get(workerIndex)!.resume_state_json!) as RustWasmHybridSearchResumeState
       : undefined;
-    const seedCandidates = workerSeedSelections[workerIndex].candidates;
+    const seedCandidates = [
+      ...workerReuseTrialSelections[workerIndex].candidates,
+      ...workerMotifSeedSelections[workerIndex].candidates,
+    ];
     const request: RustWasmOptimizerRequest = {
       ...baseRequest,
       seed: `${baseRequest.seed}:worker:${workerIndex}`,
       iterations: chunkSize,
+      hybridContextualAdjacentSwaps: contextualAdjacentSwapsEnabled,
+      hybridPlateauOrderChainNeighbors: plateauModeActive,
       seedCandidates: seedCandidates.length > 0 ? seedCandidates : undefined,
       resumeState,
     };
     return runWorker(request);
   }));
 
-  const previousBest = session.best_candidate_json
-    ? JSON.parse(session.best_candidate_json) as RustWasmOptimizerScoredCandidate
-    : undefined;
   const topCandidates = [
     ...results.flatMap((result) => result.topCandidates),
     ...(previousBest ? [previousBest] : []),
@@ -240,9 +368,32 @@ while (!stopRequested) {
   const validCandidates = results.reduce((total, result) => total + result.validCandidates, 0);
   const invalidCandidates = results.reduce((total, result) => total + result.invalidCandidates, 0);
   const metrics = mergeMetrics(results.map((result) => result.metrics));
+  const seedCandidateEvaluations = results.flatMap((result) => result.seedCandidateEvaluations ?? []);
+  const contextualAdjacentSwapEvaluations = seedCandidateEvaluations.filter((evaluation) =>
+    evaluation.sourceLabel.startsWith("neighbor:contextual-adjacent-swap:")
+  );
+  const plateauOrderChainEvaluations = seedCandidateEvaluations.filter((evaluation) =>
+    evaluation.sourceLabel.startsWith("neighbor:plateau-order-chain:")
+  );
+  const reuseTrialEvaluationByLabel = new Map(
+    seedCandidateEvaluations.map((evaluation) => [evaluation.sourceLabel, evaluation] as const),
+  );
+  const evaluatedReuseTrials = selectedReuseTrials
+    .map((trial) => reuseTrialEvaluationByLabel.get(trial.sourceLabel))
+    .filter((evaluation): evaluation is RustWasmSeedCandidateEvaluation => evaluation !== undefined);
+  const motifSeedEvaluationByLabel = new Map(
+    seedCandidateEvaluations
+      .filter((evaluation) => evaluation.sourceLabel.startsWith("motif:"))
+      .map((evaluation) => [evaluation.sourceLabel, evaluation] as const),
+  );
+  const evaluatedMotifSeeds = selectedMotifSeeds
+    .map((seedCandidate) => motifSeedEvaluationByLabel.get(seedCandidate.sourceLabel))
+    .filter((evaluation): evaluation is RustWasmSeedCandidateEvaluation => evaluation !== undefined);
   const elapsedMs = performance.now() - roundStart;
   const totalAttempts = session.total_attempts + attempts;
   const bestCandidate = topCandidates[0];
+  const improvedGlobalBest = bestCandidate !== undefined && bestCandidate.score.score > previousBestScore;
+  const verifiedCandidates = createVerifiedCandidatePayloads(topCandidates, totalAttempts);
   const summary = {
     session: sessionId,
     dbPath,
@@ -260,21 +411,74 @@ while (!stopRequested) {
     invalidCandidates,
     validRate: round(validCandidates / Math.max(1, attempts), 4),
     score: round(bestCandidate?.score.score ?? 0),
-    promotedSeedReuseEnabled,
-    promotedSeedCandidates: promotedSeeds.length,
-    usedPromotedSeedCandidates: usedPromotedSeedIds.length,
+    resourceAwareFreshChance: baseRequest.hybridResourceAwareFreshChance ?? 0.12,
+    contextualAdjacentSwapsEnabled,
+    learnedLoadoutPriorEnabled,
+    learnedActionSetPriorEnabled,
+    plateauOrderChainNeighborsEnabled,
+    plateauModeActive,
+    plateauTriggerRounds,
+    plateauRoundsSinceImprovement: roundsSinceGlobalBestImprovement,
+    plateauGlobalBestImproved: plateauModeActive && improvedGlobalBest,
+    plateauOrderChainModeIslands: metrics.hybridPlateauOrderChainNeighborMode ?? 0,
+    plateauOrderChainNeighborCandidates: metrics.hybridPlateauOrderChainNeighborCandidates ?? 0,
+    evaluatedPlateauOrderChainCandidates: plateauOrderChainEvaluations.length,
+    validPlateauOrderChainCandidates: plateauOrderChainEvaluations.filter((evaluation) => evaluation.valid).length,
+    islandImprovedPlateauOrderChainCandidates: plateauOrderChainEvaluations.filter((evaluation) =>
+      evaluation.improvedIslandBest
+    ).length,
+    globalImprovedPlateauOrderChainCandidates: plateauOrderChainEvaluations.filter((evaluation) =>
+      evaluation.score !== undefined && evaluation.score > previousBestScore
+    ).length,
+    scoreCriterion,
+    targetElement: scoreCriterion === "element-damage" ? targetElement : null,
+    requireSustainableCycle,
+    effectiveMaxActionsPerTurn: baseRequest.maxActionsPerTurn,
+    availableSpellCount: baseRequest.availableSpellIds.length,
+    contextualAdjacentSwapNeighborCandidates: metrics.hybridContextualAdjacentSwapNeighborCandidates ?? 0,
+    evaluatedContextualAdjacentSwapCandidates: contextualAdjacentSwapEvaluations.length,
+    validContextualAdjacentSwapCandidates: contextualAdjacentSwapEvaluations.filter((evaluation) => evaluation.valid).length,
+    islandImprovedContextualAdjacentSwapCandidates: contextualAdjacentSwapEvaluations.filter((evaluation) =>
+      evaluation.improvedIslandBest === true
+    ).length,
+    globalImprovedContextualAdjacentSwapCandidates: contextualAdjacentSwapEvaluations.filter((evaluation) =>
+      evaluation.score !== undefined && evaluation.score > previousBestScore
+    ).length,
+    reuseTrialsEnabled,
+    reusePolicyMode: reuseStrategyPolicy.mode,
+    reusePolicyMinEvaluatedTrials: reuseStrategyPolicy.minEvaluatedTrials,
+    reusePolicySuppressedStrategies: reuseStrategyPolicy.suppressedStrategies,
+    reuseStrategyEvidence: reuseStrategyPolicy.evidence.map(summarizeReuseStrategyEvidence),
+    reuseTrialCandidates: reuseTrialCandidates.length,
+    usedReuseTrialCandidates: selectedReuseTrials.length,
+    evaluatedReuseTrialCandidates: evaluatedReuseTrials.length,
+    validReuseTrialCandidates: evaluatedReuseTrials.filter((evaluation) => evaluation.valid).length,
+    islandImprovedReuseTrialCandidates: evaluatedReuseTrials.filter((evaluation) => evaluation.improvedIslandBest === true).length,
+    globalImprovedReuseTrialCandidates: evaluatedReuseTrials.filter((evaluation) =>
+      evaluation.score !== undefined && evaluation.score > previousBestScore
+    ).length,
+    motifSeedsEnabled,
+    motifSeedCandidates: motifSeedCandidates.length,
+    usedMotifSeedCandidates: selectedMotifSeeds.length,
+    evaluatedMotifSeedCandidates: evaluatedMotifSeeds.length,
+    validMotifSeedCandidates: evaluatedMotifSeeds.filter((evaluation) => evaluation.valid).length,
+    islandImprovedMotifSeedCandidates: evaluatedMotifSeeds.filter((evaluation) => evaluation.improvedIslandBest === true).length,
+    globalImprovedMotifSeedCandidates: evaluatedMotifSeeds.filter((evaluation) =>
+      evaluation.score !== undefined && evaluation.score > previousBestScore
+    ).length,
     finalOracleCandidates: topCandidates.length,
     ...oracleSummary,
+    verifiedCandidates,
     metrics,
   };
   const persistedTopCandidateIds = topCandidates.slice(0, 20).map((candidate, index) =>
     recordContinuousSearchCandidate(db, {
       sessionId,
-      candidate,
+      candidate: verifiedCandidates[index]?.candidate ?? candidate,
       score: candidate.score.score,
       valid: true,
       violationCategory: null,
-      finalState: null,
+      finalState: verifiedCandidates[index]?.candidate.simulation.finalState ?? null,
       descriptor: {
         passiveCount: candidate.passiveIds.length,
         sublimationCount: candidate.sublimationIds.length,
@@ -292,7 +496,27 @@ while (!stopRequested) {
     for (const [workerIndex, result] of results.entries()) {
       upsertWorkerState(db, sessionId, workerIndex, result);
     }
-    markContinuousSearchPromotedSeedsUsed(db, usedPromotedSeedIds);
+    const topCandidateScoreByKey = new Map(
+      topCandidates
+        .map((candidate) => [stableStringify(toRustWasmCandidateInput(candidate)), candidate.score.score] as const)
+        .filter(([key]) => key !== stableStringify(null)),
+    );
+    for (const trial of selectedReuseTrials) {
+      const evaluation = reuseTrialEvaluationByLabel.get(trial.sourceLabel);
+      const resultScore = evaluation?.score
+        ?? topCandidateScoreByKey.get(stableStringify(removeCandidateSourceLabel(trial.candidate)))
+        ?? null;
+      recordContinuousSearchReuseTrial(db, {
+        sessionId,
+        sourceCandidateId: trial.sourceCandidateId,
+        strategy: trial.strategy,
+        candidate: trial.candidate,
+        sourceScore: trial.sourceScore,
+        attempt: totalAttempts,
+        resultScore,
+        improvedGlobalBest: resultScore !== null && resultScore > previousBestScore,
+      });
+    }
     updateSession(db, sessionId, totalAttempts, bestCandidate, summary);
     insertCheckpoint(db, summary);
     recordContinuousSearchCheckpoint(db, {
@@ -325,16 +549,6 @@ while (!stopRequested) {
         rediscoveryCount: 1,
       });
     }
-    promoteContinuousSearchSeeds(db, {
-      sessionId,
-      minConfidence: 0.5,
-      maxSeeds: 8,
-    });
-    promoteContinuousSearchCandidateSeeds(db, {
-      sessionId,
-      minScore: 1,
-      maxSeeds: 64,
-    });
     db.exec("COMMIT");
   } catch (error) {
     db.exec("ROLLBACK");
@@ -342,6 +556,7 @@ while (!stopRequested) {
   }
   session.total_attempts = totalAttempts;
   session.best_candidate_json = bestCandidate ? JSON.stringify(bestCandidate) : session.best_candidate_json;
+  roundsSinceGlobalBestImprovement = improvedGlobalBest ? 0 : roundsSinceGlobalBestImprovement + 1;
   console.log(JSON.stringify(summary));
   roundIndex += 1;
 }
@@ -518,6 +733,40 @@ function verifyTopCandidates(topCandidates: RustWasmOptimizerScoredCandidate[]):
   };
 }
 
+function createVerifiedCandidatePayloads(
+  topCandidates: RustWasmOptimizerScoredCandidate[],
+  totalAttempts: number,
+) {
+  return topCandidates
+    .map((candidate, index) => {
+      const evaluation = oracle.evaluateDetailed({
+        passiveIds: candidate.passiveIds,
+        sublimationIds: candidate.sublimationIds,
+        plan: candidate.plan,
+      });
+      if (!evaluation.result) {
+        return null;
+      }
+      return {
+        schemaVersion: 1 as const,
+        totalAttempts,
+        rank: index + 1,
+        run: {
+          sessionId,
+          scenarioId: scenario.id,
+          seed,
+          workerCount,
+          chunkSize,
+          scoreCriterion,
+          targetElement: scoreCriterion === "element-damage" ? targetElement : null,
+          requireSustainableCycle,
+        },
+        candidate: evaluation.result,
+      };
+    })
+    .filter((payload): payload is NonNullable<typeof payload> => payload !== null);
+}
+
 function compareRustCandidates(
   left: RustWasmOptimizerScoredCandidate,
   right: RustWasmOptimizerScoredCandidate,
@@ -532,44 +781,255 @@ function countActions(candidate: RustWasmOptimizerScoredCandidate): number {
   return candidate.plan.turns.reduce((total, turn) => total + turn.actions.length, 0);
 }
 
-function selectWorkerSeedCandidates(
-  seeds: Array<{ id: number; candidate: unknown }>,
-  workerIndex: number,
-  workerCount: number,
+function createReuseTrialCandidates(
+  evidenceRows: ContinuousSearchCandidateEvidence[],
   limit: number,
-): { seedIds: number[]; candidates: RustWasmOptimizerCandidateInput[] } {
-  const selected: Array<{ id: number; candidate: RustWasmOptimizerCandidateInput }> = [];
+  maxActionsPerTurn: number,
+  policy: ContinuousReuseStrategyPolicy,
+): ReuseTrialCandidate[] {
+  const options: ReuseTrialCandidate[] = [];
   const seen = new Set<string>();
-  for (let index = workerIndex; index < seeds.length && selected.length < limit; index += workerCount) {
-    addSeedCandidate(selected, seen, seeds[index]);
+  for (const evidence of evidenceRows) {
+    const sourceCandidate = toRustWasmCandidateInput(evidence.candidate);
+    if (!sourceCandidate) {
+      continue;
+    }
+    const sourceKey = stableStringify(sourceCandidate);
+    for (const trial of mutateCandidateForReuseTrials(sourceCandidate, maxActionsPerTurn)) {
+      const key = stableStringify(trial.candidate);
+      if (key === sourceKey || seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      const sourceLabel = `trial:${trial.strategy}:${evidence.id}:${createFingerprint(trial.candidate).slice(0, 12)}`;
+      options.push({
+        sourceCandidateId: evidence.id,
+        strategy: trial.strategy,
+        sourceLabel,
+        candidate: { ...trial.candidate, sourceLabel },
+        sourceScore: evidence.score,
+      });
+    }
   }
-  for (const seed of seeds) {
-    if (selected.length >= limit) {
+  return filterAndRankContinuousReuseTrialOptions(options, policy).slice(0, limit);
+}
+
+function createMotifSeedCandidates(
+  motifRows: ContinuousSearchMotifEvidence[],
+  limit: number,
+  scenario: HybridSearchScenario,
+): MotifSeedCandidate[] {
+  const seeds: MotifSeedCandidate[] = [];
+  const seen = new Set<string>();
+  for (const motifRow of motifRows) {
+    const seedCandidate = motifToSeedCandidate(motifRow, scenario);
+    if (!seedCandidate) {
+      continue;
+    }
+    const key = stableStringify(removeCandidateSourceLabel(seedCandidate.candidate));
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    seeds.push(seedCandidate);
+    if (seeds.length >= limit) {
       break;
     }
-    addSeedCandidate(selected, seen, seed);
   }
+  return seeds;
+}
+
+function motifToSeedCandidate(
+  motifRow: ContinuousSearchMotifEvidence,
+  scenario: HybridSearchScenario,
+): MotifSeedCandidate | null {
+  const motif = motifRow.motif && typeof motifRow.motif === "object"
+    ? motifRow.motif as Record<string, unknown>
+    : {};
+  const spellPrefix = Array.isArray(motif.spellPrefix)
+    ? motif.spellPrefix.filter(isString)
+    : motifRow.motifKey.split(">").filter(Boolean);
+  const actions = spellPrefix
+    .slice(0, scenario.maxActionsPerTurn)
+    .map((spellId) => ({ spellId }));
+  if (actions.length === 0) {
+    return null;
+  }
+  const turns = Array.from({ length: scenario.duration }, (_, index) => ({
+    actions: index === 0 ? actions : [],
+  }));
+  const candidate: RustWasmOptimizerCandidateInput = {
+    passiveIds: Array.isArray(motif.passiveIds) ? motif.passiveIds.filter(isString).slice(0, scenario.maxPassiveCount) : [],
+    sublimationIds: Array.isArray(motif.sublimationIds)
+      ? motif.sublimationIds.filter(isString).slice(0, scenario.maxSublimationCount)
+      : [],
+    plan: { turns },
+  };
+  const sourceLabel = `motif:${motifRow.id}:${createFingerprint(candidate).slice(0, 12)}`;
   return {
-    seedIds: selected.map((seed) => seed.id),
-    candidates: selected.map((seed) => seed.candidate),
+    motifId: motifRow.id,
+    motifKey: motifRow.motifKey,
+    sourceLabel,
+    candidate: { ...candidate, sourceLabel },
+    bestScore: motifRow.bestScore,
   };
 }
 
-function addSeedCandidate(
-  selected: Array<{ id: number; candidate: RustWasmOptimizerCandidateInput }>,
-  seen: Set<string>,
-  seed: { id: number; candidate: unknown },
-): void {
-  const candidate = toRustWasmCandidateInput(seed.candidate);
-  if (!candidate) {
-    return;
+function mutateCandidateForReuseTrials(
+  candidate: RustWasmOptimizerCandidateInput,
+  maxActionsPerTurn: number,
+): Array<{ strategy: string; candidate: RustWasmOptimizerCandidateInput }> {
+  return [
+    rotateTurnActions(candidate),
+    swapLastTurnActions(candidate),
+    moveLastActionEarlier(candidate, maxActionsPerTurn),
+    moveFirstActionLater(candidate, maxActionsPerTurn),
+  ].filter((trial): trial is { strategy: string; candidate: RustWasmOptimizerCandidateInput } => trial !== null);
+}
+
+function rotateTurnActions(candidate: RustWasmOptimizerCandidateInput): { strategy: string; candidate: RustWasmOptimizerCandidateInput } | null {
+  const next = cloneCandidateInput(candidate);
+  const turn = next.plan.turns.find((entry) => entry.actions.length > 1);
+  if (!turn) {
+    return null;
   }
-  const key = stableStringify(candidate);
+  const [firstAction] = turn.actions.splice(0, 1);
+  turn.actions.push(firstAction);
+  return { strategy: "rotate-turn-actions", candidate: next };
+}
+
+function swapLastTurnActions(candidate: RustWasmOptimizerCandidateInput): { strategy: string; candidate: RustWasmOptimizerCandidateInput } | null {
+  const next = cloneCandidateInput(candidate);
+  const turn = next.plan.turns.find((entry) => entry.actions.length > 1);
+  if (!turn) {
+    return null;
+  }
+  const lastIndex = turn.actions.length - 1;
+  [turn.actions[lastIndex - 1], turn.actions[lastIndex]] = [turn.actions[lastIndex], turn.actions[lastIndex - 1]];
+  return { strategy: "swap-last-turn-actions", candidate: next };
+}
+
+function moveLastActionEarlier(
+  candidate: RustWasmOptimizerCandidateInput,
+  maxActionsPerTurn: number,
+): { strategy: string; candidate: RustWasmOptimizerCandidateInput } | null {
+  const next = cloneCandidateInput(candidate);
+  for (let index = 1; index < next.plan.turns.length; index += 1) {
+    const sourceTurn = next.plan.turns[index];
+    const targetTurn = next.plan.turns[index - 1];
+    if (sourceTurn.actions.length === 0 || targetTurn.actions.length >= maxActionsPerTurn) {
+      continue;
+    }
+    const action = sourceTurn.actions.pop();
+    if (!action) {
+      continue;
+    }
+    targetTurn.actions.push(action);
+    return { strategy: "move-last-action-earlier", candidate: next };
+  }
+  return null;
+}
+
+function moveFirstActionLater(
+  candidate: RustWasmOptimizerCandidateInput,
+  maxActionsPerTurn: number,
+): { strategy: string; candidate: RustWasmOptimizerCandidateInput } | null {
+  const next = cloneCandidateInput(candidate);
+  for (let index = 0; index < next.plan.turns.length - 1; index += 1) {
+    const sourceTurn = next.plan.turns[index];
+    const targetTurn = next.plan.turns[index + 1];
+    if (sourceTurn.actions.length === 0 || targetTurn.actions.length >= maxActionsPerTurn) {
+      continue;
+    }
+    const [action] = sourceTurn.actions.splice(0, 1);
+    targetTurn.actions.unshift(action);
+    return { strategy: "move-first-action-later", candidate: next };
+  }
+  return null;
+}
+
+function cloneCandidateInput(candidate: RustWasmOptimizerCandidateInput): RustWasmOptimizerCandidateInput {
+  return JSON.parse(JSON.stringify(candidate)) as RustWasmOptimizerCandidateInput;
+}
+
+function selectWorkerReuseTrialCandidates(
+  trials: ReuseTrialCandidate[],
+  workerIndex: number,
+  workerCount: number,
+  limit: number,
+): { trials: ReuseTrialCandidate[]; candidates: RustWasmOptimizerCandidateInput[] } {
+  const selected: ReuseTrialCandidate[] = [];
+  const seen = new Set<string>();
+  for (let index = workerIndex; index < trials.length && selected.length < limit; index += workerCount) {
+    addReuseTrialCandidate(selected, seen, trials[index]);
+  }
+  for (const trial of trials) {
+    if (selected.length >= limit) {
+      break;
+    }
+    addReuseTrialCandidate(selected, seen, trial);
+  }
+  return {
+    trials: selected,
+    candidates: selected.map((trial) => trial.candidate),
+  };
+}
+
+function selectWorkerMotifSeedCandidates(
+  seeds: MotifSeedCandidate[],
+  workerIndex: number,
+  workerCount: number,
+  limit: number,
+): { seeds: MotifSeedCandidate[]; candidates: RustWasmOptimizerCandidateInput[] } {
+  const selected: MotifSeedCandidate[] = [];
+  const seen = new Set<string>();
+  for (let index = workerIndex; index < seeds.length && selected.length < limit; index += workerCount) {
+    addMotifSeedCandidate(selected, seen, seeds[index]);
+  }
+  for (const seedCandidate of seeds) {
+    if (selected.length >= limit) {
+      break;
+    }
+    addMotifSeedCandidate(selected, seen, seedCandidate);
+  }
+  return {
+    seeds: selected,
+    candidates: selected.map((seedCandidate) => seedCandidate.candidate),
+  };
+}
+
+function addMotifSeedCandidate(
+  selected: MotifSeedCandidate[],
+  seen: Set<string>,
+  seedCandidate: MotifSeedCandidate,
+): void {
+  const key = stableStringify(removeCandidateSourceLabel(seedCandidate.candidate));
   if (seen.has(key)) {
     return;
   }
   seen.add(key);
-  selected.push({ id: seed.id, candidate });
+  selected.push(seedCandidate);
+}
+
+function addReuseTrialCandidate(
+  selected: ReuseTrialCandidate[],
+  seen: Set<string>,
+  trial: ReuseTrialCandidate,
+): void {
+  const key = stableStringify(trial.candidate);
+  if (seen.has(key)) {
+    return;
+  }
+  seen.add(key);
+  selected.push(trial);
+}
+
+function removeCandidateSourceLabel(candidate: RustWasmOptimizerCandidateInput): RustWasmOptimizerCandidateInput {
+  return {
+    passiveIds: candidate.passiveIds,
+    sublimationIds: candidate.sublimationIds,
+    plan: candidate.plan,
+  };
 }
 
 function toRustWasmCandidateInput(candidate: unknown): RustWasmOptimizerCandidateInput | null {
@@ -630,6 +1090,57 @@ function readIntegerOption(name: string, fallback: number): number {
   }
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function readNonNegativeIntegerOption(name: string, fallback: number): number {
+  const value = readOption(name);
+  if (!value) {
+    return fallback;
+  }
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function readOptionalNumberOption(name: string): number | undefined {
+  const value = readOption(name);
+  if (!value) {
+    return undefined;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function readReusePolicyMode(value: string): ContinuousReusePolicyMode {
+  if (value === "off" || value === "adaptive") {
+    return value;
+  }
+  throw new Error(`Unknown --reuse-policy '${value}'. Expected 'adaptive' or 'off'.`);
+}
+
+function readScoreCriterion(value: string): "total-damage" | "element-damage" {
+  if (value === "total-damage" || value === "element-damage") {
+    return value;
+  }
+  throw new Error(`Unknown --score-criterion '${value}'. Expected 'total-damage' or 'element-damage'.`);
+}
+
+function readTargetElement(value: string): "fire" | "water" | "earth" | "air" {
+  if (value === "fire" || value === "water" || value === "earth" || value === "air") {
+    return value;
+  }
+  throw new Error(`Unknown --target-element '${value}'. Expected 'fire', 'water', 'earth', or 'air'.`);
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+function summarizeReuseStrategyEvidence(evidence: ContinuousSearchReuseStrategyEvidence): ContinuousSearchReuseStrategyEvidence {
+  return {
+    ...evidence,
+    averageScoreDelta: evidence.averageScoreDelta === null ? null : round(evidence.averageScoreDelta),
+    bestScoreDelta: evidence.bestScoreDelta === null ? null : round(evidence.bestScoreDelta),
+  };
 }
 
 function round(value: number, digits = 2): number {
