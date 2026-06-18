@@ -345,6 +345,72 @@ test("renders oracle-verified Continuous candidates through the optimizer result
   assert.deepEqual(candidate.sublimationIds, ["sauvegarde-6"]);
 });
 
+test("renders replay-invalid Continuous candidates so checkpoint results are visible", () => {
+  const setup = getSeedSetup();
+  const candidate = createOptimizerResultViewModelFromContinuousCandidate({
+    schemaVersion: 1,
+    totalAttempts: 1_000_000,
+    rank: 1,
+    verification: "replay-invalid",
+    run: {
+      sessionId: "optimizer-setup-1-2t-total-sustainable",
+      scenarioId: "t2-a8-p2",
+      seed: "optimizer-ui",
+      workerCount: 10,
+      chunkSize: 50_000,
+      scoreCriterion: "total-damage",
+      targetElement: null,
+      requireSustainableCycle: true,
+    },
+    candidate: {
+      passiveIds: ["passive-a"],
+      sublimationIds: [],
+      plan: { turns: [{ actions: [{ spellId: "light-hit" }] }, { actions: [{ spellId: "fire-hit" }] }] },
+      simulation: {
+        valid: true,
+        combo: { turns: [{ actions: [{ spellId: "light-hit" }] }, { actions: [{ spellId: "fire-hit" }] }] },
+        turns: [],
+        totalDamage: 88,
+        finalState: {
+          remainingResources: { ...setup.character.resources, bq: 90 },
+          classState: setup.character.classState ?? {},
+          currentStats: setup.character.stats,
+          castsBySpellId: {},
+          targetCastsBySpellId: {},
+          totalDamage: 88,
+          actionLog: [],
+          turnEndEffects: [],
+        },
+        violations: [],
+      },
+      score: {
+        score: 88,
+        totalDamage: 88,
+        damageByResolvedElement: {
+          fire: 44,
+          water: 0,
+          earth: 0,
+          air: 44,
+          light: 0,
+          neutral: 0,
+        },
+      },
+      sustainability: {
+        required: true,
+        sustainable: false,
+        reason: "replayInvalid",
+      },
+    },
+  }, 2);
+
+  assert.ok(candidate);
+  assert.equal(candidate.score, 88);
+  assert.equal(candidate.totalDamage, 88);
+  assert.equal(candidate.sustainable, false);
+  assert.equal(candidate.sustainabilityRequired, true);
+  assert.equal(candidate.finalResources.bq, 90);
+});
+
 test("creates pinned candidate comparisons from a completed run", () => {
   const setup = {
     ...getSeedSetup(),

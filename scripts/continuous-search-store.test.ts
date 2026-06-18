@@ -8,14 +8,14 @@ import {
   createContinuousSearchSchema,
   ensureContinuousSearchSession,
   listContinuousSearchCheckpoints,
-  listContinuousSearchPromotedCandidateSeeds,
-  listContinuousSearchPromotedSeeds,
-  markContinuousSearchPromotedSeedsUsed,
-  promoteContinuousSearchCandidateSeeds,
-  promoteContinuousSearchSeeds,
+  listContinuousSearchCandidateEvidence,
+  listContinuousSearchMotifEvidence,
+  listContinuousSearchReuseStrategyEvidence,
+  listContinuousSearchReuseTrials,
   recordContinuousSearchCandidate,
   recordContinuousSearchCheckpoint,
   recordContinuousSearchMotif,
+  recordContinuousSearchReuseTrial,
   resetContinuousSearchSession,
 } from "./continuous-search-store.ts";
 
@@ -175,7 +175,7 @@ test("deduplicates candidate evaluations by candidate hash", () => {
   }
 });
 
-test("promotes high-confidence motif seeds", () => {
+test("records high-confidence motifs without materialized promoted seeds", () => {
   const { db, cleanup } = createTempDatabase();
   try {
     createContinuousSearchSchema(db);
@@ -198,23 +198,64 @@ test("promotes high-confidence motif seeds", () => {
       rediscoveryCount: 4,
     });
 
-    promoteContinuousSearchSeeds(db, {
-      sessionId: "session-a",
-      minConfidence: 0.5,
-      maxSeeds: 4,
-    });
-
-    const seeds = listContinuousSearchPromotedSeeds(db, "session-a");
-    assert.equal(seeds.length, 1);
-    assert.equal(seeds[0].sourceKind, "motif");
-    assert.equal(seeds[0].score, 150_000);
-    assert.ok(seeds[0].confidence >= 0.5);
+    const promotedTable = db.prepare(`
+      SELECT name FROM sqlite_master
+      WHERE type = 'table' AND name = 'continuous_promoted_seeds'
+    `).get();
+    assert.equal(promotedTable, undefined);
   } finally {
     cleanup();
   }
 });
 
-test("promotes evaluated candidates as reusable search seeds", () => {
+test("lists motif evidence by best score then confidence", () => {
+  const { db, cleanup } = createTempDatabase();
+  try {
+    createContinuousSearchSchema(db);
+    ensureContinuousSearchSession(db, {
+      id: "session-a",
+      fingerprint: "fingerprint-a",
+      scenarioId: "t3-full",
+      setupHash: "setup-a",
+      seed: "continuous",
+      workerCount: 2,
+    });
+
+    recordContinuousSearchMotif(db, {
+      sessionId: "session-a",
+      motifKey: "low",
+      motif: { spellPrefix: ["low"] },
+      supportCount: 10,
+      bestScore: 100_000,
+      averageScore: 99_000,
+      rediscoveryCount: 4,
+    });
+    recordContinuousSearchMotif(db, {
+      sessionId: "session-a",
+      motifKey: "high",
+      motif: { spellPrefix: ["high"], passiveIds: ["passive-a"], sublimationIds: ["sublimation-a"] },
+      supportCount: 2,
+      bestScore: 150_000,
+      averageScore: 125_000,
+      rediscoveryCount: 1,
+    });
+
+    const motifs = listContinuousSearchMotifEvidence(db, "session-a", 8);
+
+    assert.deepEqual(motifs.map((motif) => motif.motifKey), ["high", "low"]);
+    assert.deepEqual(motifs[0].motif, {
+      spellPrefix: ["high"],
+      passiveIds: ["passive-a"],
+      sublimationIds: ["sublimation-a"],
+    });
+    assert.equal(motifs[0].bestScore, 150_000);
+    assert.equal(motifs[0].confidence > 0, true);
+  } finally {
+    cleanup();
+  }
+});
+
+test("lists candidate evidence and records reuse trials without exact seed promotion", () => {
   const { db, cleanup } = createTempDatabase();
   try {
     createContinuousSearchSchema(db);
@@ -247,25 +288,106 @@ test("promotes evaluated candidates as reusable search seeds", () => {
       attempt: 100,
     });
 
-    assert.equal(promoteContinuousSearchCandidateSeeds(db, {
-      sessionId: "session-a",
-      minScore: 1,
-      maxSeeds: 4,
-    }), 1);
-    assert.equal(promoteContinuousSearchCandidateSeeds(db, {
-      sessionId: "session-a",
-      minScore: 1,
-      maxSeeds: 4,
-    }), 0);
+    const evidence = listContinuousSearchCandidateEvidence(db, "session-a", 4);
+    assert.equal(evidence.length, 1);
+    assert.equal(evidence[0].score, 120_000);
+    assert.deepEqual(evidence[0].candidate, candidate);
 
-    const seeds = listContinuousSearchPromotedCandidateSeeds(db, "session-a", 4);
-    assert.equal(seeds.length, 1);
-    assert.equal(seeds[0].sourceKind, "candidate");
-    assert.deepEqual(seeds[0].candidate, candidate);
-    assert.equal(seeds[0].usageCount, 0);
+    const trialCandidate = {
+      passiveIds: candidate.passiveIds,
+      sublimationIds: candidate.sublimationIds,
+      plan: { turns: [{ actions: [{ spellId: "hit" }] }] },
+    };
+    const trialId = recordContinuousSearchReuseTrial(db, {
+      sessionId: "session-a",
+      sourceCandidateId: evidence[0].id,
+      strategy: "rotate-turn-actions",
+      candidate: trialCandidate,
+      sourceScore: evidence[0].score,
+      attempt: 200,
+      resultScore: 121_000,
+      improvedGlobalBest: true,
+    });
+    const duplicateTrialId = recordContinuousSearchReuseTrial(db, {
+      sessionId: "session-a",
+      sourceCandidateId: evidence[0].id,
+      strategy: "rotate-turn-actions",
+      candidate: trialCandidate,
+      sourceScore: evidence[0].score,
+      attempt: 300,
+      resultScore: 122_000,
+      improvedGlobalBest: true,
+    });
 
-    markContinuousSearchPromotedSeedsUsed(db, [seeds[0].id]);
-    assert.equal(listContinuousSearchPromotedCandidateSeeds(db, "session-a", 4)[0].usageCount, 1);
+    assert.equal(duplicateTrialId, trialId);
+    const trials = listContinuousSearchReuseTrials(db, "session-a", 4);
+    assert.equal(trials.length, 1);
+    assert.equal(trials[0].strategy, "rotate-turn-actions");
+    assert.equal(trials[0].sourceCandidateId, evidence[0].id);
+    assert.equal(trials[0].sourceScore, 120_000);
+    assert.equal(trials[0].resultScore, 122_000);
+    assert.equal(trials[0].improvedGlobalBest, true);
+  } finally {
+    cleanup();
+  }
+});
+
+test("aggregates reuse trial strategy evidence", () => {
+  const { db, cleanup } = createTempDatabase();
+  try {
+    createContinuousSearchSchema(db);
+    ensureContinuousSearchSession(db, {
+      id: "session-a",
+      fingerprint: "fingerprint-a",
+      scenarioId: "t3-full",
+      setupHash: "setup-a",
+      seed: "continuous",
+      workerCount: 2,
+    });
+
+    recordContinuousSearchReuseTrial(db, {
+      sessionId: "session-a",
+      sourceCandidateId: null,
+      strategy: "move-last-action-earlier",
+      candidate: { passiveIds: [], sublimationIds: [], plan: { turns: [{ actions: [{ spellId: "a" }] }] } },
+      sourceScore: 100_000,
+      attempt: 100,
+      resultScore: 90_000,
+      improvedGlobalBest: false,
+    });
+    recordContinuousSearchReuseTrial(db, {
+      sessionId: "session-a",
+      sourceCandidateId: null,
+      strategy: "move-last-action-earlier",
+      candidate: { passiveIds: [], sublimationIds: [], plan: { turns: [{ actions: [{ spellId: "b" }] }] } },
+      sourceScore: 100_000,
+      attempt: 200,
+      resultScore: 110_000,
+      improvedGlobalBest: true,
+    });
+    recordContinuousSearchReuseTrial(db, {
+      sessionId: "session-a",
+      sourceCandidateId: null,
+      strategy: "rotate-turn-actions",
+      candidate: { passiveIds: [], sublimationIds: [], plan: { turns: [{ actions: [{ spellId: "c" }] }] } },
+      sourceScore: 100_000,
+      attempt: 300,
+      resultScore: null,
+      improvedGlobalBest: false,
+    });
+
+    const evidence = listContinuousSearchReuseStrategyEvidence(db, "session-a");
+
+    assert.deepEqual(evidence.map((row) => row.strategy), ["move-last-action-earlier", "rotate-turn-actions"]);
+    assert.equal(evidence[0].trials, 2);
+    assert.equal(evidence[0].evaluatedTrials, 2);
+    assert.equal(evidence[0].positiveScoreDeltaTrials, 1);
+    assert.equal(evidence[0].negativeScoreDeltaTrials, 1);
+    assert.equal(evidence[0].globalBestTrials, 1);
+    assert.equal(evidence[0].averageScoreDelta, 0);
+    assert.equal(evidence[0].bestScoreDelta, 10_000);
+    assert.equal(evidence[1].unscoredTrials, 1);
+    assert.equal(evidence[1].averageScoreDelta, null);
   } finally {
     cleanup();
   }

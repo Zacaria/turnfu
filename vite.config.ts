@@ -1,6 +1,6 @@
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { availableParallelism } from "node:os";
 import { dirname, resolve } from "node:path";
@@ -196,6 +196,7 @@ async function streamContinuousOptimizerRun(
     command: "node",
     args: ["--experimental-strip-types", "scripts/search-rust-wasm-sqlite.ts", "--", ...args],
   });
+  sendContinuousOptimizerResumeEvents(response, args);
   const heartbeat = setInterval(() => {
     if (!closed) {
       sendSse(response, "heartbeat", {
@@ -268,6 +269,33 @@ async function streamContinuousOptimizerRun(
   response.end();
 }
 
+function sendContinuousOptimizerResumeEvents(response: ServerResponse, args: string[]): void {
+  const sessionId = readArgValue(args, "--session");
+  if (!sessionId) {
+    return;
+  }
+
+  const dbPath = resolve(readArgValue(args, "--db") ?? ".optimizer/rust-wasm-search.sqlite");
+  if (!existsSync(dbPath)) {
+    return;
+  }
+
+  const db = new DatabaseSync(dbPath);
+  try {
+    const row = db.prepare("SELECT last_summary_json FROM sessions WHERE id = ?").get(sessionId) as
+      | { last_summary_json: string | null }
+      | undefined;
+    if (!row?.last_summary_json) {
+      return;
+    }
+    sendContinuousOptimizerSummaryEvents(response, JSON.parse(row.last_summary_json) as unknown);
+  } catch {
+    return;
+  } finally {
+    db.close();
+  }
+}
+
 function sendContinuousOptimizerSummaryEvents(response: ServerResponse, summary: unknown): void {
   if (!summary || typeof summary !== "object") {
     sendSse(response, "progress", summary);
@@ -282,6 +310,14 @@ function sendContinuousOptimizerSummaryEvents(response: ServerResponse, summary:
   for (const candidate of verifiedCandidates) {
     sendSse(response, "candidate", candidate);
   }
+}
+
+function readArgValue(args: string[], name: string): string | undefined {
+  const index = args.indexOf(name);
+  if (index < 0) {
+    return undefined;
+  }
+  return args[index + 1];
 }
 
 async function streamRustWasmOptimizerRun(

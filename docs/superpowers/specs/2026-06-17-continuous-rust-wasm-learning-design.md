@@ -11,6 +11,22 @@ storage, and reuse path are built around the Rust/WASM optimizer.
 
 The UI exposes this capability as an optimizer method named `Continuous`.
 
+## Current Evidence
+
+The original promoted-seed reuse direction has been tested and retired. See
+`docs/continuous-search-algorithm.md` for the current algorithm and
+`docs/continuous-search-observations.md` for the validation log:
+
+- exact promoted candidate replay reduced `t3-full` score at 10M attempts;
+- materialized promoted seed storage is dead weight when replay is disabled;
+- labeled neighbor reuse trials did not produce global-best improvements at
+  1M attempts;
+- request seed warmups must be distributed across Rust/WASM islands to avoid
+  duplicated trial evaluation.
+
+Treat the reuse path below as historical design context unless a future change
+replaces it with a proven evidence-to-quality feedback loop.
+
 ## Problem
 
 The current bounded optimizer can evaluate many candidates, but most of the

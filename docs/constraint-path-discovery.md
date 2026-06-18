@@ -74,3 +74,7 @@ Neural policy/value guidance remains out of scope for this change. Consider a fo
 - a large corpus of simulator-evaluated candidates exists;
 - descriptors and motifs show predictive value;
 - a learned guide can beat the heuristic discovery baseline under the same exact final oracle.
+
+See `docs/continuous-search-observations.md` before proposing neural guidance.
+It records the failed promoted-seed and neighbor-trial reuse experiments that a
+learned guide must improve on.

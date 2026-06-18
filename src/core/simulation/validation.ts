@@ -1,4 +1,4 @@
-import type { CatalogEntry, Resource, SpellCost } from "../catalog/types.ts";
+import type { CatalogEntry, Effect, Resource, SpellCost } from "../catalog/types.ts";
 import { getCostAmount } from "./resources.ts";
 import type { Action, ResourcePool, SimulationViolation, TurnState } from "./types.ts";
 
@@ -103,6 +103,16 @@ function validateTarget(
   action: Action | undefined,
   actionIndex: number,
 ): SimulationViolation | undefined {
+  if (action?.target?.kind === "emptyCell" && !spellAllowsEmptyCellTarget(spell)) {
+    return {
+      type: "invalidTarget",
+      actionIndex,
+      spellId: spell.id,
+      message: `Spell '${spell.id}' cannot target an empty cell.`,
+      source: spell.metadata.sources[0],
+    };
+  }
+
   const targetConstraint = spell.constraints.find((constraint) => constraint.type === "requiresTarget");
   if (!targetConstraint || targetConstraint.type !== "requiresTarget") {
     return undefined;
@@ -181,4 +191,24 @@ function validateCastLimit(
 
 function countsAsTargetCast(action: Action | undefined): boolean {
   return action?.target?.kind !== "emptyCell";
+}
+
+function spellAllowsEmptyCellTarget(spell: CatalogEntry): boolean {
+  return spell.id === "feu-follet"
+    || spell.tags.includes("feu-follet")
+    || spell.constraints.some((constraint) => constraint.type === "requiresTarget" && constraint.target === "emptyCell")
+    || effectsAllowEmptyCellTarget(spell.effects);
+}
+
+function effectsAllowEmptyCellTarget(effects: Effect[]): boolean {
+  return effects.some((effect) => {
+    if (effect.type === "conditional") {
+      return (effect.condition.type === "targetIs" && effect.condition.value === "emptyCell")
+        || effectsAllowEmptyCellTarget(effect.effects);
+    }
+    if (effect.type === "trigger") {
+      return effectsAllowEmptyCellTarget(effect.effects);
+    }
+    return false;
+  });
 }

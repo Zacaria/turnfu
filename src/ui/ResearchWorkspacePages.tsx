@@ -1605,9 +1605,13 @@ function CandidateRow({
   return (
     <article className="candidate-row">
       <div>
+        <small className="candidate-score-label">Score objectif</small>
         <b>{candidate.score}</b>
-        <span>{candidate.totalDamage} total · {candidate.damagePerTurn}/tour · {candidate.damagePerAp}/PA</span>
-        <small>{candidate.actionCount} actions · {candidate.finalResources.bq} BQ · {candidate.finalResources.wp} PW</small>
+        <span>Dégâts totaux {candidate.totalDamage} · {candidate.damagePerTurn}/tour · {candidate.damagePerAp}/PA</span>
+        <small>
+          {candidate.actionCount} actions · {candidate.finalResources.bq} BQ · {candidate.finalResources.wp} PW
+          {candidate.sustainabilityRequired ? ` · cycle ${candidate.sustainable ? "OK" : "Non"}` : ""}
+        </small>
         {passiveIcons.length > 0 ? (
           <div className="candidate-spell-icon-rows candidate-passive-icons" aria-label="Passifs du candidat">
             <small>Passifs</small>

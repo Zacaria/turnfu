@@ -351,6 +351,8 @@ pub struct SpellRules {
     pub cooldown_turns: Option<u32>,
     #[serde(default)]
     pub required_target: Option<ActionTargetKind>,
+    #[serde(default)]
+    pub supports_empty_cell_target: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -579,6 +581,14 @@ pub struct OptimizerRequest {
     pub seed_candidates: Vec<OptimizerCandidateInput>,
     #[serde(default)]
     pub resume_state: Option<HybridSearchResumeState>,
+    #[serde(default)]
+    pub hybrid_resource_aware_fresh_chance: Option<f64>,
+    #[serde(default)]
+    pub hybrid_contextual_adjacent_swaps: bool,
+    #[serde(default)]
+    pub hybrid_plateau_order_chain_neighbors: bool,
+    #[serde(default)]
+    pub hybrid_locked_loadout: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
@@ -621,8 +631,21 @@ pub struct HybridSearchResponse {
     pub invalid_candidates: u32,
     pub top_candidates: Vec<ScoredTopCandidateEntry>,
     pub metrics: BTreeMap<String, u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub seed_candidate_evaluations: Vec<SeedCandidateEvaluationSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_state: Option<HybridSearchResumeState>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SeedCandidateEvaluationSummary {
+    pub source_label: String,
+    pub valid: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score: Option<f64>,
+    #[serde(default)]
+    pub improved_island_best: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -815,7 +838,7 @@ pub struct HybridPopulationEntry {
     pub id: String,
     pub candidate: OptimizerCandidateInput,
     pub score: f64,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub valid: bool,
 }
 
@@ -965,6 +988,8 @@ pub struct OptimizerCandidateInput {
     #[serde(default)]
     pub sublimation_ids: Vec<String>,
     pub plan: CandidatePlan,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_label: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -995,6 +1020,10 @@ pub struct CandidateAction {
 #[serde(rename_all = "camelCase")]
 pub struct CandidateActionTarget {
     pub kind: ActionTargetKind,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 pub struct SeededRandom {
@@ -1121,7 +1150,11 @@ fn action_target_hash_byte(kind: &ActionTargetKind) -> u8 {
 }
 
 fn encode_candidate_turn(turn: &CandidateTurn) -> String {
-    turn.actions
+    encode_candidate_actions(&turn.actions)
+}
+
+fn encode_candidate_actions(actions: &[CandidateAction]) -> String {
+    actions
         .iter()
         .map(encode_candidate_action)
         .collect::<Vec<_>>()
@@ -1243,10 +1276,15 @@ pub fn truncate_population(
     population: Vec<HybridPopulationEntry>,
     population_size: u32,
 ) -> Vec<HybridPopulationEntry> {
-    rank_population(population)
-        .into_iter()
-        .take(population_size as usize)
-        .collect()
+    rank_population(
+        population
+            .into_iter()
+            .filter(|entry| entry.valid && entry.score.is_finite())
+            .collect(),
+    )
+    .into_iter()
+    .take(population_size as usize)
+    .collect()
 }
 
 pub fn inject_hybrid_immigrants(
@@ -1271,18 +1309,18 @@ fn inject_hybrid_immigrants_with_catalog(
 ) -> Result<HybridRestartResult, String> {
     let config = create_hybrid_population_config(request.iterations);
     let retained_elites = truncate_population(population, config.elite_count);
-    let mut next_population = retained_elites.clone();
+    let next_population = retained_elites.clone();
     let mut immigrants = Vec::new();
     let mut metrics = BTreeMap::new();
     let mut rng = SeededRandom::new(&format!("{}:hybrid:restart:{restart_index}", request.seed));
 
     while immigrants.len() < config.immigrant_batch_size as usize
-        && next_population.len() < config.population_size as usize
+        && retained_elites.len() + immigrants.len() < config.population_size as usize
     {
         let use_diverse = request.iterations >= 1_000
             && request.duration <= 2
             && immigrants.is_empty()
-            && !next_population.is_empty();
+            && !retained_elites.is_empty();
         let (mode, candidate) = if use_diverse {
             *metrics
                 .entry("hybridDiverseImmigrants".to_string())
@@ -1293,11 +1331,11 @@ fn inject_hybrid_immigrants_with_catalog(
                     request,
                     catalog,
                     actions,
-                    &next_population,
+                    &retained_elites,
                     &mut rng,
                 )?,
             )
-        } else if rng.chance(0.12) {
+        } else if rng.chance(get_hybrid_resource_aware_fresh_chance(request)) {
             *metrics
                 .entry("hybridResourceAwareCandidates".to_string())
                 .or_insert(0) += 1;
@@ -1320,13 +1358,6 @@ fn inject_hybrid_immigrants_with_catalog(
             )
         };
 
-        let id = encode_candidate(&candidate);
-        next_population.push(HybridPopulationEntry {
-            id: id.clone(),
-            candidate: candidate.clone(),
-            score: f64::NEG_INFINITY,
-            valid: false,
-        });
         immigrants.push(HybridImmigrant { mode, candidate });
     }
 
@@ -1395,6 +1426,7 @@ fn crossover_candidates_with_catalog(
         passive_ids,
         sublimation_ids,
         plan: CandidatePlan { turns },
+        source_label: None,
     })
 }
 
@@ -1638,6 +1670,22 @@ fn enqueue_hybrid_elite_neighbors_with_catalog(
     let mut metrics = BTreeMap::new();
     let mut generated = 0_u32;
 
+    add_contextual_adjacent_swap_neighbors(
+        request,
+        &mut queue,
+        input,
+        &mut seen,
+        &mut metrics,
+        &mut generated,
+    );
+    add_plateau_order_chain_neighbors(
+        request,
+        &mut queue,
+        input,
+        &mut seen,
+        &mut metrics,
+        &mut generated,
+    );
     add_passive_neighbors(
         request,
         &catalog,
@@ -2033,28 +2081,6 @@ fn count_candidate_actions(candidate: &OptimizerCandidateInput) -> usize {
         .sum()
 }
 
-fn sample_candidate_with_rng(
-    request: &OptimizerRequest,
-    mode: &str,
-    rng: &mut SeededRandom,
-) -> Result<OptimizerCandidateInput, String> {
-    let catalog = read_search_catalog(request)?;
-    let actions = get_search_actions(request, &catalog);
-    if actions.is_empty() {
-        return Err("Cannot sample Rust candidate without available spells.".to_string());
-    }
-
-    match mode {
-        "random" => Ok(create_random_candidate(request, &catalog, &actions, rng)),
-        "resourceAware" => Ok(create_resource_aware_candidate(
-            request, &catalog, &actions, rng,
-        )),
-        _ => Err(format!(
-            "Unknown Rust candidate sampler mode '{mode}'. Expected 'random' or 'resourceAware'."
-        )),
-    }
-}
-
 fn sample_candidate_with_rng_from_catalog(
     request: &OptimizerRequest,
     catalog: &[SearchCatalogEntry],
@@ -2071,6 +2097,13 @@ fn sample_candidate_with_rng_from_catalog(
             "Unknown Rust candidate sampler mode '{mode}'. Expected 'random' or 'resourceAware'."
         )),
     }
+}
+
+fn get_hybrid_resource_aware_fresh_chance(request: &OptimizerRequest) -> f64 {
+    request
+        .hybrid_resource_aware_fresh_chance
+        .unwrap_or(0.12)
+        .clamp(0.0, 1.0)
 }
 
 fn create_hybrid_diverse_immigrant_with_catalog(
@@ -2161,6 +2194,9 @@ fn crossover_passive_ids(
     catalog: &[SearchCatalogEntry],
     rng: &mut SeededRandom,
 ) -> Vec<String> {
+    if request.hybrid_locked_loadout {
+        return locked_passive_ids(request, catalog);
+    }
     let available = get_available_passive_ids(request, catalog)
         .into_iter()
         .collect::<BTreeSet<_>>();
@@ -2196,6 +2232,9 @@ fn mutate_passive_ids(
     catalog: &[SearchCatalogEntry],
     rng: &mut SeededRandom,
 ) -> Vec<String> {
+    if request.hybrid_locked_loadout {
+        return locked_passive_ids(request, catalog);
+    }
     let available_passive_ids = get_available_passive_ids(request, catalog);
     if available_passive_ids.is_empty() || request.max_passive_count == 0 {
         return Vec::new();
@@ -2240,6 +2279,9 @@ fn crossover_sublimation_ids(
     request: &OptimizerRequest,
     rng: &mut SeededRandom,
 ) -> Vec<String> {
+    if request.hybrid_locked_loadout {
+        return locked_sublimation_ids(request);
+    }
     let available = get_available_sublimation_ids(request)
         .into_iter()
         .collect::<BTreeSet<_>>();
@@ -2274,6 +2316,9 @@ fn mutate_sublimation_ids(
     request: &OptimizerRequest,
     rng: &mut SeededRandom,
 ) -> Vec<String> {
+    if request.hybrid_locked_loadout {
+        return locked_sublimation_ids(request);
+    }
     let available_sublimation_ids = get_available_sublimation_ids(request);
     if available_sublimation_ids.is_empty() || request.max_sublimation_count == 0 {
         return Vec::new();
@@ -2310,6 +2355,32 @@ fn mutate_sublimation_ids(
     }
 
     next.into_iter().collect()
+}
+
+fn locked_passive_ids(request: &OptimizerRequest, catalog: &[SearchCatalogEntry]) -> Vec<String> {
+    get_available_passive_ids(request, catalog)
+        .into_iter()
+        .take(request.max_passive_count as usize)
+        .collect()
+}
+
+fn locked_sublimation_ids(request: &OptimizerRequest) -> Vec<String> {
+    get_available_sublimation_ids(request)
+        .into_iter()
+        .take(request.max_sublimation_count as usize)
+        .collect()
+}
+
+fn apply_locked_loadout(
+    request: &OptimizerRequest,
+    catalog: &[SearchCatalogEntry],
+    candidate: &mut OptimizerCandidateInput,
+) {
+    if !request.hybrid_locked_loadout {
+        return;
+    }
+    candidate.passive_ids = locked_passive_ids(request, catalog);
+    candidate.sublimation_ids = locked_sublimation_ids(request);
 }
 
 fn select_mutation_turn_index(
@@ -2364,6 +2435,9 @@ fn add_passive_neighbors(
     metrics: &mut BTreeMap<String, u32>,
     generated: &mut u32,
 ) {
+    if request.hybrid_locked_loadout {
+        return;
+    }
     let mut available_passive_ids = get_available_passive_ids(request, catalog);
     available_passive_ids.sort_by(|left, right| {
         get_passive_search_weight(right, request, catalog)
@@ -2455,6 +2529,9 @@ fn add_sublimation_neighbors(
     metrics: &mut BTreeMap<String, u32>,
     generated: &mut u32,
 ) {
+    if request.hybrid_locked_loadout {
+        return;
+    }
     let available_sublimation_ids = get_available_sublimation_ids(request);
     let active_sublimation_ids = input
         .sublimation_ids
@@ -2530,6 +2607,164 @@ fn add_sublimation_neighbors(
                 Some("hybridSublimationNeighborCandidates"),
             );
         }
+    }
+}
+
+fn add_contextual_adjacent_swap_neighbors(
+    request: &OptimizerRequest,
+    queue: &mut Vec<OptimizerCandidateInput>,
+    input: &OptimizerCandidateInput,
+    seen: &mut BTreeSet<String>,
+    metrics: &mut BTreeMap<String, u32>,
+    generated: &mut u32,
+) {
+    if !request.hybrid_contextual_adjacent_swaps {
+        return;
+    }
+
+    let mut swaps = Vec::new();
+    for turn_index in (0..input.plan.turns.len()).rev() {
+        let turn = &input.plan.turns[turn_index];
+        for action_index in 0..turn.actions.len().saturating_sub(1) {
+            let left = &turn.actions[action_index].spell_id;
+            let right = &turn.actions[action_index + 1].spell_id;
+            if left == right {
+                continue;
+            }
+            if let Some(priority) = contextual_adjacent_swap_priority(turn_index, left, right) {
+                swaps.push((priority, turn_index, action_index));
+            }
+        }
+    }
+
+    swaps.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| right.1.cmp(&left.1))
+            .then_with(|| left.2.cmp(&right.2))
+    });
+
+    for (_, turn_index, action_index) in swaps {
+        let mut candidate = input.clone();
+        let left = candidate.plan.turns[turn_index].actions[action_index]
+            .spell_id
+            .clone();
+        let right = candidate.plan.turns[turn_index].actions[action_index + 1]
+            .spell_id
+            .clone();
+        candidate.source_label = Some(format!(
+            "neighbor:contextual-adjacent-swap:{}:{}:{}>{}",
+            turn_index + 1,
+            action_index + 1,
+            left,
+            right
+        ));
+        candidate.plan.turns[turn_index]
+            .actions
+            .swap(action_index, action_index + 1);
+        add_elite_neighbor(
+            queue,
+            candidate,
+            seen,
+            metrics,
+            generated,
+            Some("hybridContextualAdjacentSwapNeighborCandidates"),
+        );
+    }
+}
+
+fn add_plateau_order_chain_neighbors(
+    request: &OptimizerRequest,
+    queue: &mut Vec<OptimizerCandidateInput>,
+    input: &OptimizerCandidateInput,
+    seen: &mut BTreeSet<String>,
+    metrics: &mut BTreeMap<String, u32>,
+    generated: &mut u32,
+) {
+    if !request.hybrid_plateau_order_chain_neighbors {
+        return;
+    }
+
+    const MAX_ORDER_CHAIN_NEIGHBORS: u32 = 32;
+    let mut added = 0_u32;
+
+    for turn_index in (0..input.plan.turns.len()).rev() {
+        let turn = &input.plan.turns[turn_index];
+        let action_count = turn.actions.len();
+        if action_count < 3 {
+            continue;
+        }
+
+        for first_index in 0..action_count.saturating_sub(1) {
+            let mut second_indices = Vec::new();
+            second_indices.push(first_index);
+            if first_index + 1 < action_count - 1 {
+                second_indices.push(first_index + 1);
+            }
+            if first_index > 0 {
+                second_indices.push(first_index - 1);
+            }
+
+            for second_index in second_indices {
+                if added >= MAX_ORDER_CHAIN_NEIGHBORS {
+                    return;
+                }
+                if encode_candidate_action(&turn.actions[first_index])
+                    == encode_candidate_action(&turn.actions[first_index + 1])
+                {
+                    continue;
+                }
+
+                let mut candidate = input.clone();
+                candidate.plan.turns[turn_index]
+                    .actions
+                    .swap(first_index, first_index + 1);
+
+                let actions = &candidate.plan.turns[turn_index].actions;
+                if encode_candidate_action(&actions[second_index])
+                    == encode_candidate_action(&actions[second_index + 1])
+                {
+                    continue;
+                }
+
+                let first_left = turn.actions[first_index].spell_id.clone();
+                let first_right = turn.actions[first_index + 1].spell_id.clone();
+                let second_left = actions[second_index].spell_id.clone();
+                let second_right = actions[second_index + 1].spell_id.clone();
+                candidate.plan.turns[turn_index]
+                    .actions
+                    .swap(second_index, second_index + 1);
+                candidate.source_label = Some(format!(
+                    "neighbor:plateau-order-chain:{}:{}>{}:{}>{}",
+                    turn_index + 1,
+                    first_left,
+                    first_right,
+                    second_left,
+                    second_right
+                ));
+
+                if add_elite_neighbor(
+                    queue,
+                    candidate,
+                    seen,
+                    metrics,
+                    generated,
+                    Some("hybridPlateauOrderChainNeighborCandidates"),
+                ) {
+                    added += 1;
+                }
+            }
+        }
+    }
+}
+
+fn contextual_adjacent_swap_priority(turn_index: usize, left: &str, right: &str) -> Option<u8> {
+    match (turn_index, left, right) {
+        (2, "debacle", "orbes-luisants") => Some(0),
+        (_, "debacle", "orbes-luisants") => Some(1),
+        (2, "orbes-luisants", "halo-chatoyant") => Some(2),
+        (_, "orbes-luisants", "halo-chatoyant") => Some(3),
+        _ => None,
     }
 }
 
@@ -2612,6 +2847,7 @@ fn create_random_candidate(
                 })
                 .collect(),
         },
+        source_label: None,
     }
 }
 
@@ -2691,6 +2927,7 @@ fn create_resource_aware_candidate(
         passive_ids: pick_random_passives(request, catalog, rng),
         sublimation_ids: pick_random_sublimations(request, rng),
         plan: CandidatePlan { turns },
+        source_label: None,
     }
 }
 
@@ -2766,7 +3003,7 @@ fn read_search_catalog(request: &OptimizerRequest) -> Result<Vec<SearchCatalogEn
                         .collect()
                 })
                 .unwrap_or_default();
-            let rules = create_spell_rules_from_parts(&id, element.clone(), &constraints);
+            let rules = create_spell_rules_from_parts(&id, element.clone(), &constraints, &effects);
             let damage_effects = collect_damage_effects_from_values(&effects);
             let passive_effects = effects
                 .iter()
@@ -2882,6 +3119,7 @@ fn create_spell_rules_from_parts(
     id: &str,
     element: Option<Element>,
     constraints: &[Value],
+    effects: &[Value],
 ) -> SpellRules {
     SpellRules {
         id: id.to_string(),
@@ -2898,7 +3136,39 @@ fn create_spell_rules_from_parts(
                 read_string_field(constraint, "type").as_deref() == Some("requiresTarget")
             })
             .and_then(|constraint| read_action_target_kind(constraint.get("target"))),
+        supports_empty_cell_target: constraints.iter().any(|constraint| {
+            read_string_field(constraint, "type").as_deref() == Some("requiresTarget")
+                && read_action_target_kind(constraint.get("target"))
+                    == Some(ActionTargetKind::EmptyCell)
+        }) || effects_support_empty_cell_target(effects),
     }
+}
+
+fn effects_support_empty_cell_target(effects: &[Value]) -> bool {
+    effects.iter().any(|effect| {
+        let effect_type = read_string_field(effect, "type");
+        if effect_type.as_deref() == Some("trigger") {
+            return effect
+                .get("effects")
+                .and_then(Value::as_array)
+                .is_some_and(|nested_effects| effects_support_empty_cell_target(nested_effects));
+        }
+        if effect_type.as_deref() != Some("conditional") {
+            return false;
+        }
+
+        let condition_matches = effect
+            .get("condition")
+            .filter(|condition| read_string_field(condition, "type").as_deref() == Some("targetIs"))
+            .and_then(|condition| read_action_target_kind(condition.get("value")))
+            == Some(ActionTargetKind::EmptyCell);
+
+        condition_matches
+            || effect
+                .get("effects")
+                .and_then(Value::as_array)
+                .is_some_and(|nested_effects| effects_support_empty_cell_target(nested_effects))
+    })
 }
 
 fn read_constraint_u32(constraints: &[Value], constraint_type: &str) -> Option<u32> {
@@ -3478,9 +3748,6 @@ fn collect_search_action_target_variants(entry: &SearchCatalogEntry) -> Vec<Acti
                     target_variants.insert(target_kind);
                 }
             }
-            Some("maxCastsPerTarget") => {
-                target_variants.insert(ActionTargetKind::EmptyCell);
-            }
             _ => {}
         }
     }
@@ -3494,7 +3761,14 @@ fn collect_target_variants_from_effects(
     target_variants: &mut BTreeSet<ActionTargetKind>,
 ) {
     for effect in effects {
-        if read_string_field(effect, "type").as_deref() != Some("conditional") {
+        let effect_type = read_string_field(effect, "type");
+        if effect_type.as_deref() == Some("trigger") {
+            if let Some(nested_effects) = effect.get("effects").and_then(Value::as_array) {
+                collect_target_variants_from_effects(nested_effects, target_variants);
+            }
+            continue;
+        }
+        if effect_type.as_deref() != Some("conditional") {
             continue;
         }
 
@@ -3517,6 +3791,9 @@ fn pick_random_passives(
     catalog: &[SearchCatalogEntry],
     rng: &mut SeededRandom,
 ) -> Vec<String> {
+    if request.hybrid_locked_loadout {
+        return locked_passive_ids(request, catalog);
+    }
     let passive_ids = get_available_passive_ids(request, catalog);
     if passive_ids.is_empty() || request.max_passive_count == 0 {
         return Vec::new();
@@ -3588,6 +3865,9 @@ fn pick_weighted_passive_id(
 }
 
 fn pick_random_sublimations(request: &OptimizerRequest, rng: &mut SeededRandom) -> Vec<String> {
+    if request.hybrid_locked_loadout {
+        return locked_sublimation_ids(request);
+    }
     let sublimation_ids = get_available_sublimation_ids(request);
     if sublimation_ids.is_empty() || request.max_sublimation_count == 0 {
         return Vec::new();
@@ -3680,6 +3960,7 @@ fn create_domain_seed_sublimation_variants(request: &OptimizerRequest) -> Vec<Ve
                 passive_ids: Vec::new(),
                 sublimation_ids: sublimation_ids.clone(),
                 plan: CandidatePlan { turns: Vec::new() },
+                source_label: None,
             })
             .is_none()
         })
@@ -4714,6 +4995,11 @@ fn can_use_action_softly(
     if !can_afford_cost(resources, spell.cost) {
         return false;
     }
+    if action.target.as_ref().map(|target| &target.kind) == Some(&ActionTargetKind::EmptyCell)
+        && !spell.rules.supports_empty_cell_target
+    {
+        return false;
+    }
 
     for constraint in &spell.constraints {
         match read_string_field(constraint, "type").as_deref() {
@@ -5468,6 +5754,18 @@ pub fn validate_spell_rules(
                 message: format!("Spell '{}' is on cooldown.", spell.id),
             });
         }
+    }
+
+    if target.as_ref() == Some(&ActionTargetKind::EmptyCell) && !spell.supports_empty_cell_target {
+        return Some(SimulationViolation {
+            violation_type: "invalidTarget".to_string(),
+            action_index,
+            spell_id: Some(spell.id.clone()),
+            required: None,
+            available: None,
+            scope: None,
+            message: format!("Spell '{}' cannot target an empty cell.", spell.id),
+        });
     }
 
     if let Some(required_target) = &spell.required_target {
@@ -6542,18 +6840,21 @@ pub fn generate_hybrid_candidates(
 
     let mut rng = SeededRandom::new(&format!("{}:hybrid:batch", request.seed));
     let mut candidates = Vec::with_capacity(request.iterations as usize);
+    let catalog = read_search_catalog(request)?;
+    let actions = get_search_actions(request, &catalog);
+    if actions.is_empty() {
+        return Err("Cannot generate Rust hybrid candidates without available spells.".to_string());
+    }
 
     for _ in 0..request.iterations {
-        let use_resource_aware = rng.chance(0.12);
-        let mode = if use_resource_aware {
+        let candidate = if rng.chance(get_hybrid_resource_aware_fresh_chance(request)) {
             *metrics
                 .entry("hybridResourceAwareCandidates".to_string())
                 .or_insert(0) += 1;
-            "resourceAware"
+            create_resource_aware_candidate(request, &catalog, &actions, &mut rng)
         } else {
-            "random"
+            create_random_candidate(request, &catalog, &actions, &mut rng)
         };
-        let candidate = sample_candidate_with_rng(request, mode, &mut rng)?;
         candidates.push(normalize_candidate(candidate));
     }
 
@@ -6582,6 +6883,7 @@ struct HybridSearchAccumulator {
     invalid_candidates: u32,
     top_candidates: Vec<ScoredTopCandidateEntry>,
     metrics: BTreeMap<String, u32>,
+    seed_candidate_evaluations: Vec<SeedCandidateEvaluationSummary>,
     resume_state: Option<HybridIslandResumeState>,
 }
 
@@ -6662,13 +6964,13 @@ fn create_hybrid_fresh_candidate(
     actions: &[CandidateAction],
     rng: &mut SeededRandom,
     warmup_candidates: &[OptimizerCandidateInput],
-    promoted_warmup_count: usize,
+    request_seed_warmup_count: usize,
     warmup_index: &mut usize,
     metrics: &mut BTreeMap<String, u32>,
 ) -> OptimizerCandidateInput {
     if let Some(candidate) = warmup_candidates.get(*warmup_index) {
-        let metric = if *warmup_index < promoted_warmup_count {
-            "hybridPromotedSeedCandidates"
+        let metric = if *warmup_index < request_seed_warmup_count {
+            "hybridSeedWarmupCandidates"
         } else {
             "hybridDomainWarmupCandidates"
         };
@@ -6677,7 +6979,7 @@ fn create_hybrid_fresh_candidate(
         return candidate.clone();
     }
 
-    if rng.chance(0.12) {
+    if rng.chance(get_hybrid_resource_aware_fresh_chance(request)) {
         increment_metric(metrics, "hybridResourceAwareCandidates", 1);
         create_resource_aware_candidate(request, catalog, actions, rng)
     } else {
@@ -6705,7 +7007,7 @@ fn create_hybrid_offspring_candidate(
     population: &[HybridPopulationEntry],
     rng: &mut SeededRandom,
     warmup_candidates: &[OptimizerCandidateInput],
-    promoted_warmup_count: usize,
+    request_seed_warmup_count: usize,
     warmup_index: &mut usize,
     metrics: &mut BTreeMap<String, u32>,
 ) -> Result<OptimizerCandidateInput, String> {
@@ -6716,7 +7018,7 @@ fn create_hybrid_offspring_candidate(
             actions,
             rng,
             warmup_candidates,
-            promoted_warmup_count,
+            request_seed_warmup_count,
             warmup_index,
             metrics,
         ));
@@ -6793,7 +7095,9 @@ fn evaluate_and_track_hybrid_candidate(
     spells_by_id: &BTreeMap<&str, &SearchCatalogEntry>,
     cache: &mut DirectEvaluatorCache,
 ) -> Result<HybridTrackedEvaluation, String> {
-    let candidate = normalize_candidate(candidate);
+    let mut candidate = normalize_candidate(candidate);
+    apply_locked_loadout(request, catalog, &mut candidate);
+    let source_label = candidate.source_label.take();
     let candidate_hash = hash_candidate(&candidate);
     let previous_best = accumulator.top_candidates.first().cloned();
 
@@ -6810,9 +7114,12 @@ fn evaluate_and_track_hybrid_candidate(
         cache,
     )?;
 
+    let mut score_value = None;
+    let mut improved = false;
     if evaluation.valid {
         accumulator.valid_candidates += 1;
         if let Some(score) = evaluation.score.clone() {
+            score_value = Some(score.score);
             let id = encode_candidate(&candidate);
             let causal_bonus = causal_exploration_bonus(evaluation.causal_trace.as_ref());
             if causal_bonus > 0.0 {
@@ -6834,13 +7141,22 @@ fn evaluate_and_track_hybrid_candidate(
                     score: score.clone(),
                 },
             );
-            let improved = match (&previous_best, accumulator.top_candidates.first()) {
+            improved = match (&previous_best, accumulator.top_candidates.first()) {
                 (None, Some(_)) => true,
                 (Some(previous), Some(current)) => {
                     compare_scored_top_candidates(current, previous) == std::cmp::Ordering::Less
                 }
                 _ => false,
             };
+            if let Some(source_label) = source_label {
+                record_seed_candidate_evaluation(
+                    accumulator,
+                    source_label,
+                    true,
+                    score_value,
+                    improved,
+                );
+            }
             return Ok(HybridTrackedEvaluation {
                 population_entry: Some(HybridPopulationEntry {
                     id,
@@ -6856,12 +7172,100 @@ fn evaluate_and_track_hybrid_candidate(
         accumulator.invalid_candidates += 1;
     }
 
+    if let Some(source_label) = source_label {
+        record_seed_candidate_evaluation(
+            accumulator,
+            source_label,
+            evaluation.valid,
+            score_value,
+            improved,
+        );
+    }
+
     let repair_candidate = create_repair_candidate_from_evaluation(&candidate, &evaluation);
     Ok(HybridTrackedEvaluation {
         population_entry: None,
         improved: false,
         repair_candidate,
     })
+}
+
+fn record_seed_candidate_evaluation(
+    accumulator: &mut HybridSearchAccumulator,
+    source_label: String,
+    valid: bool,
+    score: Option<f64>,
+    improved_island_best: bool,
+) {
+    if source_label.starts_with("neighbor:contextual-adjacent-swap:") {
+        increment_metric(
+            &mut accumulator.metrics,
+            "hybridContextualAdjacentSwapEvaluatedCandidates",
+            1,
+        );
+        if valid {
+            increment_metric(
+                &mut accumulator.metrics,
+                "hybridContextualAdjacentSwapValidCandidates",
+                1,
+            );
+        }
+        if improved_island_best {
+            increment_metric(
+                &mut accumulator.metrics,
+                "hybridContextualAdjacentSwapIslandImprovedCandidates",
+                1,
+            );
+        }
+    } else if source_label.starts_with("neighbor:plateau-order-chain:") {
+        increment_metric(
+            &mut accumulator.metrics,
+            "hybridPlateauOrderChainEvaluatedCandidates",
+            1,
+        );
+        if valid {
+            increment_metric(
+                &mut accumulator.metrics,
+                "hybridPlateauOrderChainValidCandidates",
+                1,
+            );
+        }
+        if improved_island_best {
+            increment_metric(
+                &mut accumulator.metrics,
+                "hybridPlateauOrderChainIslandImprovedCandidates",
+                1,
+            );
+        }
+    } else {
+        increment_metric(
+            &mut accumulator.metrics,
+            "hybridSeedWarmupEvaluatedCandidates",
+            1,
+        );
+        if valid {
+            increment_metric(
+                &mut accumulator.metrics,
+                "hybridSeedWarmupValidCandidates",
+                1,
+            );
+        }
+        if improved_island_best {
+            increment_metric(
+                &mut accumulator.metrics,
+                "hybridSeedWarmupIslandImprovedCandidates",
+                1,
+            );
+        }
+    }
+    accumulator
+        .seed_candidate_evaluations
+        .push(SeedCandidateEvaluationSummary {
+            source_label,
+            valid,
+            score,
+            improved_island_best,
+        });
 }
 
 fn enqueue_repair_candidate_for_search(
@@ -6923,19 +7327,20 @@ fn run_hybrid_island_search(
         invalid_candidates: 0,
         top_candidates: Vec::new(),
         metrics: BTreeMap::new(),
+        seed_candidate_evaluations: Vec::new(),
         resume_state: None,
     };
     let mut rng = resume_state
         .map(|state| SeededRandom::from_state(state.rng_state))
         .unwrap_or_else(|| SeededRandom::new(&format!("{}:hybrid:run", request.seed)));
-    let promoted_warmup_candidates = create_promoted_seed_warmup_candidates(request, actions);
-    let promoted_warmup_count = promoted_warmup_candidates.len();
+    let request_seed_warmup_candidates = create_request_seed_warmup_candidates(request, actions);
+    let request_seed_warmup_count = request_seed_warmup_candidates.len();
     let domain_warmup_candidates = create_domain_warmup_candidates(request, catalog, actions);
     let domain_warmup_offset = resume_state
         .map(|state| state.warmup_index)
         .unwrap_or(0)
         .min(domain_warmup_candidates.len());
-    let mut warmup_candidates = promoted_warmup_candidates;
+    let mut warmup_candidates = request_seed_warmup_candidates;
     warmup_candidates.extend(
         domain_warmup_candidates
             .into_iter()
@@ -6977,7 +7382,7 @@ fn run_hybrid_island_search(
             actions,
             &mut rng,
             &warmup_candidates,
-            promoted_warmup_count,
+            request_seed_warmup_count,
             &mut warmup_index,
             &mut accumulator.metrics,
         );
@@ -7029,7 +7434,7 @@ fn run_hybrid_island_search(
                 actions,
                 &mut rng,
                 &warmup_candidates,
-                promoted_warmup_count,
+                request_seed_warmup_count,
                 &mut warmup_index,
                 &mut accumulator.metrics,
             );
@@ -7129,8 +7534,8 @@ fn run_hybrid_island_search(
             continue;
         }
 
-        let can_process_repair =
-            !repair_queue.is_empty() && consecutive_repair_attempts < config.repair_burst_limit;
+        let can_process_repair = !repair_queue.is_empty()
+            && consecutive_repair_attempts < config.repair_burst_limit;
         if !repair_queue.is_empty() && !can_process_repair {
             increment_metric(&mut accumulator.metrics, "hybridRepairDeferrals", 1);
         }
@@ -7194,7 +7599,7 @@ fn run_hybrid_island_search(
                 &population,
                 &mut rng,
                 &warmup_candidates,
-                promoted_warmup_count,
+                request_seed_warmup_count,
                 &mut warmup_index,
                 &mut accumulator.metrics,
             )?
@@ -7259,12 +7664,18 @@ fn run_hybrid_island_search(
         "hybridStagnationLimit",
         config.stagnation_limit,
     );
-
+    if request.hybrid_plateau_order_chain_neighbors {
+        increment_metric(
+            &mut accumulator.metrics,
+            "hybridPlateauOrderChainNeighborMode",
+            1,
+        );
+    }
     accumulator.resume_state = Some(HybridIslandResumeState {
         island_index: restart_index_offset,
         seed: request.seed.clone(),
         rng_state: rng.state_snapshot(),
-        warmup_index: domain_warmup_offset + warmup_index.saturating_sub(promoted_warmup_count),
+        warmup_index: domain_warmup_offset + warmup_index.saturating_sub(request_seed_warmup_count),
         restart_index,
         attempts_since_improvement,
         consecutive_repair_attempts,
@@ -7277,7 +7688,7 @@ fn run_hybrid_island_search(
     Ok(accumulator)
 }
 
-fn create_promoted_seed_warmup_candidates(
+fn create_request_seed_warmup_candidates(
     request: &OptimizerRequest,
     actions: &[CandidateAction],
 ) -> Vec<OptimizerCandidateInput> {
@@ -7417,6 +7828,7 @@ fn create_domain_warmup_candidates(
                     plan: CandidatePlan {
                         turns: turns.clone(),
                     },
+                    source_label: None,
                 });
             }
         }
@@ -7594,7 +8006,6 @@ fn huppermage_domain_seed_candidates() -> Vec<DomainSeedCandidate> {
                     "papillons-diurnes",
                     "debacle",
                     "orbes-luisants",
-                    "halo-chatoyant@emptyCell",
                 ],
             ],
             max_duration: None,
@@ -7632,11 +8043,9 @@ fn huppermage_domain_seed_candidates() -> Vec<DomainSeedCandidate> {
                     "halo-chatoyant",
                     "eboulement",
                     "coeur-de-lumiere",
-                    "halo-chatoyant@emptyCell",
                     "papillons-diurnes",
                     "debacle",
                     "orbes-luisants",
-                    "halo-chatoyant@emptyCell",
                 ],
             ],
             max_duration: None,
@@ -7678,7 +8087,6 @@ fn huppermage_domain_seed_candidates() -> Vec<DomainSeedCandidate> {
                     "flux-denergie",
                     "debacle",
                     "orbes-luisants",
-                    "halo-chatoyant@emptyCell",
                 ],
             ],
             max_duration: None,
@@ -7893,7 +8301,6 @@ fn huppermage_domain_seed_candidates() -> Vec<DomainSeedCandidate> {
                     "debacle",
                     "fleche-de-lumiere",
                     "flux-denergie",
-                    "halo-chatoyant@emptyCell",
                     "epee-de-lumiere",
                 ],
             ],
@@ -7918,6 +8325,7 @@ pub fn run_hybrid_search(request: &OptimizerRequest) -> Result<HybridSearchRespo
             invalid_candidates: 0,
             top_candidates: vec![],
             metrics,
+            seed_candidate_evaluations: Vec::new(),
             resume_state: None,
         });
     }
@@ -7940,11 +8348,20 @@ pub fn run_hybrid_search(request: &OptimizerRequest) -> Result<HybridSearchRespo
     let mut invalid_candidates = 0_u32;
     let mut top_candidates = Vec::new();
     let mut resume_islands = Vec::new();
+    let mut seed_candidate_evaluations = Vec::new();
 
-    for island in &schedule.islands {
+    let island_count = schedule.islands.len().max(1);
+    for (island_position, island) in schedule.islands.iter().enumerate() {
         let mut island_request = request.clone();
         island_request.iterations = island.iterations;
         island_request.seed = island.rng_seed.clone();
+        island_request.seed_candidates = request
+            .seed_candidates
+            .iter()
+            .enumerate()
+            .filter(|(index, _candidate)| index % island_count == island_position)
+            .map(|(_index, candidate)| candidate.clone())
+            .collect();
         let island_resume_state = request.resume_state.as_ref().and_then(|state| {
             find_resume_island_state(state, island.island_index, &island.rng_seed)
         });
@@ -7962,6 +8379,7 @@ pub fn run_hybrid_search(request: &OptimizerRequest) -> Result<HybridSearchRespo
         attempts += island_result.attempts;
         valid_candidates += island_result.valid_candidates;
         invalid_candidates += island_result.invalid_candidates;
+        seed_candidate_evaluations.extend(island_result.seed_candidate_evaluations);
         merge_metric_maps(&mut metrics, island_result.metrics);
         if let Some(resume_state) = island_result.resume_state {
             resume_islands.push(resume_state);
@@ -8001,6 +8419,7 @@ pub fn run_hybrid_search(request: &OptimizerRequest) -> Result<HybridSearchRespo
         invalid_candidates,
         top_candidates,
         metrics,
+        seed_candidate_evaluations,
         resume_state: Some(HybridSearchResumeState {
             schema_version: request.schema_version,
             total_attempts: request
@@ -8484,6 +8903,7 @@ pub fn evaluate_candidate_batch(
                     passive_ids: candidate.passive_ids.clone(),
                     sublimation_ids: candidate.sublimation_ids.clone(),
                     plan: candidate.plan.clone(),
+                    source_label: None,
                 },
                 &candidate.id,
                 &catalog,
@@ -9278,6 +9698,7 @@ mod tests {
                     },
                 ],
             },
+            source_label: None,
         };
 
         let evaluation = evaluate_candidate(&request, &candidate, "setup-burst")
@@ -9349,6 +9770,7 @@ mod tests {
                     },
                 ],
             },
+            source_label: None,
         };
         let catalog = read_search_catalog(&request).expect("catalog should parse");
         let spells_by_id = catalog
@@ -9363,6 +9785,7 @@ mod tests {
             invalid_candidates: 0,
             top_candidates: vec![],
             metrics: BTreeMap::new(),
+            seed_candidate_evaluations: Vec::new(),
             resume_state: None,
         };
 
@@ -9479,6 +9902,7 @@ mod tests {
                     ],
                 }],
             },
+            source_label: None,
         };
 
         let evaluation = evaluate_candidate(&request, &candidate, "feu-follet-line")
@@ -9586,6 +10010,7 @@ mod tests {
                     },
                 ],
             },
+            source_label: None,
         };
 
         let evaluation = evaluate_candidate(&request, &candidate, "candidate:abundance")
@@ -9667,6 +10092,7 @@ mod tests {
                     },
                 ],
             },
+            source_label: None,
         };
 
         let evaluation = evaluate_candidate(&request, &candidate, "candidate:halo")
@@ -9746,6 +10172,7 @@ mod tests {
                     actions: vec![action("water-hit"), action("light-hit")],
                 }],
             },
+            source_label: None,
         };
 
         let evaluation = evaluate_candidate(&request, &candidate, "candidate:alternance-light")
@@ -9815,6 +10242,7 @@ mod tests {
                     },
                 ],
             },
+            source_label: None,
         };
 
         let evaluation = evaluate_candidate(&request, &candidate, "candidate:delayed")
@@ -9900,6 +10328,7 @@ mod tests {
                     actions: vec![action("fire-hit"), action("water-hit")],
                 }],
             },
+            source_label: None,
         };
 
         let evaluation = evaluate_candidate(&request, &candidate, "candidate:antithese")
@@ -9968,6 +10397,7 @@ mod tests {
                     actions: vec![action("removal")],
                 }],
             },
+            source_label: None,
         };
 
         let evaluation = evaluate_candidate(&request, &candidate, "candidate:absorption-removal")
@@ -10018,6 +10448,7 @@ mod tests {
                     actions: vec![action("trigger-spell")],
                 }],
             },
+            source_label: None,
         };
 
         let evaluation = evaluate_candidate(&request, &candidate, "candidate:trigger")
@@ -10083,6 +10514,7 @@ mod tests {
                     },
                 ],
             },
+            source_label: None,
         };
 
         let evaluation = evaluate_candidate(&request, &candidate, "candidate:last-rune-cost")
@@ -10129,6 +10561,7 @@ mod tests {
                     actions: vec![action("ramping-spell"), action("ramping-spell")],
                 }],
             },
+            source_label: None,
         };
 
         let evaluation = evaluate_candidate(&request, &candidate, "candidate:ramping-bq-cost")
@@ -10395,6 +10828,72 @@ mod tests {
     }
 
     #[test]
+    fn clamps_configured_resource_aware_fresh_chance() {
+        let mut request = transformation_request();
+        assert_eq!(get_hybrid_resource_aware_fresh_chance(&request), 0.12);
+
+        request.hybrid_resource_aware_fresh_chance = Some(1.5);
+        assert_eq!(get_hybrid_resource_aware_fresh_chance(&request), 1.0);
+
+        request.hybrid_resource_aware_fresh_chance = Some(-0.5);
+        assert_eq!(get_hybrid_resource_aware_fresh_chance(&request), 0.0);
+    }
+
+    #[test]
+    fn configured_resource_aware_fresh_chance_controls_candidate_batches() {
+        let mut request = parse_optimizer_request(
+            r#"{
+              "schemaVersion":1,
+              "engine":"hybrid",
+              "seed":"resource-aware-batch",
+              "duration":1,
+              "iterations":8,
+              "maxActionsPerTurn":4,
+              "maxPassiveCount":0,
+              "availableSpellIds":["cheap","expensive"],
+              "availablePassiveIds":[],
+              "catalog":[
+                {
+                  "kind":"spell",
+                  "id":"cheap",
+                  "cost":{"ap":2},
+                  "effects":[{"type":"damage","base":10,"element":"fire"}],
+                  "constraints":[],
+                  "tags":[]
+                },
+                {
+                  "kind":"spell",
+                  "id":"expensive",
+                  "cost":{"ap":10},
+                  "effects":[{"type":"damage","base":100,"element":"fire"}],
+                  "constraints":[],
+                  "tags":["burst"]
+                }
+              ],
+              "character":{"id":"test","resources":{"ap":4,"mp":3,"wp":2,"bq":100}}
+            }"#,
+        )
+        .expect("request should parse");
+        request.hybrid_resource_aware_fresh_chance = Some(1.0);
+
+        let result = generate_hybrid_candidates(&request).expect("batch should generate");
+
+        assert_eq!(result.attempts, 8);
+        assert_eq!(
+            result.metrics.get("hybridResourceAwareCandidates"),
+            Some(&8)
+        );
+        assert!(result.candidates.iter().all(|candidate| {
+            candidate
+                .plan
+                .turns
+                .iter()
+                .flat_map(|turn| turn.actions.iter())
+                .all(|action| action.spell_id == "cheap")
+        }));
+    }
+
+    #[test]
     fn schedules_hybrid_islands_with_deterministic_seeds() {
         let request = parse_optimizer_request(
             r#"{
@@ -10470,10 +10969,32 @@ mod tests {
         assert_eq!(restart.retained_elites[1].id, "tie");
         assert_eq!(restart.retained_elites[2].id, "low");
         assert_eq!(restart.immigrants.len(), 7);
-        assert_eq!(restart.next_population.len(), 10);
+        assert_eq!(restart.next_population, restart.retained_elites);
+        assert!(restart.next_population.iter().all(|entry| entry.valid));
         assert_eq!(restart.metrics.get("hybridRestarts"), Some(&1));
         assert_eq!(restart.metrics.get("hybridImmigrants"), Some(&7));
         assert_eq!(restart.attempts_since_improvement, 28);
+    }
+
+    #[test]
+    fn truncates_population_to_valid_evaluated_entries() {
+        let mut invalid = population_entry("invalid-high", 999.0, 1);
+        invalid.valid = false;
+        let mut unevaluated = population_entry("unevaluated", f64::NEG_INFINITY, 1);
+        unevaluated.valid = false;
+        let best = population_entry("best", 20.0, 2);
+        let low = population_entry("low", 10.0, 3);
+
+        let truncated = truncate_population(vec![invalid, low, unevaluated, best], 10);
+
+        assert_eq!(
+            truncated
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["best", "low"]
+        );
+        assert!(truncated.iter().all(|entry| entry.valid));
     }
 
     fn population_entry(id: &str, score: f64, action_count: usize) -> HybridPopulationEntry {
@@ -10493,6 +11014,7 @@ mod tests {
                             .collect(),
                     }],
                 },
+                source_label: None,
             },
             score,
             valid: true,
@@ -10544,6 +11066,51 @@ mod tests {
     }
 
     #[test]
+    fn locked_loadout_overrides_candidate_loadout_before_evaluation() {
+        let mut request = transformation_request();
+        request.hybrid_locked_loadout = true;
+        request.available_passive_ids = vec!["passive-a".to_string()];
+        request.available_sublimation_ids = vec![];
+        let candidate = candidate_from_actions(vec!["hit"], vec!["passive-b"]);
+        let catalog = read_search_catalog(&request).expect("catalog should parse");
+        let spells_by_id = catalog
+            .iter()
+            .filter(|entry| entry.kind == "spell")
+            .map(|entry| (entry.id.as_str(), entry))
+            .collect::<BTreeMap<_, _>>();
+        let mut cache = DirectEvaluatorCache::new(16);
+        let mut accumulator = HybridSearchAccumulator {
+            attempts: 0,
+            valid_candidates: 0,
+            invalid_candidates: 0,
+            top_candidates: vec![],
+            metrics: BTreeMap::new(),
+            seed_candidate_evaluations: Vec::new(),
+            resume_state: None,
+        };
+
+        let tracked = evaluate_and_track_hybrid_candidate(
+            &request,
+            candidate,
+            &mut accumulator,
+            10,
+            &catalog,
+            &spells_by_id,
+            &mut cache,
+        )
+        .expect("candidate should track");
+
+        assert_eq!(
+            tracked
+                .population_entry
+                .expect("valid candidate should enter population")
+                .candidate
+                .passive_ids,
+            vec!["passive-a"]
+        );
+    }
+
+    #[test]
     fn repairs_and_deduplicates_repair_queue_candidates() {
         let request = transformation_request();
         let candidate = OptimizerCandidateInput {
@@ -10559,6 +11126,7 @@ mod tests {
                     },
                 ],
             },
+            source_label: None,
         };
         let violation = HybridViolationInput {
             violation_type: "insufficientResource".to_string(),
@@ -10596,6 +11164,7 @@ mod tests {
                     },
                 ],
             },
+            source_label: None,
         };
 
         let result = enqueue_hybrid_elite_neighbors(&request, vec![], &candidate)
@@ -10608,6 +11177,96 @@ mod tests {
             .queue
             .iter()
             .all(|neighbor| neighbor.plan.turns.len() == candidate.plan.turns.len()));
+    }
+
+    #[test]
+    fn contextual_adjacent_swaps_prioritize_supported_pairs() {
+        let mut request = transformation_request();
+        request.hybrid_contextual_adjacent_swaps = true;
+        let candidate = OptimizerCandidateInput {
+            passive_ids: vec![],
+            sublimation_ids: vec![],
+            plan: CandidatePlan {
+                turns: vec![
+                    CandidateTurn {
+                        actions: vec![action("hit")],
+                    },
+                    CandidateTurn {
+                        actions: vec![action("hit")],
+                    },
+                    CandidateTurn {
+                        actions: vec![
+                            action("hit"),
+                            action("debacle"),
+                            action("orbes-luisants"),
+                            action("halo-chatoyant"),
+                        ],
+                    },
+                ],
+            },
+            source_label: None,
+        };
+
+        let result = enqueue_hybrid_elite_neighbors(&request, vec![], &candidate)
+            .expect("neighbors should generate");
+        let first_actions = result.queue[0].plan.turns[2]
+            .actions
+            .iter()
+            .map(|action| action.spell_id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            first_actions,
+            vec!["hit", "orbes-luisants", "debacle", "halo-chatoyant"]
+        );
+        assert_eq!(
+            result
+                .metrics
+                .get("hybridContextualAdjacentSwapNeighborCandidates"),
+            Some(&2)
+        );
+    }
+
+    #[test]
+    fn plateau_order_chain_neighbors_are_opt_in() {
+        let mut request = transformation_request();
+        let candidate = OptimizerCandidateInput {
+            passive_ids: vec![],
+            sublimation_ids: vec![],
+            plan: CandidatePlan {
+                turns: vec![CandidateTurn {
+                    actions: vec![action("hit"), action("burst"), action("cell")],
+                }],
+            },
+            source_label: None,
+        };
+
+        let default_result = enqueue_hybrid_elite_neighbors(&request, vec![], &candidate)
+            .expect("default neighbors should generate");
+        assert_eq!(
+            default_result
+                .metrics
+                .get("hybridPlateauOrderChainNeighborCandidates"),
+            None
+        );
+
+        request.hybrid_plateau_order_chain_neighbors = true;
+        let plateau_result = enqueue_hybrid_elite_neighbors(&request, vec![], &candidate)
+            .expect("plateau neighbors should generate");
+
+        assert!(plateau_result
+            .metrics
+            .get("hybridPlateauOrderChainNeighborCandidates")
+            .copied()
+            .unwrap_or(0)
+            > 0);
+        assert!(plateau_result
+            .queue
+            .iter()
+            .any(|neighbor| neighbor
+                .source_label
+                .as_deref()
+                .is_some_and(|label| label.starts_with("neighbor:plateau-order-chain"))));
     }
 
     #[test]
@@ -10662,15 +11321,71 @@ mod tests {
         let mut request = transformation_request();
         request.iterations = 1;
         request.max_candidates = Some(1);
-        request.seed_candidates = vec![candidate_from_actions(vec!["burst"], vec!["passive-a"])];
+        let mut seed_candidate = candidate_from_actions(vec!["burst"], vec!["passive-a"]);
+        seed_candidate.source_label = Some("trial:burst".to_string());
+        request.seed_candidates = vec![seed_candidate];
 
         let result = run_hybrid_search(&request).expect("hybrid search should run");
 
         assert_eq!(result.attempts, 1);
-        assert_eq!(result.metrics.get("hybridPromotedSeedCandidates"), Some(&1));
+        assert_eq!(result.metrics.get("hybridSeedWarmupCandidates"), Some(&1));
+        assert_eq!(
+            result.metrics.get("hybridSeedWarmupEvaluatedCandidates"),
+            Some(&1)
+        );
+        assert_eq!(
+            result.metrics.get("hybridSeedWarmupValidCandidates"),
+            Some(&1)
+        );
+        assert_eq!(
+            result
+                .metrics
+                .get("hybridSeedWarmupIslandImprovedCandidates"),
+            Some(&1)
+        );
+        assert_eq!(result.seed_candidate_evaluations.len(), 1);
+        assert_eq!(
+            result.seed_candidate_evaluations[0].source_label,
+            "trial:burst"
+        );
+        assert!(result.seed_candidate_evaluations[0].valid);
+        assert!(result.seed_candidate_evaluations[0].score.is_some());
+        assert!(result.seed_candidate_evaluations[0].improved_island_best);
         assert_eq!(
             result.top_candidates[0].plan.turns[0].actions[0].spell_id,
             "burst"
+        );
+    }
+
+    #[test]
+    fn distributes_request_seed_candidates_across_islands_without_duplication() {
+        let mut request = transformation_request();
+        request.iterations = 1_000;
+        request.max_candidates = Some(3);
+        request.seed_candidates = (0..3)
+            .map(|index| {
+                let mut candidate = candidate_from_actions(vec!["burst"], vec!["passive-a"]);
+                candidate.source_label = Some(format!("trial:{index}"));
+                candidate
+            })
+            .collect();
+
+        let result = run_hybrid_search(&request).expect("hybrid search should run");
+
+        assert_eq!(result.metrics.get("hybridIslands"), Some(&6));
+        assert_eq!(result.metrics.get("hybridSeedWarmupCandidates"), Some(&3));
+        assert_eq!(
+            result.metrics.get("hybridSeedWarmupEvaluatedCandidates"),
+            Some(&3)
+        );
+        assert_eq!(result.seed_candidate_evaluations.len(), 3);
+        assert_eq!(
+            result
+                .seed_candidate_evaluations
+                .iter()
+                .map(|evaluation| evaluation.source_label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["trial:0", "trial:1", "trial:2"]
         );
     }
 
@@ -10822,6 +11537,7 @@ mod tests {
                             .collect(),
                     }],
                 },
+                source_label: None,
             },
             score,
         }
@@ -10941,6 +11657,7 @@ mod tests {
                     },
                 ],
             },
+            source_label: None,
         }
     }
 
@@ -11287,6 +12004,7 @@ mod tests {
                     ],
                 }],
             },
+            source_label: None,
         };
 
         let evaluation = evaluate_candidate(&request, &candidate, "candidate:extension-earth")
@@ -11353,6 +12071,7 @@ mod tests {
                     },
                 ],
             },
+            source_label: None,
         };
 
         let evaluation = evaluate_candidate(&request, &candidate, "candidate:initiative-heart")
@@ -11504,6 +12223,7 @@ mod tests {
                     },
                 ],
             },
+            source_label: None,
         };
 
         let evaluation = evaluate_candidate(&request, &candidate, "ff-runification-recover")
@@ -11727,6 +12447,7 @@ mod tests {
             max_casts_per_target: None,
             cooldown_turns: Some(2),
             required_target: None,
+            supports_empty_cell_target: false,
         };
         apply_spell_cooldown(&mut state.cooldowns_by_spell_id, &spell);
 
@@ -11760,6 +12481,7 @@ mod tests {
             max_casts_per_target: Some(1),
             cooldown_turns: None,
             required_target: None,
+            supports_empty_cell_target: false,
         };
         let mut casts = BTreeMap::new();
         casts.insert("limited".to_string(), 2);
@@ -11771,7 +12493,7 @@ mod tests {
                 .expect("target limit should win");
         assert_eq!(target_violation.scope, Some("target".to_string()));
 
-        assert!(validate_spell_rules(
+        let empty_cell_violation = validate_spell_rules(
             &spell,
             1,
             Some(ActionTargetKind::EmptyCell),
@@ -11779,7 +12501,8 @@ mod tests {
             &target_casts,
             &state
         )
-        .is_none());
+        .expect("empty-cell target should be invalid unless the spell supports it");
+        assert_eq!(empty_cell_violation.violation_type, "invalidTarget");
 
         assert!(validate_spell_rules(&spell, 1, None, &casts, &BTreeMap::new(), &state).is_none());
 
@@ -11791,6 +12514,7 @@ mod tests {
             max_casts_per_target: None,
             cooldown_turns: None,
             required_target: None,
+            supports_empty_cell_target: false,
         };
         let mut turn_limited_casts = BTreeMap::new();
         turn_limited_casts.insert("turn-limited".to_string(), 2);
@@ -11822,6 +12546,7 @@ mod tests {
             max_casts_per_target: None,
             cooldown_turns: None,
             required_target: None,
+            supports_empty_cell_target: false,
         };
         let mut coeur_casts = BTreeMap::new();
         coeur_casts.insert("coeur-de-lumiere".to_string(), 1);
@@ -11855,6 +12580,7 @@ mod tests {
             max_casts_per_target: None,
             cooldown_turns: None,
             required_target: Some(ActionTargetKind::EmptyCell),
+            supports_empty_cell_target: true,
         };
 
         let violation = validate_spell_rules(
@@ -11892,6 +12618,7 @@ mod tests {
             max_casts_per_target: None,
             cooldown_turns: None,
             required_target: None,
+            supports_empty_cell_target: false,
         };
 
         let violation =

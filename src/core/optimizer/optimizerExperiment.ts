@@ -1,4 +1,4 @@
-import type { CatalogEntry, Resource, SpellCost } from "../catalog/types.ts";
+import type { CatalogEntry, Effect, Resource, SpellCost } from "../catalog/types.ts";
 import { simulateCombo } from "../simulation/comboSimulator.ts";
 import type { Action, ComboPlan, ComboSimulationOptions, SimulatedCharacter, TurnPlan } from "../simulation/types.ts";
 import { findSublimation } from "../sublimations/catalog.ts";
@@ -2680,7 +2680,6 @@ function getHuppermageDomainSeedCandidates(): Array<{
           "papillons-diurnes",
           "debacle",
           "orbes-luisants",
-          "halo-chatoyant@emptyCell",
         ],
       ],
     },
@@ -2715,11 +2714,9 @@ function getHuppermageDomainSeedCandidates(): Array<{
           "halo-chatoyant",
           "eboulement",
           "coeur-de-lumiere",
-          "halo-chatoyant@emptyCell",
           "papillons-diurnes",
           "debacle",
           "orbes-luisants",
-          "halo-chatoyant@emptyCell",
         ],
       ],
     },
@@ -2758,7 +2755,6 @@ function getHuppermageDomainSeedCandidates(): Array<{
           "flux-denergie",
           "debacle",
           "orbes-luisants",
-          "halo-chatoyant@emptyCell",
         ],
       ],
     },
@@ -2960,7 +2956,6 @@ function getHuppermageDomainSeedCandidates(): Array<{
           "debacle",
           "fleche-de-lumiere",
           "flux-denergie",
-          "halo-chatoyant@emptyCell",
           "epee-de-lumiere",
         ],
       ],
@@ -3099,6 +3094,9 @@ function canUseActionSoftly(
   targetCastsBySpellId: Map<string, number>,
 ): boolean {
   if (!canAffordCost(resources, spell.cost)) {
+    return false;
+  }
+  if (action.target?.kind === "emptyCell" && !spellAllowsEmptyCellTarget(spell)) {
     return false;
   }
 
@@ -3617,13 +3615,30 @@ function getSearchActions(options: NormalizedExperimentOptions): Action[] {
   return spellIds.flatMap((spellId) => {
     const actions: Action[] = [{ spellId }];
     const entry = entriesById.get(spellId);
-    if (entry?.constraints.some((constraint) => (
-      constraint.type === "maxCastsPerTarget"
-      || (constraint.type === "requiresTarget" && constraint.target === "emptyCell")
-    ))) {
+    if (entry && spellAllowsEmptyCellTarget(entry)) {
       actions.push({ spellId, target: { kind: "emptyCell" } });
     }
     return actions;
+  });
+}
+
+function spellAllowsEmptyCellTarget(spell: CatalogEntry): boolean {
+  return spell.id === "feu-follet"
+    || spell.tags.includes("feu-follet")
+    || spell.constraints.some((constraint) => constraint.type === "requiresTarget" && constraint.target === "emptyCell")
+    || effectsAllowEmptyCellTarget(spell.effects);
+}
+
+function effectsAllowEmptyCellTarget(effects: Effect[]): boolean {
+  return effects.some((effect) => {
+    if (effect.type === "conditional") {
+      return (effect.condition.type === "targetIs" && effect.condition.value === "emptyCell")
+        || effectsAllowEmptyCellTarget(effect.effects);
+    }
+    if (effect.type === "trigger") {
+      return effectsAllowEmptyCellTarget(effect.effects);
+    }
+    return false;
   });
 }
 

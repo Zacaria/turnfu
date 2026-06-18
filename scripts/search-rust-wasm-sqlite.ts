@@ -6,6 +6,10 @@ import { performance } from "node:perf_hooks";
 import { DatabaseSync } from "node:sqlite";
 import { Worker } from "node:worker_threads";
 import { huppermageCatalog } from "../src/core/catalog/index.ts";
+import {
+  evaluateSustainableCycle,
+  scoreComboSimulation,
+} from "../src/core/optimizer/comboOptimizer.ts";
 import { createOptimizerExperimentEvaluator } from "../src/core/optimizer/index.ts";
 import {
   createRustWasmOptimizerRequest,
@@ -393,7 +397,7 @@ while (!stopRequested) {
   const totalAttempts = session.total_attempts + attempts;
   const bestCandidate = topCandidates[0];
   const improvedGlobalBest = bestCandidate !== undefined && bestCandidate.score.score > previousBestScore;
-  const verifiedCandidates = createVerifiedCandidatePayloads(topCandidates, totalAttempts);
+  const verifiedCandidates = createDisplayCandidatePayloads(topCandidates, totalAttempts);
   const summary = {
     session: sessionId,
     dbPath,
@@ -733,7 +737,7 @@ function verifyTopCandidates(topCandidates: RustWasmOptimizerScoredCandidate[]):
   };
 }
 
-function createVerifiedCandidatePayloads(
+function createDisplayCandidatePayloads(
   topCandidates: RustWasmOptimizerScoredCandidate[],
   totalAttempts: number,
 ) {
@@ -744,13 +748,15 @@ function createVerifiedCandidatePayloads(
         sublimationIds: candidate.sublimationIds,
         plan: candidate.plan,
       });
-      if (!evaluation.result) {
+      const displayCandidate = evaluation.result ?? createReplayableCandidatePayload(candidate, evaluation);
+      if (!displayCandidate) {
         return null;
       }
       return {
         schemaVersion: 1 as const,
         totalAttempts,
         rank: index + 1,
+        verification: evaluation.result ? "verified" as const : "replay-invalid" as const,
         run: {
           sessionId,
           scenarioId: scenario.id,
@@ -761,10 +767,40 @@ function createVerifiedCandidatePayloads(
           targetElement: scoreCriterion === "element-damage" ? targetElement : null,
           requireSustainableCycle,
         },
-        candidate: evaluation.result,
+        candidate: displayCandidate,
       };
     })
     .filter((payload): payload is NonNullable<typeof payload> => payload !== null);
+}
+
+function createReplayableCandidatePayload(
+  candidate: RustWasmOptimizerScoredCandidate,
+  evaluation: ReturnType<typeof oracle.evaluateDetailed>,
+) {
+  if (!evaluation.simulation.valid) {
+    return null;
+  }
+
+  const sustainability = requireSustainableCycle
+    ? evaluateSustainableCycle({
+        catalog: huppermageCatalog,
+        character,
+        plan: evaluation.normalizedCandidate.plan,
+        defaultActionContext,
+      })
+    : {
+        required: false,
+        sustainable: true,
+      };
+
+  return {
+    passiveIds: evaluation.normalizedCandidate.passiveIds ?? candidate.passiveIds,
+    sublimationIds: evaluation.normalizedCandidate.sublimationIds ?? candidate.sublimationIds,
+    plan: evaluation.normalizedCandidate.plan,
+    simulation: evaluation.simulation,
+    score: scoreComboSimulation(evaluation.simulation, criterion),
+    sustainability,
+  };
 }
 
 function compareRustCandidates(

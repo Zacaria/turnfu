@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { cost, damage, maxCastsPerTarget, maxCastsPerTurn, normalizeCatalog, resourceDelta, screenshot, spell } from "../catalog/index.ts";
+import { cost, damage, maxCastsPerTarget, maxCastsPerTurn, normalizeCatalog, requiresTarget, resourceDelta, screenshot, spell } from "../catalog/index.ts";
 import { createResources, simulateCombo } from "../simulation/index.ts";
 import { evaluateSustainableCycle, optimizeCombo, scoreComboSimulation, scoreSustainableComboSimulation } from "./comboOptimizer.ts";
 import type { CatalogEntry } from "../catalog/types.ts";
@@ -78,6 +78,17 @@ const catalog = normalizeCatalog([
       resourceDelta({ resource: "bq", amount: 25 }),
     ],
     constraints: [maxCastsPerTarget(1), maxCastsPerTurn(1)],
+    metadata: { status: "extracted", sources: [source] },
+  }),
+  spell("empty-cell-setup", {
+    name: "Empty Cell Setup",
+    level: 200,
+    element: "fire",
+    cost: cost({ ap: 1 }),
+    effects: [
+      resourceDelta({ resource: "bq", amount: 25 }),
+    ],
+    constraints: [requiresTarget("emptyCell"), maxCastsPerTurn(1)],
     metadata: { status: "extracted", sources: [source] },
   }),
 ]) as CatalogEntry[];
@@ -222,11 +233,11 @@ test("searches bounded combo plans up to three turns and ranks by score", () => 
   assert.equal(results[0].score.score, 120);
 });
 
-test("generates empty-cell casts for target-limited spells", () => {
+test("generates empty-cell casts only for spells that support empty cells", () => {
   const results = optimizeCombo({
     catalog,
     character,
-    availableSpellIds: ["target-limited-setup"],
+    availableSpellIds: ["target-limited-setup", "empty-cell-setup"],
     criterion: { type: "totalDamage" },
     maxTurns: 1,
     exactTurnCount: 1,
@@ -234,11 +245,10 @@ test("generates empty-cell casts for target-limited spells", () => {
     beamWidth: 10,
   });
 
-  assert.ok(results.some((result) =>
-    result.plan.turns.some((turn) =>
-      turn.actions.some((action) => action.target?.kind === "emptyCell")
-    )
-  ));
+  const actions = results.flatMap((result) => result.plan.turns.flatMap((turn) => turn.actions));
+
+  assert.ok(actions.some((action) => action.spellId === "empty-cell-setup" && action.target?.kind === "emptyCell"));
+  assert.equal(actions.some((action) => action.spellId === "target-limited-setup" && action.target?.kind === "emptyCell"), false);
 });
 
 test("limits returned optimizer candidates deterministically", () => {

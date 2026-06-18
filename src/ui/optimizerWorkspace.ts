@@ -75,6 +75,7 @@ export type ContinuousVerifiedOptimizerCandidatePayload = {
   schemaVersion: 1;
   totalAttempts: number;
   rank: number;
+  verification?: "verified" | "replay-invalid";
   run: {
     sessionId: string;
     scenarioId: string;
@@ -508,6 +509,9 @@ async function runContinuousOptimizerForControlsLive(
   }
 }
 
+const optimizerContinuousWorkerCount = 10;
+const optimizerContinuousChunkSize = 2_000;
+
 export function createOptimizerResultViewModel({
   duration,
   result,
@@ -711,8 +715,8 @@ function createContinuousControlsForOptimizerRun(
   controls: OptimizerWorkspaceControls,
 ) {
   const defaults = createDefaultContinuousOptimizerControls();
-  const workerCount = defaults.workerCount;
-  const chunkSize = defaults.chunkSize;
+  const workerCount = optimizerContinuousWorkerCount;
+  const chunkSize = optimizerContinuousChunkSize;
   const targetRounds = Math.max(1, Math.ceil(controls.iterationBudget / Math.max(1, workerCount * chunkSize)));
 
   return {

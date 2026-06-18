@@ -68,21 +68,61 @@ export type RecordContinuousSearchMotifInput = {
   rediscoveryCount: number;
 };
 
-export type ContinuousSearchPromotedSeed = {
+export type ContinuousSearchMotifEvidence = {
   id: number;
   sessionId: string;
-  sourceKind: string;
-  sourceRef: string | null;
-  candidate: unknown;
-  score: number;
+  motifKey: string;
+  motif: unknown;
+  supportCount: number;
+  bestScore: number;
+  averageScore: number;
+  rediscoveryCount: number;
   confidence: number;
-  usageCount: number;
 };
 
-export type PromoteContinuousSearchCandidateSeedsInput = {
+export type ContinuousSearchCandidateEvidence = {
+  id: number;
   sessionId: string;
-  minScore: number;
-  maxSeeds: number;
+  candidate: unknown;
+  score: number;
+  attempt: number;
+};
+
+export type RecordContinuousSearchReuseTrialInput = {
+  sessionId: string;
+  sourceCandidateId: number | null;
+  strategy: string;
+  candidate: unknown;
+  sourceScore: number | null;
+  attempt: number;
+  resultScore?: number | null;
+  improvedGlobalBest?: boolean;
+};
+
+export type ContinuousSearchReuseTrial = {
+  id: number;
+  sessionId: string;
+  sourceCandidateId: number | null;
+  strategy: string;
+  candidate: unknown;
+  sourceScore: number | null;
+  attempt: number;
+  resultScore: number | null;
+  improvedGlobalBest: boolean;
+  createdAt: string;
+};
+
+export type ContinuousSearchReuseStrategyEvidence = {
+  strategy: string;
+  trials: number;
+  evaluatedTrials: number;
+  unscoredTrials: number;
+  positiveScoreDeltaTrials: number;
+  negativeScoreDeltaTrials: number;
+  globalBestTrials: number;
+  averageScoreDelta: number | null;
+  bestScoreDelta: number | null;
+  latestAttempt: number;
 };
 
 export function createContinuousSearchSchema(database: DatabaseSync): void {
@@ -155,7 +195,6 @@ export function createContinuousSearchSchema(database: DatabaseSync): void {
       average_score REAL NOT NULL DEFAULT 0,
       rediscovery_count INTEGER NOT NULL DEFAULT 0,
       confidence REAL NOT NULL DEFAULT 0,
-      promoted INTEGER NOT NULL DEFAULT 0,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       UNIQUE(session_id, motif_key)
     );
@@ -171,21 +210,20 @@ export function createContinuousSearchSchema(database: DatabaseSync): void {
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
 
-    CREATE TABLE IF NOT EXISTS continuous_promoted_seeds (
+    CREATE TABLE IF NOT EXISTS continuous_reuse_trials (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       session_id TEXT NOT NULL,
-      source_kind TEXT NOT NULL,
-      source_ref TEXT,
+      source_candidate_id INTEGER,
+      strategy TEXT NOT NULL,
+      candidate_hash TEXT NOT NULL,
       candidate_json TEXT NOT NULL,
-      score REAL NOT NULL,
-      confidence REAL NOT NULL,
-      usage_count INTEGER NOT NULL DEFAULT 0,
-      last_used_at TEXT,
-      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      source_score REAL,
+      attempt INTEGER NOT NULL,
+      result_score REAL,
+      improved_global_best INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(session_id, strategy, candidate_hash)
     );
-
-    CREATE UNIQUE INDEX IF NOT EXISTS continuous_promoted_seeds_source_unique
-    ON continuous_promoted_seeds (session_id, source_kind, source_ref);
   `);
 }
 
@@ -216,7 +254,7 @@ export function ensureContinuousSearchSession(
 }
 
 export function resetContinuousSearchSession(database: DatabaseSync, id: string): void {
-  database.prepare("DELETE FROM continuous_promoted_seeds WHERE session_id = ?").run(id);
+  database.prepare("DELETE FROM continuous_reuse_trials WHERE session_id = ?").run(id);
   database.prepare("DELETE FROM continuous_boundary_samples WHERE session_id = ?").run(id);
   database.prepare("DELETE FROM continuous_motifs WHERE session_id = ?").run(id);
   database.prepare("DELETE FROM continuous_checkpoints WHERE session_id = ?").run(id);
@@ -307,8 +345,8 @@ export function recordContinuousSearchMotif(
   database.prepare(`
     INSERT INTO continuous_motifs (
       session_id, motif_key, motif_json, support_count, best_score,
-      average_score, rediscovery_count, confidence, promoted
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      average_score, rediscovery_count, confidence
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(session_id, motif_key) DO UPDATE SET
       motif_json = excluded.motif_json,
       support_count = excluded.support_count,
@@ -316,7 +354,6 @@ export function recordContinuousSearchMotif(
       average_score = excluded.average_score,
       rediscovery_count = excluded.rediscovery_count,
       confidence = excluded.confidence,
-      promoted = CASE WHEN excluded.confidence >= 0.5 THEN 1 ELSE continuous_motifs.promoted END,
       updated_at = CURRENT_TIMESTAMP
   `).run(
     input.sessionId,
@@ -327,130 +364,175 @@ export function recordContinuousSearchMotif(
     input.averageScore,
     input.rediscoveryCount,
     confidence,
-    confidence >= 0.5 ? 1 : 0,
   );
 }
 
-export function promoteContinuousSearchSeeds(
-  database: DatabaseSync,
-  input: { sessionId: string; minConfidence: number; maxSeeds: number },
-): void {
-  const motifs = database.prepare(`
-    SELECT motif_key, motif_json, best_score, confidence
-    FROM continuous_motifs
-    WHERE session_id = ? AND confidence >= ?
-    ORDER BY confidence DESC, best_score DESC
-    LIMIT ?
-  `).all(input.sessionId, input.minConfidence, input.maxSeeds) as Record<string, unknown>[];
-
-  for (const motif of motifs) {
-    database.prepare(`
-      INSERT INTO continuous_promoted_seeds (
-        session_id, source_kind, source_ref, candidate_json, score, confidence
-      ) VALUES (?, 'motif', ?, ?, ?, ?)
-    `).run(
-      input.sessionId,
-      motif.motif_key,
-      String(motif.motif_json),
-      Number(motif.best_score),
-      Number(motif.confidence),
-    );
-  }
-}
-
-export function promoteContinuousSearchCandidateSeeds(
-  database: DatabaseSync,
-  input: PromoteContinuousSearchCandidateSeedsInput,
-): number {
-  const candidates = database.prepare(`
-    SELECT id, candidate_json, score
-    FROM continuous_candidate_evaluations
-    WHERE session_id = ? AND valid = 1 AND score >= ?
-    ORDER BY score DESC, attempt DESC, id ASC
-    LIMIT ?
-  `).all(input.sessionId, input.minScore, input.maxSeeds) as Record<string, unknown>[];
-
-  let promoted = 0;
-  for (const candidate of candidates) {
-    const result = database.prepare(`
-      INSERT OR IGNORE INTO continuous_promoted_seeds (
-        session_id, source_kind, source_ref, candidate_json, score, confidence
-      ) VALUES (?, 'candidate', ?, ?, ?, ?)
-    `).run(
-      input.sessionId,
-      String(candidate.id),
-      String(candidate.candidate_json),
-      Number(candidate.score),
-      calculateCandidateSeedConfidence(Number(candidate.score)),
-    );
-    promoted += Number(result.changes ?? 0);
-  }
-  return promoted;
-}
-
-export function listContinuousSearchPromotedSeeds(
-  database: DatabaseSync,
-  sessionId: string,
-): ContinuousSearchPromotedSeed[] {
-  const rows = database.prepare(`
-    SELECT id, session_id, source_kind, source_ref, candidate_json, score, confidence, usage_count
-    FROM continuous_promoted_seeds
-    WHERE session_id = ?
-    ORDER BY confidence DESC, score DESC, id ASC
-  `).all(sessionId) as Record<string, unknown>[];
-  return rows.map((row) => ({
-    id: Number(row.id),
-    sessionId: String(row.session_id),
-    sourceKind: String(row.source_kind),
-    sourceRef: row.source_ref === null ? null : String(row.source_ref),
-    candidate: JSON.parse(String(row.candidate_json)),
-    score: Number(row.score),
-    confidence: Number(row.confidence),
-    usageCount: Number(row.usage_count),
-  }));
-}
-
-export function listContinuousSearchPromotedCandidateSeeds(
+export function listContinuousSearchCandidateEvidence(
   database: DatabaseSync,
   sessionId: string,
   limit: number,
-): ContinuousSearchPromotedSeed[] {
+): ContinuousSearchCandidateEvidence[] {
   const rows = database.prepare(`
-    SELECT id, session_id, source_kind, source_ref, candidate_json, score, confidence, usage_count
-    FROM continuous_promoted_seeds
-    WHERE session_id = ? AND source_kind = 'candidate'
-    ORDER BY usage_count ASC, confidence DESC, score DESC, id ASC
+    SELECT id, session_id, candidate_json, score, attempt
+    FROM continuous_candidate_evaluations
+    WHERE session_id = ? AND valid = 1
+    ORDER BY score DESC, attempt DESC, id ASC
     LIMIT ?
   `).all(sessionId, limit) as Record<string, unknown>[];
   return rows.map((row) => ({
     id: Number(row.id),
     sessionId: String(row.session_id),
-    sourceKind: String(row.source_kind),
-    sourceRef: row.source_ref === null ? null : String(row.source_ref),
     candidate: JSON.parse(String(row.candidate_json)),
     score: Number(row.score),
-    confidence: Number(row.confidence),
-    usageCount: Number(row.usage_count),
+    attempt: Number(row.attempt),
   }));
 }
 
-export function markContinuousSearchPromotedSeedsUsed(
+export function listContinuousSearchMotifEvidence(
   database: DatabaseSync,
-  ids: number[],
-): void {
-  const uniqueIds = [...new Set(ids)].filter((id) => Number.isInteger(id) && id > 0);
-  if (uniqueIds.length === 0) {
-    return;
-  }
-  const statement = database.prepare(`
-    UPDATE continuous_promoted_seeds
-    SET usage_count = usage_count + 1,
-        last_used_at = CURRENT_TIMESTAMP
-    WHERE id = ?
-  `);
-  for (const id of uniqueIds) {
-    statement.run(id);
-  }
+  sessionId: string,
+  limit: number,
+): ContinuousSearchMotifEvidence[] {
+  const rows = database.prepare(`
+    SELECT id, session_id, motif_key, motif_json, support_count, best_score,
+           average_score, rediscovery_count, confidence
+    FROM continuous_motifs
+    WHERE session_id = ?
+    ORDER BY best_score DESC, confidence DESC, support_count DESC, id ASC
+    LIMIT ?
+  `).all(sessionId, limit) as Record<string, unknown>[];
+  return rows.map((row) => ({
+    id: Number(row.id),
+    sessionId: String(row.session_id),
+    motifKey: String(row.motif_key),
+    motif: JSON.parse(String(row.motif_json)),
+    supportCount: Number(row.support_count),
+    bestScore: Number(row.best_score),
+    averageScore: Number(row.average_score),
+    rediscoveryCount: Number(row.rediscovery_count),
+    confidence: Number(row.confidence),
+  }));
+}
+
+export function recordContinuousSearchReuseTrial(
+  database: DatabaseSync,
+  input: RecordContinuousSearchReuseTrialInput,
+): number {
+  const hash = hashContinuousCandidate(input.candidate);
+  database.prepare(`
+    INSERT INTO continuous_reuse_trials (
+      session_id, source_candidate_id, strategy, candidate_hash, candidate_json,
+      source_score, attempt, result_score, improved_global_best
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(session_id, strategy, candidate_hash) DO UPDATE SET
+      source_candidate_id = excluded.source_candidate_id,
+      source_score = excluded.source_score,
+      attempt = excluded.attempt,
+      result_score = CASE
+        WHEN excluded.result_score IS NULL THEN continuous_reuse_trials.result_score
+        WHEN continuous_reuse_trials.result_score IS NULL THEN excluded.result_score
+        ELSE MAX(continuous_reuse_trials.result_score, excluded.result_score)
+      END,
+      improved_global_best = CASE
+        WHEN excluded.improved_global_best = 1 THEN 1
+        ELSE continuous_reuse_trials.improved_global_best
+      END
+  `).run(
+    input.sessionId,
+    input.sourceCandidateId,
+    input.strategy,
+    hash,
+    JSON.stringify(input.candidate),
+    input.sourceScore,
+    input.attempt,
+    input.resultScore ?? null,
+    input.improvedGlobalBest ? 1 : 0,
+  );
+  const row = database.prepare(`
+    SELECT id FROM continuous_reuse_trials
+    WHERE session_id = ? AND strategy = ? AND candidate_hash = ?
+  `).get(input.sessionId, input.strategy, hash) as { id: number };
+  return row.id;
+}
+
+export function listContinuousSearchReuseTrials(
+  database: DatabaseSync,
+  sessionId: string,
+  limit: number,
+): ContinuousSearchReuseTrial[] {
+  const rows = database.prepare(`
+    SELECT id, session_id, source_candidate_id, strategy, candidate_json, source_score,
+           attempt, result_score, improved_global_best, created_at
+    FROM continuous_reuse_trials
+    WHERE session_id = ?
+    ORDER BY improved_global_best DESC, result_score DESC, attempt DESC, id ASC
+    LIMIT ?
+  `).all(sessionId, limit) as Record<string, unknown>[];
+  return rows.map((row) => ({
+    id: Number(row.id),
+    sessionId: String(row.session_id),
+    sourceCandidateId: row.source_candidate_id === null ? null : Number(row.source_candidate_id),
+    strategy: String(row.strategy),
+    candidate: JSON.parse(String(row.candidate_json)),
+    sourceScore: row.source_score === null ? null : Number(row.source_score),
+    attempt: Number(row.attempt),
+    resultScore: row.result_score === null ? null : Number(row.result_score),
+    improvedGlobalBest: Number(row.improved_global_best) === 1,
+    createdAt: String(row.created_at),
+  }));
+}
+
+export function listContinuousSearchReuseStrategyEvidence(
+  database: DatabaseSync,
+  sessionId: string,
+): ContinuousSearchReuseStrategyEvidence[] {
+  const rows = database.prepare(`
+    SELECT
+      strategy,
+      COUNT(*) AS trials,
+      SUM(CASE WHEN result_score IS NOT NULL THEN 1 ELSE 0 END) AS evaluated_trials,
+      SUM(CASE WHEN result_score IS NULL THEN 1 ELSE 0 END) AS unscored_trials,
+      SUM(CASE
+        WHEN result_score IS NOT NULL
+         AND source_score IS NOT NULL
+         AND result_score > source_score THEN 1
+        ELSE 0
+      END) AS positive_score_delta_trials,
+      SUM(CASE
+        WHEN result_score IS NOT NULL
+         AND source_score IS NOT NULL
+         AND result_score < source_score THEN 1
+        ELSE 0
+      END) AS negative_score_delta_trials,
+      SUM(CASE WHEN improved_global_best = 1 THEN 1 ELSE 0 END) AS global_best_trials,
+      AVG(CASE
+        WHEN result_score IS NOT NULL AND source_score IS NOT NULL
+        THEN result_score - source_score
+        ELSE NULL
+      END) AS average_score_delta,
+      MAX(CASE
+        WHEN result_score IS NOT NULL AND source_score IS NOT NULL
+        THEN result_score - source_score
+        ELSE NULL
+      END) AS best_score_delta,
+      MAX(attempt) AS latest_attempt
+    FROM continuous_reuse_trials
+    WHERE session_id = ?
+    GROUP BY strategy
+    ORDER BY global_best_trials DESC, average_score_delta DESC, latest_attempt DESC, strategy ASC
+  `).all(sessionId) as Record<string, unknown>[];
+  return rows.map((row) => ({
+    strategy: String(row.strategy),
+    trials: Number(row.trials),
+    evaluatedTrials: Number(row.evaluated_trials),
+    unscoredTrials: Number(row.unscored_trials),
+    positiveScoreDeltaTrials: Number(row.positive_score_delta_trials),
+    negativeScoreDeltaTrials: Number(row.negative_score_delta_trials),
+    globalBestTrials: Number(row.global_best_trials),
+    averageScoreDelta: row.average_score_delta === null ? null : Number(row.average_score_delta),
+    bestScoreDelta: row.best_score_delta === null ? null : Number(row.best_score_delta),
+    latestAttempt: Number(row.latest_attempt),
+  }));
 }
 
 export function hashContinuousCandidate(candidate: unknown): string {
@@ -462,10 +544,6 @@ function calculateMotifConfidence(input: RecordContinuousSearchMotifInput): numb
   const rediscovery = Math.min(1, input.rediscoveryCount / 4);
   const score = Math.min(1, input.bestScore / 150_000);
   return Math.round(((support * 0.4) + (rediscovery * 0.3) + (score * 0.3)) * 1000) / 1000;
-}
-
-function calculateCandidateSeedConfidence(score: number): number {
-  return Math.round(Math.min(1, Math.max(0, score / 150_000)) * 1000) / 1000;
 }
 
 function mapSessionRow(row: Record<string, unknown>): ContinuousSearchSession {

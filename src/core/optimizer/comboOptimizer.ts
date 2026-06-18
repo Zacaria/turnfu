@@ -1,4 +1,4 @@
-import type { CatalogEntry, Element } from "../catalog/types.ts";
+import type { CatalogEntry, Effect, Element } from "../catalog/types.ts";
 import { simulateCombo } from "../simulation/comboSimulator.ts";
 import { roundDamage } from "../simulation/damage.ts";
 import { computeActiveInitialSublimationResourceDelta } from "../simulation/sublimationResourceDeltas.ts";
@@ -536,10 +536,30 @@ function getSearchActions(options: ComboOptimizerOptions): Action[] {
   return getSearchSpellIds(options).flatMap((spellId) => {
     const actions: Action[] = [{ spellId }];
     const entry = entriesById.get(spellId);
-    if (entry?.constraints.some((constraint) => constraint.type === "maxCastsPerTarget")) {
+    if (entry && spellAllowsEmptyCellTarget(entry)) {
       actions.push({ spellId, target: { kind: "emptyCell" } });
     }
     return actions;
+  });
+}
+
+function spellAllowsEmptyCellTarget(spell: CatalogEntry): boolean {
+  return spell.id === "feu-follet"
+    || spell.tags.includes("feu-follet")
+    || spell.constraints.some((constraint) => constraint.type === "requiresTarget" && constraint.target === "emptyCell")
+    || effectsAllowEmptyCellTarget(spell.effects);
+}
+
+function effectsAllowEmptyCellTarget(effects: Effect[]): boolean {
+  return effects.some((effect) => {
+    if (effect.type === "conditional") {
+      return (effect.condition.type === "targetIs" && effect.condition.value === "emptyCell")
+        || effectsAllowEmptyCellTarget(effect.effects);
+    }
+    if (effect.type === "trigger") {
+      return effectsAllowEmptyCellTarget(effect.effects);
+    }
+    return false;
   });
 }
 

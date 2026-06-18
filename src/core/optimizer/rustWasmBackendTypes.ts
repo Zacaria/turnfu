@@ -25,12 +25,17 @@ export type RustWasmOptimizerRequest = {
   maxCandidates?: number;
   seedCandidates?: RustWasmOptimizerCandidateInput[];
   resumeState?: RustWasmHybridSearchResumeState;
+  hybridResourceAwareFreshChance?: number;
+  hybridContextualAdjacentSwaps?: boolean;
+  hybridPlateauOrderChainNeighbors?: boolean;
+  hybridLockedLoadout?: boolean;
 };
 
 export type RustWasmOptimizerCandidateInput = {
   passiveIds?: string[];
   sublimationIds?: string[];
   plan: ComboPlan;
+  sourceLabel?: string;
 };
 
 export type RustWasmOptimizerResponse = {
@@ -79,7 +84,15 @@ export type RustWasmOptimizerSearchResponse = {
   invalidCandidates: number;
   topCandidates: RustWasmOptimizerScoredCandidate[];
   metrics: Record<string, number>;
+  seedCandidateEvaluations?: RustWasmSeedCandidateEvaluation[];
   resumeState?: RustWasmHybridSearchResumeState;
+};
+
+export type RustWasmSeedCandidateEvaluation = {
+  sourceLabel: string;
+  valid: boolean;
+  score?: number;
+  improvedIslandBest?: boolean;
 };
 
 export type RustWasmHybridSearchResumeState = {

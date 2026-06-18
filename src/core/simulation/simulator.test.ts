@@ -1276,7 +1276,7 @@ test("validates catalog target constraints", () => {
   assert.equal(result.violations[0].type, "invalidTarget");
 });
 
-test("uses max casts per target instead of max casts per turn when both exist", () => {
+test("rejects empty-cell casts unless the spell explicitly supports empty cells", () => {
   const result = simulateTurn({
     catalog: testCatalog,
     character,
@@ -1288,11 +1288,9 @@ test("uses max casts per target instead of max casts per turn when both exist", 
     },
   });
 
-  assert.equal(result.valid, true);
-  assert.equal(result.breakdown.length, 2);
-  assert.ok(result.breakdown[0]?.damage);
-  assert.equal(result.breakdown[1]?.damage, 0);
-  assert.equal(result.finalState.remainingResources.bq, 35);
+  assert.equal(result.valid, false);
+  assert.equal(result.violations[0]?.type, "invalidTarget");
+  assert.equal(result.violations[0]?.spellId, "target-limit-test");
 });
 
 test("rejects repeated casts on the same target when max casts per target is reached", () => {

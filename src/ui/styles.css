@@ -2483,6 +2483,14 @@ input.setup-name-input::selection {
   font-size: 1rem;
 }
 
+.continuous-checkbox-row {
+  display: flex;
+  align-items: center;
+  flex-direction: row;
+  gap: 8px;
+  min-height: 34px;
+}
+
 .setup-summary,
 .thin-row,
 .candidate-row,
@@ -2921,6 +2929,14 @@ button.setup-summary-open:focus-visible {
 .candidate-row b {
   color: #ffe08a;
   font-size: 1.1rem;
+}
+
+.candidate-score-label {
+  color: #8fe9e8;
+  font-size: 0.62rem;
+  font-weight: 900;
+  line-height: 1;
+  text-transform: uppercase;
 }
 
 .candidate-spell-icon-rows {
