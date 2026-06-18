@@ -199,16 +199,20 @@ export async function streamContinuousOptimizerRun({
   args,
   onCandidate,
   onComplete,
+  onHeartbeat,
   onLog,
   onProgress,
+  onStarted,
   onStopped,
   signal,
 }: {
   args: string[];
   onCandidate?: (payload: unknown) => void;
   onComplete?: () => void;
+  onHeartbeat?: (payload: { elapsedMs?: number }) => void;
   onLog?: (line: string) => void;
   onProgress: (payload: ContinuousOptimizerRunProgress) => void;
+  onStarted?: () => void;
   onStopped?: () => void;
   signal?: AbortSignal;
 }): Promise<void> {
@@ -229,44 +233,63 @@ export async function streamContinuousOptimizerRun({
   const decoder = new TextDecoder();
   let buffer = "";
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) {
-      break;
-    }
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
 
-    buffer += decoder.decode(value, { stream: true });
-    const events = buffer.split("\n\n");
-    buffer = events.pop() ?? "";
-    for (const eventChunk of events) {
-      const event = parseServerSentEvent(eventChunk);
-      if (!event) {
-        continue;
-      }
-      if (event.event === "progress") {
-        onProgress(JSON.parse(event.data) as ContinuousOptimizerRunProgress);
-      } else if (event.event === "candidate") {
-        onCandidate?.(JSON.parse(event.data));
-      } else if (event.event === "complete") {
-        onComplete?.();
-      } else if (event.event === "stopped") {
-        onStopped?.();
-      } else if (event.event === "log") {
-        const parsed = JSON.parse(event.data) as { line?: string };
-        if (parsed.line) {
-          onLog?.(parsed.line);
+      buffer += decoder.decode(value, { stream: true });
+      const events = buffer.split("\n\n");
+      buffer = events.pop() ?? "";
+      for (const eventChunk of events) {
+        const event = parseServerSentEvent(eventChunk);
+        if (!event) {
+          continue;
         }
-      } else if (event.event === "error") {
-        const parsed = JSON.parse(event.data) as { error?: string };
-        throw new Error(parsed.error ?? "Continuous optimizer stream failed.");
+        if (event.event === "progress") {
+          onProgress(JSON.parse(event.data) as ContinuousOptimizerRunProgress);
+        } else if (event.event === "candidate") {
+          onCandidate?.(JSON.parse(event.data));
+        } else if (event.event === "started") {
+          onStarted?.();
+        } else if (event.event === "heartbeat") {
+          onHeartbeat?.(JSON.parse(event.data) as { elapsedMs?: number });
+        } else if (event.event === "complete") {
+          onComplete?.();
+        } else if (event.event === "stopped") {
+          onStopped?.();
+        } else if (event.event === "log") {
+          const parsed = JSON.parse(event.data) as { line?: string };
+          if (parsed.line) {
+            onLog?.(parsed.line);
+          }
+        } else if (event.event === "error") {
+          const parsed = JSON.parse(event.data) as { error?: string };
+          throw new Error(parsed.error ?? "Continuous optimizer stream failed.");
+        }
       }
     }
+  } catch (error) {
+    if (signal?.aborted || isContinuousOptimizerAbortError(error)) {
+      onStopped?.();
+      return;
+    }
+    throw error;
   }
 }
 
 function normalizeSessionId(value: string): string {
   const normalized = value.trim();
   return normalized.length > 0 ? normalized : "hupper-continuous";
+}
+
+function isContinuousOptimizerAbortError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  return error.name === "AbortError" || error.message.includes("BodyStreamBuffer was aborted");
 }
 
 function formatContinuousOptimizerStatus(status: ContinuousOptimizerStatus): string {

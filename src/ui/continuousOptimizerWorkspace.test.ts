@@ -5,6 +5,7 @@ import {
   createContinuousOptimizerPageViewModel,
   createDefaultContinuousOptimizerControls,
   normalizeContinuousOptimizerControls,
+  streamContinuousOptimizerRun,
 } from "./continuousOptimizerWorkspace.ts";
 
 test("normalizes continuous optimizer controls for long running Rust/WASM search", () => {
@@ -132,4 +133,77 @@ test("creates a page view model with best combos and learned evidence separated"
   assert.equal(view.bestCombos.checkpoints.length, 2);
   assert.equal(view.learnedEvidence.reuseTrials[0].label, "rotate-turn-actions");
   assert.equal(view.learnedEvidence.motifs[0].label, "cycle>light");
+});
+
+test("streams startup and heartbeat events before checkpoint progress", async () => {
+  const originalFetch = globalThis.fetch;
+  const events: string[] = [];
+  const body = [
+    "event: started\ndata: {\"command\":\"node\"}",
+    "event: heartbeat\ndata: {\"elapsedMs\":1200}",
+    "event: progress\ndata: {\"totalAttempts\":500000,\"score\":42,\"validRate\":0.2}",
+    "event: complete\ndata: {\"code\":0}",
+  ].join("\n\n") + "\n\n";
+
+  globalThis.fetch = async () => ({
+    ok: true,
+    body: new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(body));
+        controller.close();
+      },
+    }),
+  }) as Response;
+
+  try {
+    await streamContinuousOptimizerRun({
+      args: ["--session", "test"],
+      onComplete: () => events.push("complete"),
+      onHeartbeat: (payload) => events.push(`heartbeat:${payload.elapsedMs}`),
+      onProgress: (payload) => events.push(`progress:${payload.totalAttempts}`),
+      onStarted: () => events.push("started"),
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.deepEqual(events, [
+    "started",
+    "heartbeat:1200",
+    "progress:500000",
+    "complete",
+  ]);
+});
+
+test("treats aborted Continuous stream reads as stopped runs", async () => {
+  const originalFetch = globalThis.fetch;
+  const abortController = new AbortController();
+  const events: string[] = [];
+
+  globalThis.fetch = async () => ({
+    ok: true,
+    body: {
+      getReader() {
+        return {
+          read() {
+            abortController.abort();
+            return Promise.reject(new Error("BodyStreamBuffer was aborted"));
+          },
+        };
+      },
+    },
+  }) as Response;
+
+  try {
+    await streamContinuousOptimizerRun({
+      args: ["--session", "test"],
+      onProgress: () => events.push("progress"),
+      onStopped: () => events.push("stopped"),
+      signal: abortController.signal,
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.deepEqual(events, ["stopped"]);
 });

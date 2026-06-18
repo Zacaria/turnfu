@@ -64,6 +64,7 @@ export type OptimizerLiveRunProgress = {
   attempts: number;
   validCandidates: number;
   invalidCandidates: number;
+  label?: string;
   bestScore?: number;
   bestCandidate?: OptimizerCandidateViewModel;
   metrics: Record<string, number>;
@@ -461,6 +462,13 @@ async function runContinuousOptimizerForControlsLive(
   await streamContinuousOptimizerRun({
     args: createContinuousOptimizerLaunchArgs(continuousControls),
     signal,
+    onStarted: () => {
+      reportContinuousProgress("continuous · processus lancé");
+    },
+    onHeartbeat: (payload) => {
+      const elapsedSeconds = Math.max(1, Math.round((payload.elapsedMs ?? 0) / 1_000));
+      reportContinuousProgress(`continuous · recherche en cours (${elapsedSeconds}s)`);
+    },
     onProgress: (payload) => {
       progressBatch += 1;
       latestAttempts = payload.totalAttempts;
@@ -482,12 +490,13 @@ async function runContinuousOptimizerForControlsLive(
 
   return latestResults;
 
-  function reportContinuousProgress(): void {
+  function reportContinuousProgress(label?: string): void {
     onProgress({
       batch: Math.max(1, progressBatch),
       attempts: latestAttempts,
       validCandidates: latestValidCandidates,
       invalidCandidates: latestInvalidCandidates,
+      label,
       bestScore: latestResults[0]?.score ?? latestCheckpointScore,
       bestCandidate: latestResults[0],
       metrics: {

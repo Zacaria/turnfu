@@ -1174,9 +1174,9 @@ export function OptimizerWorkspacePage({
           attempts: progress.attempts,
           bestScore: progress.bestScore,
           invalidCandidates: progress.invalidCandidates,
-          label: runControls.searchMethod === "continuous"
+          label: progress.label ?? (runControls.searchMethod === "continuous"
             ? `continuous · checkpoint ${progress.batch}`
-            : `${runControls.searchMethod} · génération ${progress.batch}`,
+            : `${runControls.searchMethod} · génération ${progress.batch}`),
           percent,
           validCandidates: progress.validCandidates,
         });
@@ -1211,6 +1211,17 @@ export function OptimizerWorkspacePage({
       setRunStatus("done");
     } catch (error) {
       if (runSequenceRef.current !== runSequence) {
+        return;
+      }
+      if (abortController.signal.aborted) {
+        setRunProgress((current) => ({
+          ...current,
+          attempts: latestRunProgress.attempts,
+          invalidCandidates: latestRunProgress.invalidCandidates,
+          label: "Optimisation stoppée",
+          validCandidates: latestRunProgress.validCandidates,
+        }));
+        setRunStatus("stopped");
         return;
       }
       setRunError(error instanceof Error ? error.message : "Erreur optimizer inconnue");

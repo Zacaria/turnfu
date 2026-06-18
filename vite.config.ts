@@ -181,6 +181,7 @@ async function streamContinuousOptimizerRun(
   let stdoutBuffer = "";
   let stderrBuffer = "";
   let closed = false;
+  const runStartedAt = performance.now();
 
   const stopChild = () => {
     if (!closed && child.exitCode === null && child.signalCode === null) {
@@ -195,6 +196,14 @@ async function streamContinuousOptimizerRun(
     command: "node",
     args: ["--experimental-strip-types", "scripts/search-rust-wasm-sqlite.ts", "--", ...args],
   });
+  const heartbeat = setInterval(() => {
+    if (!closed) {
+      sendSse(response, "heartbeat", {
+        elapsedMs: Math.round(performance.now() - runStartedAt),
+      });
+    }
+  }, 1_000);
+  heartbeat.unref?.();
 
   child.stdout.on("data", (chunk: Buffer) => {
     stdoutBuffer += chunk.toString("utf8");
@@ -228,11 +237,13 @@ async function streamContinuousOptimizerRun(
   await new Promise<void>((resolveStream) => {
     child.once("error", (error) => {
       closed = true;
+      clearInterval(heartbeat);
       sendSse(response, "error", { error: error.message });
       resolveStream();
     });
     child.once("close", (code, signal) => {
       closed = true;
+      clearInterval(heartbeat);
       if (stdoutBuffer.trim().length > 0) {
         try {
           sendContinuousOptimizerSummaryEvents(response, JSON.parse(stdoutBuffer.trim()) as unknown);
