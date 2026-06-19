@@ -2282,11 +2282,9 @@ function applyHeartState(
   const bestElementalMastery = Math.max(0, ...Object.values(stats.elementalMastery).map((value) => value ?? 0));
   const heartMastery = Math.floor(bestElementalMastery * 1.2);
   const shouldApplyMastery = !activePassives.includes("refraction-elementaire");
-  const shouldApplyDamage = !activePassives.includes("altruisme-de-lame");
   const healBonus = activePassives.includes("altruisme-de-lame") ? 30 : 15;
   let nextStats = {
     ...stats,
-    damageInflictedPercent: stats.damageInflictedPercent + (shouldApplyDamage ? 30 : 0),
     healsPerformedPercent: (stats.healsPerformedPercent ?? 0) + healBonus,
     elementalMastery: shouldApplyMastery
       ? {

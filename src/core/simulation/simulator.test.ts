@@ -1059,7 +1059,7 @@ test("activates Coeur de Lumiere from last rune and evolves stats", () => {
 
   assert.equal(result.valid, true);
   assert.equal(result.breakdown[0].classStateAfter.huppermage?.activeHeart, "fire");
-  assert.equal(result.breakdown[1].statsBefore.damageInflictedPercent, 40);
+  assert.equal(result.breakdown[1].statsBefore.damageInflictedPercent, 10);
   assert.equal(result.breakdown[1].statsBefore.healsPerformedPercent, 15);
   assert.equal(result.breakdown[1].statsBefore.elementalMastery.fire, 240);
 });
