@@ -247,7 +247,7 @@ if (contextualAdjacentSwapsEnabled) {
   baseRequest.hybridContextualAdjacentSwaps = true;
 }
 const fingerprint = createFingerprint({
-  algorithm: "rust-wasm-resume-v1",
+  algorithm: "rust-wasm-resume-v2-empty-cell-target-rules",
   scenario,
   workerCount,
   request: { ...baseRequest, iterations: 0 },

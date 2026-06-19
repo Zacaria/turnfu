@@ -10117,6 +10117,70 @@ mod tests {
     }
 
     #[test]
+    fn candidate_evaluation_rejects_halo_chatoyant_empty_cell_without_target_support() {
+        let request = parse_optimizer_request(
+            r#"{
+              "schemaVersion":1,
+              "engine":"hybrid",
+              "seed":"halo-empty-cell-rejection",
+              "duration":1,
+              "iterations":10,
+              "maxActionsPerTurn":1,
+              "maxPassiveCount":0,
+              "availableSpellIds":["halo-chatoyant"],
+              "availablePassiveIds":[],
+              "catalog":[
+                {
+                  "kind":"spell",
+                  "id":"halo-chatoyant",
+                  "element":"light",
+                  "cost":{"ap":1},
+                  "effects":[
+                    {"type":"state","state":"Halo Chatoyant","level":81,"target":"target"}
+                  ],
+                  "constraints":[
+                    {"type":"maxCastsPerTarget","value":1},
+                    {"type":"maxCastsPerTurn","value":3}
+                  ],
+                  "tags":[]
+                }
+              ],
+              "character":{"id":"test","resources":{"ap":6,"mp":3,"wp":2,"bq":100}}
+            }"#,
+        )
+        .expect("request should parse");
+        let candidate = OptimizerCandidateInput {
+            passive_ids: vec![],
+            sublimation_ids: vec![],
+            plan: CandidatePlan {
+                turns: vec![CandidateTurn {
+                    actions: vec![empty_cell_action("halo-chatoyant")],
+                }],
+            },
+            source_label: None,
+        };
+
+        let evaluation = evaluate_candidate(&request, &candidate, "candidate:halo-empty")
+            .expect("candidate should evaluate");
+
+        assert!(!evaluation.valid);
+        assert_eq!(
+            evaluation
+                .first_violation
+                .as_ref()
+                .map(|violation| violation.violation_type.as_str()),
+            Some("invalidTarget")
+        );
+        assert_eq!(
+            evaluation
+                .first_violation
+                .as_ref()
+                .and_then(|violation| violation.spell_id.as_deref()),
+            Some("halo-chatoyant")
+        );
+    }
+
+    #[test]
     fn candidate_evaluation_applies_alternance_to_resolved_light_damage() {
         let request = parse_optimizer_request(
             r#"{

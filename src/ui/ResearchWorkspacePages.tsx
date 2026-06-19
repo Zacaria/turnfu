@@ -58,6 +58,9 @@ export type OptimizerRunStatus = "idle" | "running" | "done" | "stopped" | "erro
 export type OptimizerRunProgressState = {
   attempts: number;
   bestScore?: number;
+  finalOracleCandidates?: number;
+  finalOracleInvalid?: number;
+  finalOracleValid?: number;
   invalidCandidates: number;
   label: string;
   percent: number;
@@ -1081,10 +1084,10 @@ export function OptimizerWorkspacePage({
   const [runProgress, setRunProgress] = useState<OptimizerRunProgressState>(() => initialSession?.runProgress ?? {
     attempts: 0,
     bestScore: undefined as number | undefined,
-    invalidCandidates: 0,
-    label: "",
-    percent: 0,
-    validCandidates: 0,
+      invalidCandidates: 0,
+      label: "",
+      percent: 0,
+      validCandidates: 0,
   });
   const [runError, setRunError] = useState<string | null>(() => initialSession?.runError ?? null);
   const [runMessages, setRunMessages] = useState<string[]>([]);
@@ -1157,6 +1160,9 @@ export function OptimizerWorkspacePage({
     setLastRun({ controls: runControls, results: [] });
     let latestRunProgress = {
       attempts: 0,
+      finalOracleCandidates: undefined as number | undefined,
+      finalOracleInvalid: undefined as number | undefined,
+      finalOracleValid: undefined as number | undefined,
       invalidCandidates: 0,
       validCandidates: 0,
     };
@@ -1183,6 +1189,9 @@ export function OptimizerWorkspacePage({
 
         latestRunProgress = {
           attempts: progress.attempts,
+          finalOracleCandidates: progress.finalOracleCandidates,
+          finalOracleInvalid: progress.finalOracleInvalid,
+          finalOracleValid: progress.finalOracleValid,
           invalidCandidates: progress.invalidCandidates,
           validCandidates: progress.validCandidates,
         };
@@ -1191,6 +1200,9 @@ export function OptimizerWorkspacePage({
         setRunProgress({
           attempts: progress.attempts,
           bestScore: progress.bestScore,
+          finalOracleCandidates: progress.finalOracleCandidates,
+          finalOracleInvalid: progress.finalOracleInvalid,
+          finalOracleValid: progress.finalOracleValid,
           invalidCandidates: progress.invalidCandidates,
           label: progress.label ?? (runControls.searchMethod === "continuous"
             ? `continuous · checkpoint ${progress.batch}`
@@ -1219,6 +1231,9 @@ export function OptimizerWorkspacePage({
           ...current,
           attempts: latestRunProgress.attempts,
           bestScore: results[0]?.score,
+          finalOracleCandidates: latestRunProgress.finalOracleCandidates,
+          finalOracleInvalid: latestRunProgress.finalOracleInvalid,
+          finalOracleValid: latestRunProgress.finalOracleValid,
           invalidCandidates: latestRunProgress.invalidCandidates,
           label: "Optimisation stoppée",
           validCandidates: latestRunProgress.validCandidates,
@@ -1230,6 +1245,9 @@ export function OptimizerWorkspacePage({
       setRunProgress({
         attempts: runControls.iterationBudget,
         bestScore: results[0]?.score,
+        finalOracleCandidates: latestRunProgress.finalOracleCandidates,
+        finalOracleInvalid: latestRunProgress.finalOracleInvalid,
+        finalOracleValid: latestRunProgress.finalOracleValid,
         invalidCandidates: latestRunProgress.invalidCandidates,
         label: "Résultats prêts",
         percent: 100,
@@ -1244,6 +1262,9 @@ export function OptimizerWorkspacePage({
         setRunProgress((current) => ({
           ...current,
           attempts: latestRunProgress.attempts,
+          finalOracleCandidates: latestRunProgress.finalOracleCandidates,
+          finalOracleInvalid: latestRunProgress.finalOracleInvalid,
+          finalOracleValid: latestRunProgress.finalOracleValid,
           invalidCandidates: latestRunProgress.invalidCandidates,
           label: "Optimisation stoppée",
           validCandidates: latestRunProgress.validCandidates,
@@ -1429,8 +1450,14 @@ export function OptimizerWorkspacePage({
               <span>{runProgress.attempts} essais explorés</span>
             </div>
             <div className="optimizer-progress-stats">
-              <span>Valides: {runProgress.validCandidates}</span>
-              <span>Invalides: {runProgress.invalidCandidates}</span>
+              <span>{isContinuousMethod ? "WASM valides" : "Valides"}: {runProgress.validCandidates}</span>
+              <span>{isContinuousMethod ? "WASM invalides" : "Invalides"}: {runProgress.invalidCandidates}</span>
+              {isContinuousMethod && runProgress.finalOracleCandidates !== undefined ? (
+                <span>
+                  Oracle TS: {runProgress.finalOracleValid ?? 0}/{runProgress.finalOracleCandidates} affichable
+                  {runProgress.finalOracleInvalid !== undefined ? ` · ${runProgress.finalOracleInvalid} rejeté${runProgress.finalOracleInvalid > 1 ? "s" : ""}` : ""}
+                </span>
+              ) : null}
               <span>Meilleur: {runProgress.bestScore ?? "—"}</span>
             </div>
           </div>
@@ -1479,7 +1506,12 @@ export function OptimizerWorkspacePage({
                 onSave={() => onSaveCandidate(candidate, lastRun.controls)}
                 onTogglePin={() => setPinnedIds((current) => togglePinnedCandidate(current, candidate))}
               />
-              )) : <EmptyState title="Aucun candidat" body="Aucun combo valide pour cet objectif et ces critères." />}
+              )) : <EmptyState
+                title={isContinuousMethod && runProgress.validCandidates > 0 ? "Aucun candidat rejouable" : "Aucun candidat"}
+                body={isContinuousMethod && runProgress.validCandidates > 0
+                  ? "Le moteur Rust/WASM trouve des candidats valides, mais l'oracle TypeScript ne valide aucun top candidat pour l'affichage. C'est probablement une dérive moteur à investiguer."
+                  : "Aucun combo valide pour cet objectif et ces critères."}
+              />}
             </section>
           </>
         ) : null}

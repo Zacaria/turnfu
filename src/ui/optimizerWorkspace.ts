@@ -64,6 +64,9 @@ export type OptimizerLiveRunProgress = {
   attempts: number;
   validCandidates: number;
   invalidCandidates: number;
+  finalOracleCandidates?: number;
+  finalOracleInvalid?: number;
+  finalOracleValid?: number;
   label?: string;
   bestScore?: number;
   bestCandidate?: OptimizerCandidateViewModel;
@@ -470,6 +473,9 @@ async function runContinuousOptimizerForControlsLive(
   let latestValidCandidates = 0;
   let latestInvalidCandidates = 0;
   let latestCheckpointScore: number | undefined;
+  let latestFinalOracleCandidates: number | undefined;
+  let latestFinalOracleInvalid: number | undefined;
+  let latestFinalOracleValid: number | undefined;
 
   await streamContinuousOptimizerRun({
     args,
@@ -488,6 +494,9 @@ async function runContinuousOptimizerForControlsLive(
       latestCheckpointScore = payload.score;
       latestValidCandidates = payload.validCandidates ?? Math.round(payload.totalAttempts * payload.validRate);
       latestInvalidCandidates = payload.invalidCandidates ?? Math.max(0, payload.totalAttempts - latestValidCandidates);
+      latestFinalOracleCandidates = payload.finalOracleCandidates;
+      latestFinalOracleInvalid = payload.finalOracleInvalid;
+      latestFinalOracleValid = payload.finalOracleValid;
       reportContinuousProgress();
     },
     onCandidate: (payload) => {
@@ -509,6 +518,9 @@ async function runContinuousOptimizerForControlsLive(
       attempts: latestAttempts,
       validCandidates: latestValidCandidates,
       invalidCandidates: latestInvalidCandidates,
+      finalOracleCandidates: latestFinalOracleCandidates,
+      finalOracleInvalid: latestFinalOracleInvalid,
+      finalOracleValid: latestFinalOracleValid,
       label,
       bestScore: latestResults[0]?.score ?? latestCheckpointScore,
       bestCandidate: latestResults[0],
