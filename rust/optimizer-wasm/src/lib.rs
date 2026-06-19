@@ -3080,9 +3080,65 @@ fn create_global_validity_guided_candidate(
     catalog: &[SearchCatalogEntry],
     actions: &[CandidateAction],
     rng: &mut SeededRandom,
-    _metrics: &mut BTreeMap<String, u32>,
+    metrics: &mut BTreeMap<String, u32>,
 ) -> OptimizerCandidateInput {
-    create_resource_aware_candidate(request, catalog, actions, rng)
+    let entries_by_id = catalog
+        .iter()
+        .map(|entry| (entry.id.as_str(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let base_resources = read_request_resources(&request.character);
+    let mut state = GlobalValidityState::new(base_resources);
+    let mut turns = Vec::new();
+
+    for _turn_index in 0..request.duration {
+        state.start_turn();
+        let min_actions = std::cmp::max(
+            1,
+            ((request.max_actions_per_turn as f64) * 0.55).floor() as u32,
+        );
+        let target_action_count = rng.integer(min_actions, request.max_actions_per_turn);
+        let mut turn_actions = Vec::new();
+
+        for _action_index in 0..target_action_count {
+            let weighted_actions = actions
+                .iter()
+                .filter_map(|action| {
+                    entries_by_id.get(action.spell_id.as_str()).map(|entry| {
+                        (
+                            action.clone(),
+                            score_global_validity_action(entry, action, &state),
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+            if weighted_actions.is_empty() {
+                increment_metric(metrics, "hybridGlobalValidityGuidedFallbackActions", 1);
+                let action = rng.pick(actions).clone();
+                turn_actions.push(action);
+                continue;
+            }
+            let action = pick_global_validity_weighted_action(&weighted_actions, rng);
+            if let Some(entry) = entries_by_id.get(action.spell_id.as_str()) {
+                apply_global_validity_action(entry, &action, &mut state);
+            } else {
+                increment_metric(metrics, "hybridGlobalValidityGuidedFallbackActions", 1);
+            }
+            turn_actions.push(action);
+        }
+
+        turns.push(CandidateTurn {
+            actions: turn_actions,
+        });
+    }
+
+    let candidate = OptimizerCandidateInput {
+        passive_ids: pick_random_passives(request, catalog, rng),
+        sublimation_ids: pick_random_sublimations(request, rng),
+        plan: CandidatePlan { turns },
+        source_label: Some("fresh:global-validity-guided".to_string()),
+    };
+    increment_metric(metrics, "hybridGlobalValidityPlanSignatures", 1);
+    candidate
 }
 
 impl SeededRandom {
@@ -7464,6 +7520,9 @@ fn evaluate_and_track_hybrid_candidate(
     let mut candidate = normalize_candidate(candidate);
     apply_locked_loadout(request, catalog, &mut candidate);
     let source_label = candidate.source_label.take();
+    let is_global_validity_guided = source_label
+        .as_deref()
+        .is_some_and(|label| label == "fresh:global-validity-guided");
     let candidate_hash = hash_candidate(&candidate);
     let previous_best = accumulator.top_candidates.first().cloned();
 
@@ -7480,6 +7539,21 @@ fn evaluate_and_track_hybrid_candidate(
         spells_by_id,
         cache,
     )?;
+    if is_global_validity_guided {
+        if evaluation.valid {
+            increment_metric(
+                &mut accumulator.metrics,
+                "hybridGlobalValidityGuidedValidCandidates",
+                1,
+            );
+        } else {
+            increment_metric(
+                &mut accumulator.metrics,
+                "hybridGlobalValidityGuidedInvalidCandidates",
+                1,
+            );
+        }
+    }
 
     let mut score_value = None;
     let mut improved = false;
