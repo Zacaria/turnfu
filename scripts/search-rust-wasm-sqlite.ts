@@ -183,9 +183,18 @@ const availableSublimationIds = sublimationCatalog
   .filter((entry) => entry.supportStatus === "supported")
   .map((entry) => entry.id);
 const learnedLoadoutPassiveIds = [
+  "transcendance-runique",
+  "plenitude",
+  "universalite",
+  "combinaison-elementaire",
+  "antithese",
+  "dynamo",
+  "refraction-elementaire",
+  "profusion-runique",
+  "initiative-de-lame",
+  "sauvegarde-runique",
   "carnage",
   "extension-des-sens",
-  "profusion-runique",
 ];
 const learnedLoadoutSublimationIds = [
   "alternance-ii",
@@ -201,20 +210,14 @@ const learnedLoadoutSublimationIds = [
   "puissance-brute-iii",
   "tellurisme-secondaire-iii",
 ];
-const learnedActionSetSpellIds = [
-  "coeur-de-lumiere",
-  "debacle",
-  "eboulement",
-  "epee-de-lumiere",
-  "fleche-de-lumiere",
-  "flux-denergie",
-  "halo-chatoyant",
-  "lueur-de-laube",
-  "ombres-dansantes",
-  "orbes-luisants",
-  "papillons-diurnes",
-  "runification",
-];
+const excludedLearnedActionSetSpellIds = new Set([
+  "mur-energie",
+  "forteresse-solaire",
+  "visio-imperium",
+]);
+const learnedActionSetSpellIds = huppermageCatalog
+  .filter((entry) => entry.kind === "spell" && !excludedLearnedActionSetSpellIds.has(entry.id))
+  .map((entry) => entry.id);
 const baseRequest = createRustWasmOptimizerRequest({
   catalog: huppermageCatalog,
   character,
@@ -240,9 +243,6 @@ if (resourceAwareFreshChance !== undefined) {
 }
 if (contextualAdjacentSwapsEnabled) {
   baseRequest.hybridContextualAdjacentSwaps = true;
-}
-if (learnedLoadoutPriorEnabled) {
-  baseRequest.hybridLockedLoadout = true;
 }
 const fingerprint = createFingerprint({
   algorithm: "rust-wasm-resume-v1",

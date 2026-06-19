@@ -11,7 +11,7 @@ neighbors when the global best stops improving.
 
 ## Current validated preset
 
-The strongest validated setting is:
+The current default quality setting is:
 
 ```text
 --resource-aware-fresh-chance 1
@@ -27,6 +27,14 @@ score, `188558.81`, by `3M` attempts and held it through `10M` attempts with
 TypeScript oracle `5/5`. The prior baseline reached the same record only at
 `10M`, so the accepted improvement is faster time-to-record without a final
 score regression.
+
+The learned action set is now intentionally broad enough to keep all Huppermage
+spells except `mur-energie`, `forteresse-solaire`, and `visio-imperium`. The
+learned passive pool keeps at least the core Huppermage mechanics:
+`transcendance-runique`, `plenitude`, `universalite`,
+`combinaison-elementaire`, `antithese`, `dynamo`,
+`refraction-elementaire`, `profusion-runique`, `initiative-de-lame`, and
+`sauvegarde-runique`.
 
 Budgets below `1M` attempts are only smoke tests. Search-quality conclusions
 must come from matched runs at `1M+`, preferably `5M` or `10M` when validating a
@@ -132,8 +140,8 @@ Candidate pressure currently comes from:
 | Source | Purpose |
 | --- | --- |
 | Domain warmup | Keep known Huppermage branch skeletons in the initial population. |
-| Learned loadout prior | Lock the validated passive and sublimation set for the quality preset. |
-| Learned action-set prior | Restrict spells to the validated high-value action set. |
+| Learned loadout prior | Restrict passive and sublimation search to a relevant pool without locking one fixed passive set. |
+| Learned action-set prior | Keep all Huppermage spells except the explicitly excluded low-relevance spells. |
 | Resource-aware fresh candidates | Generate affordable AP/MP/WP/BQ shapes instead of mostly invalid random plans. |
 | Local refinement | Mutate elite plans with small edits. |
 | Elite neighbor queue | Immediately test structured neighbors around a new island best. |
@@ -220,7 +228,9 @@ current corpus keeps evidence and trial outcomes instead:
 The adaptive reuse selector can suppress strategies that have enough evaluated
 trials, no global-best wins, and negative average score delta. This is evidence
 management, not a proven quality win yet. The validated quality path remains the
-learned priors plus contextual swaps plus plateau order-chain neighbors.
+learned priors plus contextual swaps plus plateau order-chain neighbors, with
+the caveat that the current spell/passive pools have been widened for relevance
+coverage and should be revalidated at `1M+`.
 
 ## Validation contract
 
