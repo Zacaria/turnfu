@@ -201,6 +201,7 @@ export function createContinuousOptimizerLaunchArgs(controls: ContinuousOptimize
       "--learned-loadout-prior",
       "--learned-action-set-prior",
       "--contextual-adjacent-swaps",
+      "--global-validity-guidance",
     );
   }
 
