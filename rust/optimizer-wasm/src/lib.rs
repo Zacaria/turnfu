@@ -588,6 +588,8 @@ pub struct OptimizerRequest {
     #[serde(default)]
     pub hybrid_plateau_order_chain_neighbors: bool,
     #[serde(default)]
+    pub hybrid_global_validity_guidance: bool,
+    #[serde(default)]
     pub hybrid_locked_loadout: bool,
 }
 
@@ -2945,6 +2947,16 @@ fn create_resource_aware_candidate(
         plan: CandidatePlan { turns },
         source_label: None,
     }
+}
+
+fn create_global_validity_guided_candidate(
+    request: &OptimizerRequest,
+    catalog: &[SearchCatalogEntry],
+    actions: &[CandidateAction],
+    rng: &mut SeededRandom,
+    _metrics: &mut BTreeMap<String, u32>,
+) -> OptimizerCandidateInput {
+    create_resource_aware_candidate(request, catalog, actions, rng)
 }
 
 impl SeededRandom {
@@ -7183,7 +7195,12 @@ fn create_hybrid_fresh_candidate(
         create_resource_aware_candidate(request, catalog, actions, rng)
     } else if rng.chance(get_hybrid_resource_aware_fresh_chance(request)) {
         increment_metric(metrics, "hybridResourceAwareCandidates", 1);
-        create_resource_aware_candidate(request, catalog, actions, rng)
+        if request.hybrid_global_validity_guidance {
+            increment_metric(metrics, "hybridGlobalValidityGuidedCandidates", 1);
+            create_global_validity_guided_candidate(request, catalog, actions, rng, metrics)
+        } else {
+            create_resource_aware_candidate(request, catalog, actions, rng)
+        }
     } else {
         create_random_candidate(request, catalog, actions, rng)
     }
@@ -12140,6 +12157,93 @@ mod tests {
 
         request.hybrid_resource_aware_fresh_chance = Some(-0.5);
         assert_eq!(get_hybrid_resource_aware_fresh_chance(&request), 0.0);
+    }
+
+    #[test]
+    fn parses_global_validity_guidance_request_flag() {
+        let request = parse_optimizer_request(
+            r#"{
+              "schemaVersion":1,
+              "engine":"hybrid",
+              "seed":"global-validity-flag",
+              "duration":1,
+              "iterations":1,
+              "maxActionsPerTurn":2,
+              "maxPassiveCount":0,
+              "availableSpellIds":["cheap"],
+              "availablePassiveIds":[],
+              "catalog":[
+                {
+                  "kind":"spell",
+                  "id":"cheap",
+                  "cost":{"ap":1},
+                  "effects":[{"type":"damage","base":10,"element":"fire"}],
+                  "constraints":[],
+                  "tags":[]
+                }
+              ],
+              "character":{"id":"test","resources":{"ap":4,"mp":3,"wp":2,"bq":100}},
+              "hybridGlobalValidityGuidance":true
+            }"#,
+        )
+        .expect("request should parse");
+
+        assert!(request.hybrid_global_validity_guidance);
+    }
+
+    #[test]
+    fn global_validity_guidance_marks_fresh_candidates() {
+        let mut request = parse_optimizer_request(
+            r#"{
+              "schemaVersion":1,
+              "engine":"hybrid",
+              "seed":"global-validity-metrics",
+              "duration":1,
+              "iterations":8,
+              "maxActionsPerTurn":4,
+              "maxPassiveCount":0,
+              "availableSpellIds":["cheap","expensive"],
+              "availablePassiveIds":[],
+              "catalog":[
+                {
+                  "kind":"spell",
+                  "id":"cheap",
+                  "cost":{"ap":1},
+                  "effects":[{"type":"damage","base":10,"element":"fire"}],
+                  "constraints":[],
+                  "tags":[]
+                },
+                {
+                  "kind":"spell",
+                  "id":"expensive",
+                  "cost":{"ap":10},
+                  "effects":[{"type":"damage","base":100,"element":"fire"}],
+                  "constraints":[],
+                  "tags":["burst"]
+                }
+              ],
+              "character":{"id":"test","resources":{"ap":4,"mp":3,"wp":2,"bq":100}},
+              "hybridResourceAwareFreshChance":1,
+              "hybridGlobalValidityGuidance":true
+            }"#,
+        )
+        .expect("request should parse");
+        request.max_candidates = Some(5);
+
+        let result = run_hybrid_search(&request).expect("hybrid search should run");
+
+        assert!(result
+            .metrics
+            .get("hybridGlobalValidityGuidedCandidates")
+            .copied()
+            .unwrap_or(0)
+            > 0);
+        assert!(result
+            .metrics
+            .get("hybridResourceAwareCandidates")
+            .copied()
+            .unwrap_or(0)
+            > 0);
     }
 
     #[test]
