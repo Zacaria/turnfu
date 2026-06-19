@@ -197,7 +197,9 @@ async function streamContinuousOptimizerRun(
     command: "node",
     args: ["--experimental-strip-types", "scripts/search-rust-wasm-sqlite.ts", "--", ...args],
   });
-  sendContinuousOptimizerResumeEvents(response, args);
+  if (!args.includes("--reset")) {
+    sendContinuousOptimizerResumeEvents(response, args);
+  }
   const heartbeat = setInterval(() => {
     if (!closed) {
       sendSse(response, "heartbeat", {

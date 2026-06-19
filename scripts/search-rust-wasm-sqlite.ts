@@ -6,10 +6,6 @@ import { performance } from "node:perf_hooks";
 import { DatabaseSync } from "node:sqlite";
 import { Worker } from "node:worker_threads";
 import { huppermageCatalog } from "../src/core/catalog/index.ts";
-import {
-  evaluateSustainableCycle,
-  scoreComboSimulation,
-} from "../src/core/optimizer/comboOptimizer.ts";
 import { createOptimizerExperimentEvaluator } from "../src/core/optimizer/index.ts";
 import {
   createRustWasmOptimizerRequest,
@@ -369,7 +365,6 @@ while (!stopRequested) {
     ...results.flatMap((result) => result.topCandidates),
     ...(previousBest ? [previousBest] : []),
   ].sort(compareRustCandidates).slice(0, 5);
-  const oracleSummary = verifyTopCandidates(topCandidates);
   const attempts = results.reduce((total, result) => total + result.attempts, 0);
   const validCandidates = results.reduce((total, result) => total + result.validCandidates, 0);
   const invalidCandidates = results.reduce((total, result) => total + result.invalidCandidates, 0);
@@ -472,8 +467,6 @@ while (!stopRequested) {
     globalImprovedMotifSeedCandidates: evaluatedMotifSeeds.filter((evaluation) =>
       evaluation.score !== undefined && evaluation.score > previousBestScore
     ).length,
-    finalOracleCandidates: topCandidates.length,
-    ...oracleSummary,
     verifiedCandidates,
     metrics,
   };
@@ -707,38 +700,6 @@ function insertCheckpoint(database: DatabaseSync, summary: { session: string; to
     .run(summary.session, summary.totalAttempts, summary.score, JSON.stringify(summary));
 }
 
-function verifyTopCandidates(topCandidates: RustWasmOptimizerScoredCandidate[]): {
-  finalOracleValid: number;
-  finalOracleInvalid: number;
-  finalOracleMaxScoreDelta: number;
-  finalOracleMaxTotalDamageDelta: number;
-} {
-  let finalOracleValid = 0;
-  let finalOracleInvalid = 0;
-  let maxScoreDelta = 0;
-  let maxTotalDamageDelta = 0;
-  for (const candidate of topCandidates) {
-    const evaluation = oracle.evaluateDetailed({
-      passiveIds: candidate.passiveIds,
-      sublimationIds: candidate.sublimationIds,
-      plan: candidate.plan,
-    });
-    if (!evaluation.result) {
-      finalOracleInvalid += 1;
-      continue;
-    }
-    finalOracleValid += 1;
-    maxScoreDelta = Math.max(maxScoreDelta, Math.abs(candidate.score.score - evaluation.result.score.score));
-    maxTotalDamageDelta = Math.max(maxTotalDamageDelta, Math.abs(candidate.score.totalDamage - evaluation.result.score.totalDamage));
-  }
-  return {
-    finalOracleValid,
-    finalOracleInvalid,
-    finalOracleMaxScoreDelta: round(maxScoreDelta),
-    finalOracleMaxTotalDamageDelta: round(maxTotalDamageDelta),
-  };
-}
-
 function createDisplayCandidatePayloads(
   topCandidates: RustWasmOptimizerScoredCandidate[],
   totalAttempts: number,
@@ -750,15 +711,13 @@ function createDisplayCandidatePayloads(
         sublimationIds: candidate.sublimationIds,
         plan: candidate.plan,
       });
-      const displayCandidate = evaluation.result ?? createReplayableCandidatePayload(candidate, evaluation);
-      if (!displayCandidate) {
+      if (!evaluation.result) {
         return null;
       }
       return {
         schemaVersion: 1 as const,
         totalAttempts,
         rank: index + 1,
-        verification: evaluation.result ? "verified" as const : "replay-invalid" as const,
         run: {
           sessionId,
           scenarioId: scenario.id,
@@ -769,40 +728,10 @@ function createDisplayCandidatePayloads(
           targetElement: scoreCriterion === "element-damage" ? targetElement : null,
           requireSustainableCycle,
         },
-        candidate: displayCandidate,
+        candidate: evaluation.result,
       };
     })
     .filter((payload): payload is NonNullable<typeof payload> => payload !== null);
-}
-
-function createReplayableCandidatePayload(
-  candidate: RustWasmOptimizerScoredCandidate,
-  evaluation: ReturnType<typeof oracle.evaluateDetailed>,
-) {
-  if (!evaluation.simulation.valid) {
-    return null;
-  }
-
-  const sustainability = requireSustainableCycle
-    ? evaluateSustainableCycle({
-        catalog: huppermageCatalog,
-        character,
-        plan: evaluation.normalizedCandidate.plan,
-        defaultActionContext,
-      })
-    : {
-        required: false,
-        sustainable: true,
-      };
-
-  return {
-    passiveIds: evaluation.normalizedCandidate.passiveIds ?? candidate.passiveIds,
-    sublimationIds: evaluation.normalizedCandidate.sublimationIds ?? candidate.sublimationIds,
-    plan: evaluation.normalizedCandidate.plan,
-    simulation: evaluation.simulation,
-    score: scoreComboSimulation(evaluation.simulation, criterion),
-    sustainability,
-  };
 }
 
 function compareRustCandidates(

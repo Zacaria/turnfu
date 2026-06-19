@@ -345,22 +345,21 @@ test("renders oracle-verified Continuous candidates through the optimizer result
   assert.deepEqual(candidate.sublimationIds, ["sauvegarde-6"]);
 });
 
-test("renders replay-invalid Continuous candidates so checkpoint results are visible", () => {
+test("renders continuous checkpoint candidates through the optimizer result model", () => {
   const setup = getSeedSetup();
   const candidate = createOptimizerResultViewModelFromContinuousCandidate({
     schemaVersion: 1,
     totalAttempts: 1_000_000,
     rank: 1,
-    verification: "replay-invalid",
     run: {
-      sessionId: "optimizer-setup-1-2t-total-sustainable",
+      sessionId: "optimizer-setup-1-2t-total-free",
       scenarioId: "t2-full",
       seed: "optimizer-ui",
       workerCount: 10,
       chunkSize: 50_000,
       scoreCriterion: "total-damage",
       targetElement: null,
-      requireSustainableCycle: true,
+      requireSustainableCycle: false,
     },
     candidate: {
       passiveIds: ["passive-a"],
@@ -396,9 +395,8 @@ test("renders replay-invalid Continuous candidates so checkpoint results are vis
         },
       },
       sustainability: {
-        required: true,
-        sustainable: false,
-        reason: "replayInvalid",
+        required: false,
+        sustainable: true,
       },
     },
   }, 2);
@@ -406,8 +404,8 @@ test("renders replay-invalid Continuous candidates so checkpoint results are vis
   assert.ok(candidate);
   assert.equal(candidate.score, 88);
   assert.equal(candidate.totalDamage, 88);
-  assert.equal(candidate.sustainable, false);
-  assert.equal(candidate.sustainabilityRequired, true);
+  assert.equal(candidate.sustainable, true);
+  assert.equal(candidate.sustainabilityRequired, false);
   assert.equal(candidate.finalResources.bq, 90);
 });
 

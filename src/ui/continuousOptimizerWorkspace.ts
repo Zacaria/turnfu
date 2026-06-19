@@ -53,9 +53,6 @@ export type ContinuousOptimizerRunProgress = {
   validCandidates?: number;
   invalidCandidates?: number;
   attemptsPerSecond?: number;
-  finalOracleCandidates?: number;
-  finalOracleValid?: number;
-  finalOracleInvalid?: number;
 };
 
 export type ContinuousOptimizerPageInput = {

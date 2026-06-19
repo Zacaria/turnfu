@@ -8,7 +8,7 @@ import {
   streamContinuousOptimizerRun,
 } from "./continuousOptimizerWorkspace.ts";
 
-test("normalizes continuous optimizer controls for long running Rust/WASM search", () => {
+test("normalizes continuous optimizer controls for long running Continuous search", () => {
   const controls = normalizeContinuousOptimizerControls({
     sessionId: " ",
     scenarioId: "t3-full",

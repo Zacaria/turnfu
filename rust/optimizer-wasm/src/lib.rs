@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use wasm_bindgen::prelude::*;
 
@@ -7534,8 +7534,8 @@ fn run_hybrid_island_search(
             continue;
         }
 
-        let can_process_repair = !repair_queue.is_empty()
-            && consecutive_repair_attempts < config.repair_burst_limit;
+        let can_process_repair =
+            !repair_queue.is_empty() && consecutive_repair_attempts < config.repair_burst_limit;
         if !repair_queue.is_empty() && !can_process_repair {
             increment_metric(&mut accumulator.metrics, "hybridRepairDeferrals", 1);
         }
@@ -8527,6 +8527,24 @@ fn evaluate_candidate_with_catalog<'a>(
     catalog: &'a [SearchCatalogEntry],
     spells_by_id: &BTreeMap<&'a str, &'a SearchCatalogEntry>,
 ) -> Result<CandidateEvaluationResult, String> {
+    evaluate_candidate_with_catalog_inner(
+        request,
+        candidate,
+        candidate_id,
+        catalog,
+        spells_by_id,
+        true,
+    )
+}
+
+fn evaluate_candidate_with_catalog_inner<'a>(
+    request: &OptimizerRequest,
+    candidate: &OptimizerCandidateInput,
+    candidate_id: &str,
+    catalog: &'a [SearchCatalogEntry],
+    spells_by_id: &BTreeMap<&'a str, &'a SearchCatalogEntry>,
+    enforce_sustainable_cycle: bool,
+) -> Result<CandidateEvaluationResult, String> {
     if let Some(sublimation_id) = validate_candidate_sublimations(candidate) {
         return Ok(create_candidate_evaluation_result(
             candidate_id,
@@ -8549,7 +8567,8 @@ fn evaluate_candidate_with_catalog<'a>(
         ));
     }
 
-    let mut base_resources = read_request_resources(&request.character);
+    let raw_base_resources = read_request_resources(&request.character);
+    let mut base_resources = raw_base_resources;
     let mut base_stats = read_request_stats(&request.character);
     let active_passive_ids = candidate.passive_ids.clone();
     let passives = read_passive_entries_from_catalog(catalog, &active_passive_ids);
@@ -8565,6 +8584,7 @@ fn evaluate_candidate_with_catalog<'a>(
         &mut base_stats,
         &mut base_resources,
     );
+    let initial_resource_delta = subtract_resource_pools(base_resources, raw_base_resources);
 
     let default_context = request
         .default_action_context
@@ -8576,6 +8596,8 @@ fn evaluate_candidate_with_catalog<'a>(
     let mut sublimation_state = create_sublimation_combat_state(&request.character);
     let mut causal_events = Vec::new();
     let mut action_ordinal = 0_u32;
+    let mut last_turn_casts_by_spell_id = BTreeMap::new();
+    let mut final_sublimation_resource_carryover = ResourcePool::default();
 
     for (turn_index, turn) in candidate.plan.turns.iter().enumerate() {
         let mut turn_damage = 0.0;
@@ -8844,6 +8866,8 @@ fn evaluate_candidate_with_catalog<'a>(
         resources = turn_end.resources;
         let sublimation_resource_carryover =
             collect_sublimation_resource_carryover(candidate, resources);
+        last_turn_casts_by_spell_id = casts_by_spell_id.clone();
+        final_sublimation_resource_carryover = sublimation_resource_carryover;
         if has_passive(&huppermage, "profusion-runique") {
             let active_rune_count = get_active_rune_count(&huppermage);
             if active_rune_count > 0 {
@@ -8867,6 +8891,88 @@ fn evaluate_candidate_with_catalog<'a>(
         }
     }
 
+    if enforce_sustainable_cycle && request.require_sustainable_cycle {
+        let replay_start = create_next_turn_state(
+            base_resources,
+            resources,
+            huppermage.clone(),
+            &last_turn_casts_by_spell_id,
+        );
+        let replay_initial_resources = ResourcePool {
+            ap: replay_start.resources.ap + final_sublimation_resource_carryover.ap,
+            mp: replay_start.resources.mp + final_sublimation_resource_carryover.mp,
+            wp: replay_start.resources.wp,
+            bq: replay_start.resources.bq,
+        };
+        let replay_request = create_sustainable_replay_request(
+            request,
+            replay_initial_resources,
+            initial_resource_delta,
+            replay_start.huppermage,
+        )?;
+        let replay_evaluation = evaluate_candidate_with_catalog_inner(
+            &replay_request,
+            candidate,
+            candidate_id,
+            catalog,
+            spells_by_id,
+            false,
+        )?;
+        let sustainability = evaluate_sustainability(
+            true,
+            &SimulationSummary {
+                valid: true,
+                total_damage,
+                damage_by_resolved_element: damage_by_resolved_element.clone(),
+                initial_resources: base_resources,
+                final_resources: resources,
+            },
+            &SimulationSummary {
+                valid: replay_evaluation.valid,
+                total_damage: replay_evaluation.total_damage,
+                damage_by_resolved_element: replay_evaluation
+                    .score
+                    .as_ref()
+                    .map(|score| score.damage_by_resolved_element.clone())
+                    .unwrap_or_default(),
+                initial_resources: replay_initial_resources,
+                final_resources: replay_evaluation.final_resources,
+            },
+        );
+
+        if !sustainability.sustainable {
+            return Ok(create_candidate_evaluation_result(
+                candidate_id,
+                false,
+                total_damage,
+                resources,
+                huppermage,
+                None,
+                Some(CandidateEvaluationViolation {
+                    turn_index: candidate.plan.turns.len().saturating_sub(1) as u32,
+                    violation_type: "unsustainableCycle".to_string(),
+                    action_index: -1,
+                    spell_id: None,
+                    resource: None,
+                    required: None,
+                    available: None,
+                    scope: Some(if replay_evaluation.valid {
+                        "replayResourceDebt".to_string()
+                    } else {
+                        "replayInvalid".to_string()
+                    }),
+                }),
+                Some(create_causal_trace(causal_events)),
+            ));
+        }
+    }
+
+    let score_multiplier = if request.require_sustainable_cycle {
+        sustainable_score_multiplier(resources, raw_base_resources.wp)
+    } else {
+        1.0
+    };
+
     Ok(create_candidate_evaluation_result(
         candidate_id,
         true,
@@ -8877,6 +8983,7 @@ fn evaluate_candidate_with_catalog<'a>(
             total_damage,
             damage_by_resolved_element,
             read_score_criterion(request),
+            score_multiplier,
         )),
         None,
         Some(create_causal_trace(causal_events)),
@@ -9217,8 +9324,9 @@ fn create_candidate_score_breakdown(
     total_damage: f64,
     damage_by_resolved_element: DamageByElement,
     criterion: ScoreCriterion,
+    score_multiplier: f64,
 ) -> CandidateScoreBreakdown {
-    let score = match criterion {
+    let base_score = match criterion {
         ScoreCriterion::TotalDamage => total_damage,
         ScoreCriterion::TargetElementDamage { element } => {
             get_damage_by_element(&damage_by_resolved_element, &element)
@@ -9226,10 +9334,96 @@ fn create_candidate_score_breakdown(
     };
 
     CandidateScoreBreakdown {
-        score,
+        score: round_damage(base_score * score_multiplier),
         total_damage,
         damage_by_resolved_element,
     }
+}
+
+fn create_sustainable_replay_request(
+    request: &OptimizerRequest,
+    replay_initial_resources: ResourcePool,
+    initial_resource_delta: ResourcePool,
+    replay_huppermage: HuppermageState,
+) -> Result<OptimizerRequest, String> {
+    let mut replay_request = request.clone();
+    replay_request.require_sustainable_cycle = false;
+    replay_request.character = request.character.clone();
+
+    let replay_raw_resources =
+        subtract_resource_pools(replay_initial_resources, initial_resource_delta);
+    set_character_resources(&mut replay_request.character, replay_raw_resources)?;
+    set_character_huppermage(&mut replay_request.character, replay_huppermage)?;
+
+    Ok(replay_request)
+}
+
+fn subtract_resource_pools(left: ResourcePool, right: ResourcePool) -> ResourcePool {
+    ResourcePool {
+        ap: left.ap - right.ap,
+        mp: left.mp - right.mp,
+        wp: left.wp - right.wp,
+        bq: left.bq - right.bq,
+    }
+}
+
+fn set_character_resources(character: &mut Value, resources: ResourcePool) -> Result<(), String> {
+    ensure_object(character);
+    let Some(object) = character.as_object_mut() else {
+        return Err("Failed to prepare replay character resources".to_string());
+    };
+    object.insert(
+        "resources".to_string(),
+        serde_json::to_value(resources)
+            .map_err(|error| format!("Failed to serialize replay resources: {error}"))?,
+    );
+    Ok(())
+}
+
+fn set_character_huppermage(
+    character: &mut Value,
+    huppermage: HuppermageState,
+) -> Result<(), String> {
+    ensure_object(character);
+    let Some(object) = character.as_object_mut() else {
+        return Err("Failed to prepare replay character class state".to_string());
+    };
+    let class_state = object
+        .entry("classState".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    ensure_object(class_state);
+    let Some(class_state_object) = class_state.as_object_mut() else {
+        return Err("Failed to prepare replay Huppermage state".to_string());
+    };
+    class_state_object.insert(
+        "huppermage".to_string(),
+        serde_json::to_value(huppermage)
+            .map_err(|error| format!("Failed to serialize replay Huppermage state: {error}"))?,
+    );
+    Ok(())
+}
+
+fn ensure_object(value: &mut Value) {
+    if !value.is_object() {
+        *value = Value::Object(Map::new());
+    }
+}
+
+fn sustainable_score_multiplier(final_resources: ResourcePool, initial_wp: f64) -> f64 {
+    let bq_ratio = clamp_ratio(final_resources.bq / 1_000.0);
+    let wp_ratio = if initial_wp > 0.0 {
+        clamp_ratio(final_resources.wp / initial_wp)
+    } else {
+        0.0
+    };
+    1.0 + 0.08 * bq_ratio + 0.04 * wp_ratio
+}
+
+fn clamp_ratio(value: f64) -> f64 {
+    if !value.is_finite() {
+        return 0.0;
+    }
+    value.max(0.0).min(1.0)
 }
 
 fn violation_with_turn(
@@ -9647,6 +9841,88 @@ mod tests {
             })
         );
         assert!(evaluation.first_violation.is_none());
+    }
+
+    #[test]
+    fn candidate_evaluation_rejects_unsustainable_cycles_when_required() {
+        let request = parse_optimizer_request(
+            r#"{
+              "schemaVersion":1,
+              "engine":"hybrid",
+              "seed":"sustainable-required",
+              "duration":1,
+              "iterations":10,
+              "maxActionsPerTurn":1,
+              "maxPassiveCount":0,
+              "availableSpellIds":["wp-hit"],
+              "availablePassiveIds":[],
+              "catalog":[
+                {
+                  "kind":"spell",
+                  "id":"wp-hit",
+                  "cost":{"wp":1},
+                  "effects":[{"type":"damage","base":20,"element":"fire"}],
+                  "constraints":[],
+                  "tags":[]
+                }
+              ],
+              "character":{"id":"test","resources":{"ap":6,"mp":3,"wp":2,"bq":100}},
+              "requireSustainableCycle":true
+            }"#,
+        )
+        .expect("request should parse");
+        let candidate = OptimizerCandidateInput {
+            passive_ids: vec![],
+            sublimation_ids: vec![],
+            plan: CandidatePlan {
+                turns: vec![CandidateTurn {
+                    actions: vec![action("wp-hit")],
+                }],
+            },
+            source_label: None,
+        };
+
+        let evaluation = evaluate_candidate(&request, &candidate, "candidate:wp-hit")
+            .expect("candidate should evaluate");
+
+        assert!(!evaluation.valid);
+        assert_eq!(
+            evaluation
+                .first_violation
+                .as_ref()
+                .map(|violation| violation.violation_type.as_str()),
+            Some("unsustainableCycle")
+        );
+        assert_eq!(
+            evaluation
+                .first_violation
+                .as_ref()
+                .and_then(|violation| violation.scope.as_deref()),
+            Some("replayResourceDebt")
+        );
+    }
+
+    #[test]
+    fn candidate_evaluation_keeps_sustainable_cycles_and_scores_resource_margin() {
+        let mut request = transformation_request();
+        request.require_sustainable_cycle = true;
+        let candidate = candidate_from_actions(vec!["hit"], vec![]);
+        let evaluation = evaluate_candidate(&request, &candidate, "candidate:sustainable-hit")
+            .expect("candidate should evaluate");
+
+        assert!(evaluation.valid, "{evaluation:?}");
+        assert_eq!(evaluation.total_damage, 40.0);
+        assert_eq!(
+            evaluation.score,
+            Some(CandidateScoreBreakdown {
+                score: 42.56,
+                total_damage: 40.0,
+                damage_by_resolved_element: DamageByElement {
+                    fire: 40.0,
+                    ..DamageByElement::default()
+                },
+            })
+        );
     }
 
     #[test]
@@ -11318,19 +11594,18 @@ mod tests {
         let plateau_result = enqueue_hybrid_elite_neighbors(&request, vec![], &candidate)
             .expect("plateau neighbors should generate");
 
-        assert!(plateau_result
-            .metrics
-            .get("hybridPlateauOrderChainNeighborCandidates")
-            .copied()
-            .unwrap_or(0)
-            > 0);
-        assert!(plateau_result
-            .queue
-            .iter()
-            .any(|neighbor| neighbor
-                .source_label
-                .as_deref()
-                .is_some_and(|label| label.starts_with("neighbor:plateau-order-chain"))));
+        assert!(
+            plateau_result
+                .metrics
+                .get("hybridPlateauOrderChainNeighborCandidates")
+                .copied()
+                .unwrap_or(0)
+                > 0
+        );
+        assert!(plateau_result.queue.iter().any(|neighbor| neighbor
+            .source_label
+            .as_deref()
+            .is_some_and(|label| label.starts_with("neighbor:plateau-order-chain"))));
     }
 
     #[test]
@@ -12563,7 +12838,7 @@ mod tests {
             Some(ActionTargetKind::EmptyCell),
             &BTreeMap::new(),
             &target_casts,
-            &state
+            &state,
         )
         .expect("empty-cell target should be invalid unless the spell supports it");
         assert_eq!(empty_cell_violation.violation_type, "invalidTarget");
