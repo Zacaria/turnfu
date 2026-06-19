@@ -751,8 +751,11 @@ function createContinuousOptimizerSessionId(setup: SetupSnapshot, controls: Opti
   return `optimizer-${setup.id}-${controls.duration}t-${scoreKey}-${cycleKey}`;
 }
 
-function createContinuousScenarioId(controls: OptimizerWorkspaceControls): "t2-full" | "t3-full" {
-  return controls.duration <= 2 ? "t2-full" : "t3-full";
+function createContinuousScenarioId(controls: OptimizerWorkspaceControls): "t1-full" | "t2-full" | "t3-full" {
+  if (controls.duration <= 1) {
+    return "t1-full";
+  }
+  return controls.duration === 2 ? "t2-full" : "t3-full";
 }
 
 function isContinuousVerifiedOptimizerCandidatePayload(

@@ -5,7 +5,7 @@ export type ContinuousOptimizerTargetElement = "fire" | "water" | "earth" | "air
 
 export type ContinuousOptimizerControls = {
   sessionId: string;
-  scenarioId: "t2-a8-p2" | "t2-full" | "t3-a12-p3" | "t3-full";
+  scenarioId: "t1-full" | "t2-full" | "t3-full";
   workerCount: number;
   chunkSize: number;
   dbPath: string;
@@ -303,9 +303,8 @@ function formatContinuousOptimizerError(error: string, recentLogs: string[]): st
 }
 
 function normalizeScenarioId(scenarioId: ContinuousOptimizerControls["scenarioId"]): ContinuousOptimizerControls["scenarioId"] {
-  return scenarioId === "t2-a8-p2"
+  return scenarioId === "t1-full"
     || scenarioId === "t2-full"
-    || scenarioId === "t3-a12-p3"
     || scenarioId === "t3-full"
     ? scenarioId
     : "t3-full";

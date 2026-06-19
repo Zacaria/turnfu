@@ -93,6 +93,7 @@ type MotifSeedCandidate = {
 };
 
 const scenarios: HybridSearchScenario[] = [
+  { id: "t1-full", duration: 1, maxActionsPerTurn: 12, maxPassiveCount: 6, maxSublimationCount: 12 },
   { id: "t2-a8-p2", duration: 2, maxActionsPerTurn: 8, maxPassiveCount: 2, maxSublimationCount: 12 },
   { id: "t2-full", duration: 2, maxActionsPerTurn: 12, maxPassiveCount: 6, maxSublimationCount: 12 },
   { id: "t3-a12-p3", duration: 3, maxActionsPerTurn: 12, maxPassiveCount: 3, maxSublimationCount: 12 },

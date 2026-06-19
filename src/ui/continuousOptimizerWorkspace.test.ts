@@ -80,6 +80,16 @@ test("creates launch args for a custom sustainable air Continuous run", () => {
   ]);
 });
 
+test("creates launch args for a one-turn full Continuous run", () => {
+  const args = createContinuousOptimizerLaunchArgs({
+    ...createDefaultContinuousOptimizerControls(),
+    scenarioId: "t1-full",
+    qualityPreset: "manual",
+  });
+
+  assert.equal(args[args.indexOf("--scenario") + 1], "t1-full");
+});
+
 test("creates bounded launch args for an optimizer-owned Continuous run", () => {
   const args = createContinuousOptimizerLaunchArgs({
     ...createDefaultContinuousOptimizerControls(),

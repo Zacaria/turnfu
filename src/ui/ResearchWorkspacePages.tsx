@@ -474,9 +474,8 @@ export function ContinuousOptimizerPage({ onBack }: { onBack: () => void }) {
                 scenarioId: event.currentTarget.value as ContinuousOptimizerControls["scenarioId"],
               })}
             >
+              <option value="t1-full">t1-full</option>
               <option value="t2-full">t2-full</option>
-              <option value="t2-a8-p2">t2-a8-p2</option>
-              <option value="t3-a12-p3">t3-a12-p3</option>
               <option value="t3-full">t3-full</option>
             </select>
           </label>
