@@ -77,3 +77,27 @@ test("serializes Rust/WASM optimizer requests as JSON", () => {
 
   assert.equal(JSON.parse(serialized).schemaVersion, 1);
 });
+
+test("allows global validity guidance to be set on Rust/WASM requests", () => {
+  const request = createRustWasmOptimizerRequest({
+    catalog,
+    character: {
+      id: "request-test",
+      className: "huppermage",
+      resources: createResources({ ap: 12, mp: 6, wp: 6, bq: 500 }),
+      stats: {
+        generalMastery: 0,
+        elementalMastery: {},
+        damageInflictedPercent: 0,
+      },
+    },
+    duration: 2,
+    engines: ["hybrid"],
+    budget: { iterations: 50 },
+  });
+
+  request.hybridGlobalValidityGuidance = true;
+
+  assert.equal(request.hybridGlobalValidityGuidance, true);
+  assert.equal(JSON.parse(JSON.stringify(request)).hybridGlobalValidityGuidance, true);
+});

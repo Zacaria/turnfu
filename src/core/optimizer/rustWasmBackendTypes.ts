@@ -28,6 +28,7 @@ export type RustWasmOptimizerRequest = {
   hybridResourceAwareFreshChance?: number;
   hybridContextualAdjacentSwaps?: boolean;
   hybridPlateauOrderChainNeighbors?: boolean;
+  hybridGlobalValidityGuidance?: boolean;
   hybridLockedLoadout?: boolean;
 };
 
