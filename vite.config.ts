@@ -41,91 +41,104 @@ function optimizerSessionsSqliteApi(): Plugin {
   return {
     name: "wakfu-optimizer-sessions-sqlite-api",
     configureServer(server) {
-      server.middlewares.use(async (request, response, next) => {
-        const requestUrl = new URL(request.url ?? "/", "http://localhost");
-        if (
-          !requestUrl.pathname.startsWith(optimizerSessionsApiPrefix)
-          && requestUrl.pathname !== researchWorkspaceApiPath
-          && requestUrl.pathname !== optimizerRunsStreamApiPath
-          && requestUrl.pathname !== continuousOptimizerStreamApiPath
-        ) {
-          next();
+      useOptimizerApiMiddleware(server.middlewares);
+    },
+    configurePreviewServer(server) {
+      useOptimizerApiMiddleware(server.middlewares);
+    },
+  };
+}
+
+type MiddlewareStack = {
+  use: (
+    handler: (request: IncomingMessage, response: ServerResponse, next: () => void) => void | Promise<void>,
+  ) => void;
+};
+
+function useOptimizerApiMiddleware(middlewares: MiddlewareStack): void {
+  middlewares.use(async (request, response, next) => {
+    const requestUrl = new URL(request.url ?? "/", "http://localhost");
+    if (
+      !requestUrl.pathname.startsWith(optimizerSessionsApiPrefix)
+      && requestUrl.pathname !== researchWorkspaceApiPath
+      && requestUrl.pathname !== optimizerRunsStreamApiPath
+      && requestUrl.pathname !== continuousOptimizerStreamApiPath
+    ) {
+      next();
+      return;
+    }
+
+    try {
+      if (request.method === "GET" && requestUrl.pathname === researchWorkspaceApiPath) {
+        sendJson(response, 200, { schemaVersion: 1, workspace: readResearchWorkspace() });
+        return;
+      }
+
+      if (request.method === "POST" && requestUrl.pathname === optimizerRunsStreamApiPath) {
+        const body = await readJsonBody(request);
+        await streamRustWasmOptimizerRun(request, response, body);
+        return;
+      }
+
+      if (request.method === "POST" && requestUrl.pathname === continuousOptimizerStreamApiPath) {
+        const body = await readJsonBody(request);
+        await streamContinuousOptimizerRun(request, response, body);
+        return;
+      }
+
+      if (request.method === "PUT" && requestUrl.pathname === researchWorkspaceApiPath) {
+        const body = await readJsonBody(request);
+        const workspace = body && typeof body === "object" && "workspace" in body
+          ? (body as { workspace: unknown }).workspace
+          : undefined;
+        if (!workspace || typeof workspace !== "object") {
+          sendJson(response, 400, { error: "Missing research workspace." });
           return;
         }
 
-        try {
-          if (request.method === "GET" && requestUrl.pathname === researchWorkspaceApiPath) {
-            sendJson(response, 200, { schemaVersion: 1, workspace: readResearchWorkspace() });
-            return;
-          }
+        writeResearchWorkspace(workspace);
+        sendJson(response, 204, null);
+        return;
+      }
 
-          if (request.method === "POST" && requestUrl.pathname === optimizerRunsStreamApiPath) {
-            const body = await readJsonBody(request);
-            await streamRustWasmOptimizerRun(request, response, body);
-            return;
-          }
+      if (request.method === "GET" && requestUrl.pathname === optimizerSessionsApiPrefix) {
+        sendJson(response, 200, { schemaVersion: 1, sessions: readOptimizerSessions() });
+        return;
+      }
 
-          if (request.method === "POST" && requestUrl.pathname === continuousOptimizerStreamApiPath) {
-            const body = await readJsonBody(request);
-            await streamContinuousOptimizerRun(request, response, body);
-            return;
-          }
-
-          if (request.method === "PUT" && requestUrl.pathname === researchWorkspaceApiPath) {
-            const body = await readJsonBody(request);
-            const workspace = body && typeof body === "object" && "workspace" in body
-              ? (body as { workspace: unknown }).workspace
-              : undefined;
-            if (!workspace || typeof workspace !== "object") {
-              sendJson(response, 400, { error: "Missing research workspace." });
-              return;
-            }
-
-            writeResearchWorkspace(workspace);
-            sendJson(response, 204, null);
-            return;
-          }
-
-          if (request.method === "GET" && requestUrl.pathname === optimizerSessionsApiPrefix) {
-            sendJson(response, 200, { schemaVersion: 1, sessions: readOptimizerSessions() });
-            return;
-          }
-
-          if (request.method === "PUT" && requestUrl.pathname.startsWith(`${optimizerSessionsApiPrefix}/`)) {
-            const setupId = decodeURIComponent(requestUrl.pathname.slice(optimizerSessionsApiPrefix.length + 1));
-            if (!setupId) {
-              sendJson(response, 400, { error: "Missing setup id." });
-              return;
-            }
-
-            const body = await readJsonBody(request);
-            const session = body && typeof body === "object" && "session" in body
-              ? (body as { session: unknown }).session
-              : undefined;
-            if (!session || typeof session !== "object") {
-              sendJson(response, 400, { error: "Missing optimizer session." });
-              return;
-            }
-
-            writeOptimizerSession(setupId, session);
-            sendJson(response, 204, null);
-            return;
-          }
-
-          sendJson(response, 405, { error: "Unsupported optimizer session API method." });
-        } catch (error) {
-          if (response.headersSent) {
-            response.end();
-            return;
-          }
-
-          sendJson(response, 500, {
-            error: error instanceof Error ? error.message : "Unexpected optimizer session API error.",
-          });
+      if (request.method === "PUT" && requestUrl.pathname.startsWith(`${optimizerSessionsApiPrefix}/`)) {
+        const setupId = decodeURIComponent(requestUrl.pathname.slice(optimizerSessionsApiPrefix.length + 1));
+        if (!setupId) {
+          sendJson(response, 400, { error: "Missing setup id." });
+          return;
         }
+
+        const body = await readJsonBody(request);
+        const session = body && typeof body === "object" && "session" in body
+          ? (body as { session: unknown }).session
+          : undefined;
+        if (!session || typeof session !== "object") {
+          sendJson(response, 400, { error: "Missing optimizer session." });
+          return;
+        }
+
+        writeOptimizerSession(setupId, session);
+        sendJson(response, 204, null);
+        return;
+      }
+
+      sendJson(response, 405, { error: "Unsupported optimizer session API method." });
+    } catch (error) {
+      if (response.headersSent) {
+        response.end();
+        return;
+      }
+
+      sendJson(response, 500, {
+        error: error instanceof Error ? error.message : "Unexpected optimizer session API error.",
       });
-    },
-  };
+    }
+  });
 }
 
 type OptimizerRunStreamRequest = {
