@@ -4709,8 +4709,14 @@ fn collect_sublimation_damage_bonus_percent(
     state: &mut SublimationCombatState,
 ) -> f64 {
     let mut bonus = collect_action_sublimation_bonus(candidate, spell);
+    if let Some(spell_element) = spell
+        .element
+        .as_ref()
+        .filter(|element| is_sublimation_element(element))
+    {
+        bonus += consume_elemental_carryover_bonus(candidate, spell_element, state);
+    }
     if let Some(damage_element) = first_sublimation_damage_element(spell, stats) {
-        bonus += consume_elemental_carryover_bonus(candidate, &damage_element, state);
         bonus += collect_alternance_bonus(candidate, &damage_element, state);
     }
     bonus += consume_spell_count_carryover_bonus(candidate, state);
@@ -4837,22 +4843,28 @@ fn store_sublimation_after_action(
         return;
     };
 
-    for family_id in collect_candidate_sublimation_families(candidate) {
-        let Some(target) = secondary_carryover_target(family_id) else {
-            continue;
-        };
-        if !secondary_carryover_triggers(family_id, &damage_element) {
-            continue;
+    if let Some(spell_element) = spell
+        .element
+        .as_ref()
+        .filter(|element| is_sublimation_element(element))
+    {
+        for family_id in collect_candidate_sublimation_families(candidate) {
+            let Some(target) = secondary_carryover_target(family_id) else {
+                continue;
+            };
+            if !secondary_carryover_triggers(family_id, spell_element) {
+                continue;
+            }
+            let before = state
+                .elemental_carryover
+                .get(&target)
+                .copied()
+                .unwrap_or(0.0);
+            let added = 2.0 * get_candidate_sublimation_family_level(candidate, family_id);
+            state
+                .elemental_carryover
+                .insert(target, (before + added).min(30.0));
         }
-        let before = state
-            .elemental_carryover
-            .get(&target)
-            .copied()
-            .unwrap_or(0.0);
-        let added = 2.0 * get_candidate_sublimation_family_level(candidate, family_id);
-        state
-            .elemental_carryover
-            .insert(target, (before + added).min(30.0));
     }
 
     if action_damage > 0.0 {
@@ -10596,6 +10608,131 @@ mod tests {
 
         assert!(evaluation.valid);
         assert_eq!(evaluation.total_damage, 1530.0);
+    }
+
+    #[test]
+    fn candidate_evaluation_keeps_secondary_sublimations_off_light_spells() {
+        let request = parse_optimizer_request(
+            r#"{
+              "schemaVersion":1,
+              "engine":"hybrid",
+              "seed":"secondary-light",
+              "duration":1,
+              "iterations":10,
+              "maxActionsPerTurn":1,
+              "maxPassiveCount":0,
+              "availableSpellIds":["light-hit"],
+              "availablePassiveIds":[],
+              "availableSublimationIds":["brulure-secondaire-4"],
+              "catalog":[
+                {
+                  "kind":"spell",
+                  "id":"light-hit",
+                  "element":"light",
+                  "cost":{"ap":1},
+                  "effects":[{"type":"damage","element":"light","base":100}],
+                  "constraints":[],
+                  "tags":[]
+                }
+              ],
+              "character":{
+                "id":"test",
+                "resources":{"ap":6,"mp":3,"wp":2,"bq":100},
+                "stats":{
+                  "level":200,
+                  "hitPoints":1000,
+                  "generalMastery":0,
+                  "elementalMastery":{"fire":0,"water":0,"earth":0,"air":0,"light":0,"neutral":0},
+                  "damageInflictedPercent":0
+                },
+                "sublimationElementalCarryover":{"fire":30}
+              }
+            }"#,
+        )
+        .expect("request should parse");
+        let candidate = OptimizerCandidateInput {
+            passive_ids: vec![],
+            sublimation_ids: vec!["brulure-secondaire-4".to_string()],
+            source_label: None,
+            plan: CandidatePlan {
+                turns: vec![CandidateTurn {
+                    actions: vec![action("light-hit")],
+                }],
+            },
+        };
+
+        let evaluation = evaluate_candidate(&request, &candidate, "candidate:secondary-light")
+            .expect("candidate should evaluate");
+
+        assert!(evaluation.valid);
+        assert_eq!(evaluation.total_damage, 100.0);
+    }
+
+    #[test]
+    fn candidate_evaluation_does_not_store_secondary_sublimation_from_light_spells() {
+        let request = parse_optimizer_request(
+            r#"{
+              "schemaVersion":1,
+              "engine":"hybrid",
+              "seed":"secondary-light-store",
+              "duration":1,
+              "iterations":10,
+              "maxActionsPerTurn":2,
+              "maxPassiveCount":0,
+              "availableSpellIds":["light-hit","fire-hit"],
+              "availablePassiveIds":[],
+              "availableSublimationIds":["brulure-secondaire-4"],
+              "catalog":[
+                {
+                  "kind":"spell",
+                  "id":"light-hit",
+                  "element":"light",
+                  "cost":{"ap":1},
+                  "effects":[{"type":"damage","element":"light","base":100}],
+                  "constraints":[],
+                  "tags":[]
+                },
+                {
+                  "kind":"spell",
+                  "id":"fire-hit",
+                  "element":"fire",
+                  "cost":{"ap":1},
+                  "effects":[{"type":"damage","element":"fire","base":100}],
+                  "constraints":[],
+                  "tags":[]
+                }
+              ],
+              "character":{
+                "id":"test",
+                "resources":{"ap":6,"mp":3,"wp":2,"bq":100},
+                "stats":{
+                  "level":200,
+                  "hitPoints":1000,
+                  "generalMastery":0,
+                  "elementalMastery":{"fire":0,"water":100,"earth":0,"air":0,"light":0,"neutral":0},
+                  "damageInflictedPercent":0
+                }
+              }
+            }"#,
+        )
+        .expect("request should parse");
+        let candidate = OptimizerCandidateInput {
+            passive_ids: vec![],
+            sublimation_ids: vec!["brulure-secondaire-4".to_string()],
+            source_label: None,
+            plan: CandidatePlan {
+                turns: vec![CandidateTurn {
+                    actions: vec![action("light-hit"), action("fire-hit")],
+                }],
+            },
+        };
+
+        let evaluation =
+            evaluate_candidate(&request, &candidate, "candidate:secondary-light-store")
+                .expect("candidate should evaluate");
+
+        assert!(evaluation.valid);
+        assert_eq!(evaluation.total_damage, 300.0);
     }
 
     #[test]
