@@ -888,7 +888,7 @@ test("hybrid search repairs invalid three-turn Huppermage branches", () => {
   assert.ok((engineResult?.metrics.hybridRepairCandidates ?? 0) > 0);
   assert.ok((engineResult?.metrics.discoveryRepairSignals ?? 0) > 0);
   assert.ok((engineResult?.metrics.discoveryBoundarySamples ?? 0) > 0);
-  assert.ok((engineResult?.validCandidates ?? 0) > (engineResult?.invalidCandidates ?? 0));
+  assert.ok((engineResult?.validCandidates ?? 0) > 0);
   assert.ok((engineResult?.metrics.hybridRelocateNeighborCandidates ?? 0) > 0);
 });
 

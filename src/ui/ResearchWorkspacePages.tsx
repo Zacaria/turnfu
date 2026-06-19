@@ -383,7 +383,9 @@ export function ContinuousOptimizerPage({ onBack }: { onBack: () => void }) {
       id: controls.sessionId,
       status: "running",
       totalAttempts: 0,
-      validRate: 0,
+      admittedIndividuals: 0,
+      discardedProposals: 0,
+      fabricationAttempts: 0,
       bestScore: null,
       workerCount: controls.workerCount,
       updatedAt: startedAt,
@@ -396,10 +398,15 @@ export function ContinuousOptimizerPage({ onBack }: { onBack: () => void }) {
         setRunMessages((current) => [line, ...current].slice(0, 4));
       },
       onProgress: (payload) => {
+        const admittedIndividuals = payload.admittedIndividuals ?? payload.validCandidates ?? Math.round(payload.totalAttempts * (payload.validRate ?? 0));
+        const discardedProposals = payload.discardedProposals ?? payload.invalidCandidates ?? Math.max(0, payload.totalAttempts - admittedIndividuals);
+        const fabricationAttempts = payload.fabricationAttempts ?? payload.totalAttempts;
         const checkpoint = {
           totalAttempts: payload.totalAttempts,
           score: payload.score,
-          validRate: payload.validRate,
+          admittedIndividuals,
+          discardedProposals,
+          fabricationAttempts,
         };
         setCheckpoints((current) => {
           const next = current.filter((entry) => entry.totalAttempts !== checkpoint.totalAttempts);
@@ -410,7 +417,9 @@ export function ContinuousOptimizerPage({ onBack }: { onBack: () => void }) {
           id: controls.sessionId,
           status: "running",
           totalAttempts: payload.totalAttempts,
-          validRate: payload.validRate,
+          admittedIndividuals,
+          discardedProposals,
+          fabricationAttempts,
           bestScore: payload.score,
           workerCount: controls.workerCount,
           updatedAt: new Date().toISOString(),
@@ -545,7 +554,9 @@ export function ContinuousOptimizerPage({ onBack }: { onBack: () => void }) {
           <h2>Best combos</h2>
           <div className="thin-row">
             <b>{view.bestCombos.bestScore?.toFixed(2) ?? "Aucun score"}</b>
-            <span>{view.bestCombos.totalAttempts.toLocaleString("fr-FR")} attempts · valid {(view.bestCombos.validRate * 100).toFixed(1)}%</span>
+            <span>
+              {view.bestCombos.totalAttempts.toLocaleString("fr-FR")} essais · {view.bestCombos.admittedIndividuals.toLocaleString("fr-FR")} admis · {view.bestCombos.discardedProposals.toLocaleString("fr-FR")} rejets
+            </span>
           </div>
           {view.bestCombos.checkpoints.length === 0 ? (
             <EmptyState title="Aucun checkpoint" body="La session n'a pas encore publié de checkpoint." />
@@ -554,7 +565,7 @@ export function ContinuousOptimizerPage({ onBack }: { onBack: () => void }) {
             <div className="thin-row" key={checkpoint.totalAttempts}>
               <b>{checkpoint.score.toFixed(2)}</b>
               <span>
-                {checkpoint.totalAttempts.toLocaleString("fr-FR")} attempts · valid {(checkpoint.validRate * 100).toFixed(1)}%
+                {checkpoint.totalAttempts.toLocaleString("fr-FR")} essais · {checkpoint.admittedIndividuals.toLocaleString("fr-FR")} admis · {checkpoint.discardedProposals.toLocaleString("fr-FR")} rejets
               </span>
             </div>
           ))}
@@ -1429,8 +1440,8 @@ export function OptimizerWorkspacePage({
               <span>{runProgress.attempts} essais explorés</span>
             </div>
             <div className="optimizer-progress-stats">
-              <span>Valides: {runProgress.validCandidates}</span>
-              <span>Invalides: {runProgress.invalidCandidates}</span>
+              <span>Population: {runProgress.validCandidates}</span>
+              <span>Rejets: {runProgress.invalidCandidates}</span>
               <span>Meilleur: {runProgress.bestScore ?? "—"}</span>
             </div>
           </div>

@@ -273,13 +273,14 @@ test("does not create optimizer candidates from metrics-only Continuous progress
   const candidate = createOptimizerResultViewModelFromContinuousCandidate({
     totalAttempts: 1_000_000,
     score: 120_000,
-    validRate: 0.42,
+    admittedIndividuals: 420_000,
+    discardedProposals: 580_000,
   });
 
   assert.equal(candidate, null);
 });
 
-test("renders oracle-verified Continuous candidates through the optimizer result model", () => {
+test("renders Rust-verified Continuous candidates through the optimizer result model", () => {
   const setup = getSeedSetup();
   const candidate = createOptimizerResultViewModelFromContinuousCandidate({
     schemaVersion: 1,

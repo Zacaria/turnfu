@@ -485,8 +485,12 @@ async function runContinuousOptimizerForControlsLive(
       progressBatch += 1;
       latestAttempts = payload.totalAttempts;
       latestCheckpointScore = payload.score;
-      latestValidCandidates = payload.validCandidates ?? Math.round(payload.totalAttempts * payload.validRate);
-      latestInvalidCandidates = payload.invalidCandidates ?? Math.max(0, payload.totalAttempts - latestValidCandidates);
+      latestValidCandidates = payload.admittedIndividuals
+        ?? payload.validCandidates
+        ?? candidates.size;
+      latestInvalidCandidates = payload.discardedProposals
+        ?? payload.invalidCandidates
+        ?? Math.max(0, payload.totalAttempts - (payload.admittedIndividuals ?? payload.validCandidates ?? 0));
       reportContinuousProgress();
     },
     onCandidate: (payload) => {
@@ -496,6 +500,7 @@ async function runContinuousOptimizerForControlsLive(
       }
       candidates.set(viewModel.id, viewModel);
       latestResults = rankOptimizerCandidateViewModels([...candidates.values()]).slice(0, normalizedControls.maxResultsPerDuration);
+      latestValidCandidates = Math.max(latestValidCandidates, candidates.size);
       reportContinuousProgress();
     },
   });
@@ -521,7 +526,7 @@ async function runContinuousOptimizerForControlsLive(
 }
 
 const optimizerContinuousWorkerCount = 10;
-const optimizerContinuousChunkSize = 2_000;
+const optimizerContinuousChunkSize = 50_000;
 
 export function createOptimizerResultViewModel({
   duration,

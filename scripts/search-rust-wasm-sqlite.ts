@@ -1,12 +1,13 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
+import { createRequire } from "node:module";
 import { availableParallelism } from "node:os";
 import { dirname, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { DatabaseSync } from "node:sqlite";
 import { Worker } from "node:worker_threads";
 import { huppermageCatalog } from "../src/core/catalog/index.ts";
-import { createOptimizerExperimentEvaluator } from "../src/core/optimizer/index.ts";
+import type { OptimizerExperimentCandidate } from "../src/core/optimizer/index.ts";
 import {
   createRustWasmOptimizerRequest,
   type RustWasmHybridSearchResumeState,
@@ -72,6 +73,15 @@ type WorkerStateRow = {
   invalid_candidates: number;
 };
 
+type RustWasmCandidateEvaluationResult = {
+  candidateId: string;
+  valid: boolean;
+  totalDamage: number;
+  finalResources: SimulatedCharacter["resources"];
+  finalHuppermage: Record<string, unknown>;
+  score?: RustWasmOptimizerScoredCandidate["score"];
+};
+
 type ReuseTrialCandidate = {
   sourceCandidateId: number;
   strategy: string;
@@ -86,6 +96,26 @@ type MotifSeedCandidate = {
   sourceLabel: string;
   candidate: RustWasmOptimizerCandidateInput;
   bestScore: number;
+};
+
+type VerifiedContinuousTopCandidate = {
+  rustCandidate: RustWasmOptimizerScoredCandidate;
+  payload: {
+    schemaVersion: 1;
+    totalAttempts: number;
+    rank: number;
+    run: {
+      sessionId: string;
+      scenarioId: string;
+      seed: string;
+      workerCount: number;
+      chunkSize: number;
+      scoreCriterion: "total-damage" | "element-damage";
+      targetElement: "fire" | "water" | "earth" | "air" | null;
+      requireSustainableCycle: boolean;
+    };
+    candidate: OptimizerExperimentCandidate;
+  };
 };
 
 const scenarios: HybridSearchScenario[] = [
@@ -117,6 +147,11 @@ const learnedLoadoutPriorEnabled = process.argv.includes("--learned-loadout-prio
 const learnedActionSetPriorEnabled = process.argv.includes("--learned-action-set-prior");
 const plateauOrderChainNeighborsEnabled = process.argv.includes("--plateau-order-chain-neighbors");
 const plateauTriggerRounds = readNonNegativeIntegerOption("--plateau-trigger-rounds", 3);
+const progressIntervalMs = readNonNegativeIntegerOption("--progress-interval-ms", 2_000);
+const progressIntervalAttempts = readNonNegativeIntegerOption(
+  "--progress-interval-attempts",
+  Math.max(250, Math.floor(chunkSize / 25)),
+);
 const scoreCriterion = readScoreCriterion(readOption("--score-criterion") ?? "total-damage");
 const targetElement = readTargetElement(readOption("--target-element") ?? "fire");
 const requireSustainableCycle = process.argv.includes("--sustainable-cycle");
@@ -132,6 +167,10 @@ const wasmPackagePath = resolve("src/wasm/optimizer_wasm_pkg/optimizer_wasm.js")
 if (!existsSync(wasmPackagePath)) {
   throw new Error("Build WASM first with `pnpm wasm:build` or `pnpm diff:rust-wasm`.");
 }
+const require = createRequire(import.meta.url);
+const wasm = require(wasmPackagePath) as {
+  evaluate_candidate_batch_json: (requestJson: string, candidatesJson: string) => string;
+};
 
 const character: SimulatedCharacter = {
   id: "hybrid-benchmark-huppermage",
@@ -252,18 +291,16 @@ const fingerprint = createFingerprint({
     triggerRounds: plateauTriggerRounds,
   },
 });
-const oracle = createOptimizerExperimentEvaluator({
-  catalog: huppermageCatalog,
-  character,
-  duration: scenario.duration,
-  criterion,
-  requireSustainableCycle,
-  defaultActionContext,
-});
 const workerSource = `
   const { parentPort, workerData } = require("node:worker_threads");
   const wasm = require(workerData.wasmPackagePath);
-  parentPort.postMessage(JSON.parse(wasm.run_hybrid_search_json(workerData.requestJson)));
+  const emitProgress = (snapshotJson) => {
+    parentPort.postMessage({ type: "progress", payload: JSON.parse(snapshotJson) });
+  };
+  const resultJson = typeof wasm.run_hybrid_search_stream_json === "function"
+    ? wasm.run_hybrid_search_stream_json(workerData.requestJson, workerData.progressIntervalAttempts, emitProgress)
+    : wasm.run_hybrid_search_json(workerData.requestJson);
+  parentPort.postMessage({ type: "result", payload: JSON.parse(resultJson) });
 `;
 
 mkdirSync(dirname(dbPath), { recursive: true });
@@ -341,7 +378,22 @@ while (!stopRequested) {
   const selectedReuseTrials = workerReuseTrialSelections.flatMap((selection) => selection.trials);
   const selectedMotifSeeds = workerMotifSeedSelections.flatMap((selection) => selection.seeds);
   const roundStart = performance.now();
-  const results = await Promise.all(Array.from({ length: workerCount }, (_, workerIndex) => {
+  const progressResults = new Map<number, WorkerSearchResponse>();
+  let lastProgressEmitMs = 0;
+  const emitLiveProgress = () => {
+    const now = performance.now();
+    if (progressResults.size === 0 || now - lastProgressEmitMs < progressIntervalMs) {
+      return;
+    }
+    lastProgressEmitMs = now;
+    console.log(JSON.stringify(createContinuousProgressSummary(
+      Array.from(progressResults.values()).map(sanitizeContinuousWorkerResult),
+      session.total_attempts,
+      roundStart,
+      roundIndex,
+    )));
+  };
+  const rawResults = await Promise.all(Array.from({ length: workerCount }, (_, workerIndex) => {
     const resumeState = workerStates.get(workerIndex)?.resume_state_json
       ? JSON.parse(workerStates.get(workerIndex)!.resume_state_json!) as RustWasmHybridSearchResumeState
       : undefined;
@@ -358,10 +410,14 @@ while (!stopRequested) {
       seedCandidates: seedCandidates.length > 0 ? seedCandidates : undefined,
       resumeState,
     };
-    return runWorker(request);
+    return runWorker(request, (progress) => {
+      progressResults.set(workerIndex, progress);
+      emitLiveProgress();
+    });
   }));
+  const results = rawResults.map(sanitizeContinuousWorkerResult);
 
-  const topCandidates = [
+  const proposedTopCandidates = [
     ...results.flatMap((result) => result.topCandidates),
     ...(previousBest ? [previousBest] : []),
   ].sort(compareRustCandidates).slice(0, 5);
@@ -369,6 +425,11 @@ while (!stopRequested) {
   const validCandidates = results.reduce((total, result) => total + result.validCandidates, 0);
   const invalidCandidates = results.reduce((total, result) => total + result.invalidCandidates, 0);
   const metrics = mergeMetrics(results.map((result) => result.metrics));
+  const fabricationAttempts = metrics.fabricationAttempts ?? attempts;
+  const admittedIndividuals = metrics.continuousRustAdmittedIndividuals ?? validCandidates;
+  const discardedProposals = metrics.discardedProposals ?? invalidCandidates;
+  const projectionRepairs = metrics.projectionRepairs ?? 0;
+  const factoryExhaustions = metrics.factoryExhaustions ?? 0;
   const seedCandidateEvaluations = results.flatMap((result) => result.seedCandidateEvaluations ?? []);
   const contextualAdjacentSwapEvaluations = seedCandidateEvaluations.filter((evaluation) =>
     evaluation.sourceLabel.startsWith("neighbor:contextual-adjacent-swap:")
@@ -392,9 +453,11 @@ while (!stopRequested) {
     .filter((evaluation): evaluation is RustWasmSeedCandidateEvaluation => evaluation !== undefined);
   const elapsedMs = performance.now() - roundStart;
   const totalAttempts = session.total_attempts + attempts;
+  const verifiedTopCandidates = createVerifiedContinuousTopCandidates(proposedTopCandidates, totalAttempts);
+  const verifiedCandidates = verifiedTopCandidates.map((entry) => entry.payload);
+  const topCandidates = verifiedTopCandidates.map((entry) => entry.rustCandidate);
   const bestCandidate = topCandidates[0];
   const improvedGlobalBest = bestCandidate !== undefined && bestCandidate.score.score > previousBestScore;
-  const verifiedCandidates = createDisplayCandidatePayloads(topCandidates, totalAttempts);
   const summary = {
     session: sessionId,
     dbPath,
@@ -408,9 +471,14 @@ while (!stopRequested) {
     attemptsPerSecond: round(attempts / Math.max(0.001, elapsedMs / 1_000)),
     attempts,
     totalAttempts,
+    admittedIndividuals,
+    populationSize: metrics.populationSize ?? admittedIndividuals,
+    fabricationAttempts,
+    discardedProposals,
+    projectionRepairs,
+    factoryExhaustions,
     validCandidates,
     invalidCandidates,
-    validRate: round(validCandidates / Math.max(1, attempts), 4),
     score: round(bestCandidate?.score.score ?? 0),
     resourceAwareFreshChance: baseRequest.hybridResourceAwareFreshChance ?? 0.12,
     contextualAdjacentSwapsEnabled,
@@ -470,18 +538,18 @@ while (!stopRequested) {
     verifiedCandidates,
     metrics,
   };
-  const persistedTopCandidateIds = topCandidates.slice(0, 20).map((candidate, index) =>
+  const persistedTopCandidateIds = verifiedTopCandidates.slice(0, 20).map(({ rustCandidate, payload }, index) =>
     recordContinuousSearchCandidate(db, {
       sessionId,
-      candidate: verifiedCandidates[index]?.candidate ?? candidate,
-      score: candidate.score.score,
+      candidate: payload.candidate,
+      score: payload.candidate.score.score,
       valid: true,
       violationCategory: null,
-      finalState: verifiedCandidates[index]?.candidate.simulation.finalState ?? null,
+      finalState: payload.candidate.simulation.finalState,
       descriptor: {
-        passiveCount: candidate.passiveIds.length,
-        sublimationCount: candidate.sublimationIds.length,
-        actionCount: countActions(candidate),
+        passiveCount: rustCandidate.passiveIds.length,
+        sublimationCount: rustCandidate.sublimationIds.length,
+        actionCount: countActions(rustCandidate),
         checkpointRank: index + 1,
       },
       sourceKind: "checkpoint-top",
@@ -562,20 +630,93 @@ while (!stopRequested) {
 
 db.close();
 
-function runWorker(request: RustWasmOptimizerRequest): Promise<WorkerSearchResponse> {
+function runWorker(
+  request: RustWasmOptimizerRequest,
+  onProgress?: (result: WorkerSearchResponse) => void,
+): Promise<WorkerSearchResponse> {
   return new Promise<WorkerSearchResponse>((resolveResult, reject) => {
     const worker = new Worker(workerSource, {
       eval: true,
-      workerData: { wasmPackagePath, requestJson: JSON.stringify(request) },
+      workerData: {
+        wasmPackagePath,
+        requestJson: JSON.stringify(request),
+        progressIntervalAttempts,
+      },
     });
-    worker.once("message", resolveResult);
+    let settled = false;
+    worker.on("message", (message) => {
+      if (message && typeof message === "object" && "type" in message) {
+        const typed = message as { type?: string; payload?: WorkerSearchResponse };
+        if (typed.type === "progress" && typed.payload) {
+          onProgress?.(typed.payload);
+          return;
+        }
+        if (typed.type === "result" && typed.payload) {
+          settled = true;
+          resolveResult(typed.payload);
+          return;
+        }
+      }
+      settled = true;
+      resolveResult(message as WorkerSearchResponse);
+    });
     worker.once("error", reject);
     worker.once("exit", (code) => {
-      if (code !== 0) {
+      if (code !== 0 && !settled) {
         reject(new Error(`Rust/WASM worker exited with ${code}`));
       }
     });
   });
+}
+
+function createContinuousProgressSummary(
+  results: WorkerSearchResponse[],
+  baseTotalAttempts: number,
+  roundStart: number,
+  roundIndex: number,
+) {
+  const attempts = results.reduce((total, result) => total + result.attempts, 0);
+  const validCandidates = results.reduce((total, result) => total + result.validCandidates, 0);
+  const invalidCandidates = results.reduce((total, result) => total + result.invalidCandidates, 0);
+  const metrics = mergeMetrics(results.map((result) => result.metrics));
+  const topCandidates = results.flatMap((result) => result.topCandidates).sort(compareRustCandidates).slice(0, 5);
+  const bestCandidate = topCandidates[0];
+  const elapsedMs = performance.now() - roundStart;
+  const populationSize = metrics.populationSize ?? metrics.continuousRustAdmittedIndividuals ?? validCandidates;
+  const totalAttempts = baseTotalAttempts + attempts;
+  const verifiedCandidates = createVerifiedContinuousTopCandidates(topCandidates, totalAttempts)
+    .map((entry) => entry.payload);
+
+  return {
+    session: sessionId,
+    dbPath,
+    scenario: scenario.id,
+    backend: "rustWasmPersistent",
+    seed,
+    workerCount,
+    chunkSize,
+    round: roundIndex + 1,
+    elapsedMs: round(elapsedMs),
+    attemptsPerSecond: round(attempts / Math.max(0.001, elapsedMs / 1_000)),
+    attempts,
+    totalAttempts,
+    admittedIndividuals: populationSize,
+    populationSize,
+    fabricationAttempts: metrics.fabricationAttempts ?? attempts,
+    discardedProposals: metrics.discardedProposals ?? invalidCandidates,
+    projectionRepairs: metrics.projectionRepairs ?? 0,
+    factoryExhaustions: metrics.factoryExhaustions ?? 0,
+    validCandidates,
+    invalidCandidates,
+    score: round(bestCandidate?.score.score ?? 0),
+    scoreCriterion,
+    targetElement: scoreCriterion === "element-damage" ? targetElement : null,
+    requireSustainableCycle,
+    effectiveMaxActionsPerTurn: baseRequest.maxActionsPerTurn,
+    availableSpellCount: baseRequest.availableSpellIds.length,
+    verifiedCandidates,
+    metrics,
+  };
 }
 
 function createSchema(database: DatabaseSync): void {
@@ -641,6 +782,41 @@ function readWorkerStates(database: DatabaseSync, id: string): Map<number, Worke
   return new Map(rows.map((row) => [row.worker_index, row]));
 }
 
+function sanitizeContinuousWorkerResult(result: WorkerSearchResponse): WorkerSearchResponse {
+  let admittedIndividuals = 0;
+  let rejectedPopulationEntries = 0;
+  let sanitizedPopulationSize = 0;
+  const resumeState = result.resumeState
+    ? {
+        ...result.resumeState,
+        islands: result.resumeState.islands.map((island) => {
+          const population = island.population.filter((entry) => {
+            if (entry.valid !== false && Number.isFinite(entry.score)) {
+              admittedIndividuals += 1;
+              sanitizedPopulationSize += 1;
+              return true;
+            }
+            rejectedPopulationEntries += 1;
+            return false;
+          });
+          return { ...island, population };
+        }),
+      }
+    : undefined;
+  const metrics = { ...result.metrics };
+  if (result.resumeState) {
+    metrics.continuousRustAdmittedIndividuals =
+      (metrics.continuousRustAdmittedIndividuals ?? 0) + admittedIndividuals;
+    metrics.populationSize = sanitizedPopulationSize;
+  }
+  if (rejectedPopulationEntries > 0) {
+    metrics.continuousRustRejectedPopulationEntries =
+      (metrics.continuousRustRejectedPopulationEntries ?? 0) + rejectedPopulationEntries;
+    metrics.discardedProposals = (metrics.discardedProposals ?? result.invalidCandidates) + rejectedPopulationEntries;
+  }
+  return { ...result, resumeState, metrics };
+}
+
 function upsertWorkerState(
   database: DatabaseSync,
   id: string,
@@ -700,38 +876,93 @@ function insertCheckpoint(database: DatabaseSync, summary: { session: string; to
     .run(summary.session, summary.totalAttempts, summary.score, JSON.stringify(summary));
 }
 
-function createDisplayCandidatePayloads(
+function createVerifiedContinuousTopCandidates(
   topCandidates: RustWasmOptimizerScoredCandidate[],
   totalAttempts: number,
-) {
+): VerifiedContinuousTopCandidate[] {
+  const evaluationInputs = topCandidates.map((candidate) => ({
+    id: candidate.id,
+    passiveIds: candidate.passiveIds,
+    sublimationIds: candidate.sublimationIds,
+    plan: candidate.plan,
+  }));
+  const evaluations = JSON.parse(
+    wasm.evaluate_candidate_batch_json(JSON.stringify(baseRequest), JSON.stringify(evaluationInputs)),
+  ) as RustWasmCandidateEvaluationResult[];
+  const evaluationById = new Map(evaluations.map((evaluation) => [evaluation.candidateId, evaluation]));
+
   return topCandidates
     .map((candidate, index) => {
-      const evaluation = oracle.evaluateDetailed({
-        passiveIds: candidate.passiveIds,
-        sublimationIds: candidate.sublimationIds,
-        plan: candidate.plan,
-      });
-      if (!evaluation.result) {
+      const evaluation = evaluationById.get(candidate.id);
+      if (!evaluation?.valid) {
         return null;
       }
+      const score = evaluation.score ?? candidate.score;
       return {
-        schemaVersion: 1 as const,
-        totalAttempts,
-        rank: index + 1,
-        run: {
-          sessionId,
-          scenarioId: scenario.id,
-          seed,
-          workerCount,
-          chunkSize,
-          scoreCriterion,
-          targetElement: scoreCriterion === "element-damage" ? targetElement : null,
-          requireSustainableCycle,
+        rustCandidate: candidate,
+        payload: {
+          schemaVersion: 1 as const,
+          totalAttempts,
+          rank: index + 1,
+          run: {
+            sessionId,
+            scenarioId: scenario.id,
+            seed,
+            workerCount,
+            chunkSize,
+            scoreCriterion,
+            targetElement: scoreCriterion === "element-damage" ? targetElement : null,
+            requireSustainableCycle,
+          },
+          candidate: {
+            id: candidate.id,
+            passiveIds: candidate.passiveIds,
+            sublimationIds: candidate.sublimationIds,
+            sublimations: {
+              selections: candidate.sublimationIds.map((sublimationId) => ({ sublimationId })),
+              hpAssumption: "normal",
+              nearbyAlliesAssumption: "unspecified",
+              contactEnemiesAssumption: "unspecified",
+            },
+            plan: candidate.plan,
+            score,
+            simulation: {
+              valid: true,
+              combo: candidate.plan,
+              turns: [],
+              totalDamage: evaluation.totalDamage,
+              finalState: {
+                remainingResources: evaluation.finalResources,
+                classState: { huppermage: evaluation.finalHuppermage },
+                currentStats: character.stats,
+                castsBySpellId: {},
+                targetCastsBySpellId: {},
+                totalDamage: evaluation.totalDamage,
+                actionLog: [],
+                turnEndEffects: [],
+              },
+              violations: [],
+            },
+            sustainability: {
+              required: requireSustainableCycle,
+              sustainable: true,
+            },
+          } as OptimizerExperimentCandidate,
         },
-        candidate: evaluation.result,
       };
     })
-    .filter((payload): payload is NonNullable<typeof payload> => payload !== null);
+    .filter((entry): entry is VerifiedContinuousTopCandidate => entry !== null)
+    .sort((left, right) =>
+      right.payload.candidate.score.score - left.payload.candidate.score.score
+      || compareRustCandidates(left.rustCandidate, right.rustCandidate)
+    )
+    .map((entry, index) => ({
+      ...entry,
+      payload: {
+        ...entry.payload,
+        rank: index + 1,
+      },
+    }));
 }
 
 function compareRustCandidates(

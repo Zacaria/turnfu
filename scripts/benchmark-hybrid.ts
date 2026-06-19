@@ -134,6 +134,8 @@ for (const scenario of selectedScenarios) {
           });
           const elapsedMs = performance.now() - runStart;
           const engine = result.engineResults[0]!;
+          const fabricationAttempts = engine.metrics.fabricationAttempts ?? engine.attempts;
+          const discardedProposals = engine.metrics.discardedProposals ?? engine.invalidCandidates;
           return {
             seed,
             backend: engine.backend,
@@ -144,15 +146,18 @@ for (const scenario of selectedScenarios) {
             score: round(result.bestCandidate?.score.score ?? engine.metrics.rustWasmUnverifiedBestScore ?? 0),
             tsVerifiedScore: result.bestCandidate ? round(result.bestCandidate.score.score) : undefined,
             rustUnverifiedScore: engine.metrics.rustWasmUnverifiedBestScore === undefined ? undefined : round(engine.metrics.rustWasmUnverifiedBestScore),
-            validRate: round(engine.validCandidates / Math.max(1, engine.attempts), 4),
             attempts: engine.attempts,
-            valid: engine.validCandidates,
-            invalid: engine.invalidCandidates,
+            admittedIndividuals: engine.validCandidates,
+            fabricationAttempts,
+            uniqueFabricationProposals: engine.metrics.uniqueFabricationProposals ?? fabricationAttempts,
+            duplicateFabricationProposals: engine.metrics.duplicateFabricationProposals ?? 0,
+            discardedProposals,
+            projectionRepairs: engine.metrics.projectionRepairs ?? 0,
+            factoryExhaustions: engine.metrics.factoryExhaustions ?? 0,
             metrics: engine.metrics,
           };
         });
         const scores = rows.map((row) => row.score).sort((left, right) => left - right);
-        const validRates = rows.map((row) => row.validRate).sort((left, right) => left - right);
         const elapsedMs = performance.now() - groupStart;
         console.log(JSON.stringify({
           scenario: scenario.id,
@@ -164,8 +169,12 @@ for (const scenario of selectedScenarios) {
           attemptsPerSecond: round(rows.reduce((total, row) => total + row.attempts, 0) / Math.max(0.001, elapsedMs / 1_000)),
           scores,
           medianScore: scores[Math.floor(scores.length / 2)] ?? 0,
-          validRates,
-          medianValidRate: validRates[Math.floor(validRates.length / 2)] ?? 0,
+          fabricationAttempts: rows.reduce((total, row) => total + row.fabricationAttempts, 0),
+          uniqueFabricationProposals: rows.reduce((total, row) => total + row.uniqueFabricationProposals, 0),
+          duplicateFabricationProposals: rows.reduce((total, row) => total + row.duplicateFabricationProposals, 0),
+          discardedProposals: rows.reduce((total, row) => total + row.discardedProposals, 0),
+          projectionRepairs: rows.reduce((total, row) => total + row.projectionRepairs, 0),
+          factoryExhaustions: rows.reduce((total, row) => total + row.factoryExhaustions, 0),
           rows,
         }));
       }

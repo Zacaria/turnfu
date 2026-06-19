@@ -41,6 +41,8 @@ test("creates launch args for the validated Continuous quality preset", () => {
     "10",
     "--chunk-size",
     "50000",
+    "--progress-interval-ms",
+    "2000",
     "--score-criterion",
     "total-damage",
     "--resource-aware-fresh-chance",
@@ -72,6 +74,8 @@ test("creates launch args for a custom sustainable air Continuous run", () => {
     "10",
     "--chunk-size",
     "50000",
+    "--progress-interval-ms",
+    "2000",
     "--score-criterion",
     "element-damage",
     "--target-element",
@@ -119,14 +123,16 @@ test("creates a page view model with best combos and learned evidence separated"
       id: "session-a",
       status: "running",
       totalAttempts: 1_000_000,
-      validRate: 0.71,
+      admittedIndividuals: 710_000,
+      discardedProposals: 290_000,
+      fabricationAttempts: 1_000_000,
       bestScore: 143_582.03,
       workerCount: 6,
       updatedAt: "2026-06-17T12:00:00.000Z",
     },
     checkpoints: [
-      { totalAttempts: 500_000, score: 120_000, validRate: 0.7 },
-      { totalAttempts: 1_000_000, score: 143_582.03, validRate: 0.71 },
+      { totalAttempts: 500_000, score: 120_000, admittedIndividuals: 350_000, discardedProposals: 150_000, fabricationAttempts: 500_000 },
+      { totalAttempts: 1_000_000, score: 143_582.03, admittedIndividuals: 710_000, discardedProposals: 290_000, fabricationAttempts: 1_000_000 },
     ],
     reuseTrials: [
       { label: "rotate-turn-actions", sourceScore: 143_000, resultScore: 144_000, improvedGlobalBest: true },
@@ -140,6 +146,8 @@ test("creates a page view model with best combos and learned evidence separated"
   assert.equal(view.qualityPresetLabel, "Validated contextual");
   assert.equal(view.launchArgs.includes("--contextual-adjacent-swaps"), true);
   assert.equal(view.bestCombos.bestScore, 143_582.03);
+  assert.equal(view.bestCombos.admittedIndividuals, 710_000);
+  assert.equal(view.bestCombos.discardedProposals, 290_000);
   assert.equal(view.bestCombos.checkpoints.length, 2);
   assert.equal(view.learnedEvidence.reuseTrials[0].label, "rotate-turn-actions");
   assert.equal(view.learnedEvidence.motifs[0].label, "cycle>light");
@@ -151,7 +159,7 @@ test("streams startup and heartbeat events before checkpoint progress", async ()
   const body = [
     "event: started\ndata: {\"command\":\"node\"}",
     "event: heartbeat\ndata: {\"elapsedMs\":1200}",
-    "event: progress\ndata: {\"totalAttempts\":500000,\"score\":42,\"validRate\":0.2}",
+    "event: progress\ndata: {\"totalAttempts\":500000,\"score\":42,\"admittedIndividuals\":100000,\"discardedProposals\":400000,\"fabricationAttempts\":500000}",
     "event: complete\ndata: {\"code\":0}",
   ].join("\n\n") + "\n\n";
 
