@@ -143,6 +143,9 @@ const motifSeedsEnabled = process.argv.includes("--motif-seeds");
 const motifSeedsPerWorker = readIntegerOption("--motif-seeds-per-worker", 1);
 const resourceAwareFreshChance = readOptionalNumberOption("--resource-aware-fresh-chance");
 const contextualAdjacentSwapsEnabled = process.argv.includes("--contextual-adjacent-swaps");
+const globalValidityGuidanceRequested = process.argv.includes("--global-validity-guidance");
+const globalValidityGuidanceDisabled = process.argv.includes("--disable-global-validity-guidance");
+const globalValidityGuidanceEnabled = globalValidityGuidanceRequested && !globalValidityGuidanceDisabled;
 const learnedLoadoutPriorEnabled = process.argv.includes("--learned-loadout-prior");
 const learnedActionSetPriorEnabled = process.argv.includes("--learned-action-set-prior");
 const plateauOrderChainNeighborsEnabled = process.argv.includes("--plateau-order-chain-neighbors");
@@ -281,6 +284,9 @@ if (resourceAwareFreshChance !== undefined) {
 if (contextualAdjacentSwapsEnabled) {
   baseRequest.hybridContextualAdjacentSwaps = true;
 }
+if (globalValidityGuidanceEnabled) {
+  baseRequest.hybridGlobalValidityGuidance = true;
+}
 const fingerprint = createFingerprint({
   algorithm: "rust-wasm-resume-v2-empty-cell-target-rules",
   scenario,
@@ -406,6 +412,7 @@ while (!stopRequested) {
       seed: `${baseRequest.seed}:worker:${workerIndex}`,
       iterations: chunkSize,
       hybridContextualAdjacentSwaps: contextualAdjacentSwapsEnabled,
+      hybridGlobalValidityGuidance: globalValidityGuidanceEnabled,
       hybridPlateauOrderChainNeighbors: plateauModeActive,
       seedCandidates: seedCandidates.length > 0 ? seedCandidates : undefined,
       resumeState,
@@ -482,6 +489,12 @@ while (!stopRequested) {
     score: round(bestCandidate?.score.score ?? 0),
     resourceAwareFreshChance: baseRequest.hybridResourceAwareFreshChance ?? 0.12,
     contextualAdjacentSwapsEnabled,
+    globalValidityGuidanceEnabled,
+    globalValidityGuidedCandidates: metrics.hybridGlobalValidityGuidedCandidates ?? 0,
+    globalValidityGuidedValidCandidates: metrics.hybridGlobalValidityGuidedValidCandidates ?? 0,
+    globalValidityGuidedInvalidCandidates: metrics.hybridGlobalValidityGuidedInvalidCandidates ?? 0,
+    globalValidityGuidedFallbackActions: metrics.hybridGlobalValidityGuidedFallbackActions ?? 0,
+    globalValidityPlanSignatures: metrics.hybridGlobalValidityPlanSignatures ?? 0,
     learnedLoadoutPriorEnabled,
     learnedActionSetPriorEnabled,
     plateauOrderChainNeighborsEnabled,
