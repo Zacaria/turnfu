@@ -414,6 +414,7 @@ function createInitialTurnState(
     actionLog: [],
     turnEndEffects: [],
     resourceCarryover: {},
+    statCarryover: {},
     sublimationElementalCarryover: { ...character.sublimationElementalCarryover },
     sublimationDamageElementsThisTurn: [],
     sublimationAlternancePreviousElement: character.sublimationAlternancePreviousElement ?? null,
@@ -433,6 +434,7 @@ function applyTurnEnd(state: TurnState, sublimationStacks: EffectiveSublimationS
   let nextResources = state.remainingResources;
   let nextHuppermageState = huppermageState;
   let nextStats = state.currentStats;
+  let statCarryover: TurnState["statCarryover"] = {};
   let nextClassState = state.classState;
   let amount = 0;
   const activeRuneCount = getActiveRuneCount(huppermageState);
@@ -453,7 +455,8 @@ function applyTurnEnd(state: TurnState, sublimationStacks: EffectiveSublimationS
   }
 
   if (huppermageState.activePassives.includes("universalite") && activeRuneCount > 0) {
-    nextStats = applyUniversaliteStats(nextStats, activeRunes);
+    statCarryover = getUniversaliteStatCarryover(activeRunes);
+    nextStats = applyStatCarryover(nextStats, statCarryover);
     nextResources = addResource(nextResources, "bq", activeRuneCount * -50);
   }
 
@@ -503,6 +506,7 @@ function applyTurnEnd(state: TurnState, sublimationStacks: EffectiveSublimationS
     currentStats: nextStats,
     turnEndEffects,
     resourceCarryover: carryoverApplication.resourceCarryover,
+    statCarryover,
   };
 }
 
@@ -551,37 +555,54 @@ function getStackEffects(stack: EffectiveSublimationStack): SublimationEffect[] 
   return stack.entries[0]?.effects ?? [];
 }
 
-function applyUniversaliteStats(stats: BaseStats, activeRunes: Record<Rune, boolean>): BaseStats {
-  let nextStats = stats;
+function getUniversaliteStatCarryover(activeRunes: Record<Rune, boolean>): TurnState["statCarryover"] {
+  const carryover: TurnState["statCarryover"] = {};
 
   if (activeRunes.incandescent) {
-    nextStats = {
-      ...nextStats,
-      damageInflictedPercent: nextStats.damageInflictedPercent + 15,
-    };
+    carryover.damageInflictedPercent = 15;
   }
 
   if (activeRunes.aquatic) {
-    nextStats = {
-      ...nextStats,
-      healsPerformedPercent: (nextStats.healsPerformedPercent ?? 0) + 15,
-    };
+    carryover.healsPerformedPercent = 15;
   }
 
   if (activeRunes.telluric) {
-    nextStats = {
-      ...nextStats,
-      elementalResistance: (nextStats.elementalResistance ?? 0) + 75,
-    };
+    carryover.elementalResistance = 75;
   }
 
   if (activeRunes.aerial) {
-    nextStats = {
-      ...nextStats,
-      range: (nextStats.range ?? 0) + 2,
-    };
+    carryover.range = 2;
   }
 
+  return carryover;
+}
+
+function applyStatCarryover(stats: BaseStats, carryover: TurnState["statCarryover"]): BaseStats {
+  let nextStats = stats;
+  if (carryover.damageInflictedPercent !== undefined) {
+    nextStats = {
+      ...nextStats,
+      damageInflictedPercent: nextStats.damageInflictedPercent + carryover.damageInflictedPercent,
+    };
+  }
+  if (carryover.healsPerformedPercent !== undefined) {
+    nextStats = {
+      ...nextStats,
+      healsPerformedPercent: (nextStats.healsPerformedPercent ?? 0) + carryover.healsPerformedPercent,
+    };
+  }
+  if (carryover.elementalResistance !== undefined) {
+    nextStats = {
+      ...nextStats,
+      elementalResistance: (nextStats.elementalResistance ?? 0) + carryover.elementalResistance,
+    };
+  }
+  if (carryover.range !== undefined) {
+    nextStats = {
+      ...nextStats,
+      range: (nextStats.range ?? 0) + carryover.range,
+    };
+  }
   return nextStats;
 }
 

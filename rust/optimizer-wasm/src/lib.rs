@@ -5693,6 +5693,35 @@ pub fn apply_turn_end_bq(
     }
 }
 
+fn collect_universalite_stat_carryover(state: &HuppermageState) -> BaseStats {
+    let mut carryover = BaseStats::default();
+    if !has_passive(state, "universalite") {
+        return carryover;
+    }
+
+    if state.runes.active.incandescent {
+        carryover.damage_inflicted_percent += 15.0;
+    }
+    if state.runes.active.aquatic {
+        carryover.heals_performed_percent += 15.0;
+    }
+    if state.runes.active.telluric {
+        carryover.elemental_resistance += 75.0;
+    }
+    if state.runes.active.aerial {
+        carryover.range += 2.0;
+    }
+
+    carryover
+}
+
+fn apply_stat_carryover(stats: &mut BaseStats, carryover: &BaseStats) {
+    stats.damage_inflicted_percent += carryover.damage_inflicted_percent;
+    stats.heals_performed_percent += carryover.heals_performed_percent;
+    stats.elemental_resistance += carryover.elemental_resistance;
+    stats.range += carryover.range;
+}
+
 pub fn apply_initial_passive_effects(
     mut stats: BaseStats,
     mut resources: ResourcePool,
@@ -8598,10 +8627,13 @@ fn evaluate_candidate_with_catalog_inner<'a>(
     let mut action_ordinal = 0_u32;
     let mut last_turn_casts_by_spell_id = BTreeMap::new();
     let mut final_sublimation_resource_carryover = ResourcePool::default();
+    let mut stat_carryover = BaseStats::default();
 
     for (turn_index, turn) in candidate.plan.turns.iter().enumerate() {
         let mut turn_damage = 0.0;
         let mut turn_stats = base_stats.clone();
+        apply_stat_carryover(&mut turn_stats, &stat_carryover);
+        stat_carryover = BaseStats::default();
         let mut casts_by_spell_id = BTreeMap::new();
         let mut target_casts_by_spell_id = BTreeMap::new();
 
@@ -8873,6 +8905,9 @@ fn evaluate_candidate_with_catalog_inner<'a>(
             if active_rune_count > 0 {
                 huppermage = add_abundance(huppermage, (active_rune_count as i32) * 15).state;
             }
+        }
+        if turn_index + 1 < candidate.plan.turns.len() {
+            stat_carryover = collect_universalite_stat_carryover(&huppermage);
         }
         if has_passive(&huppermage, "dynamo") {
             huppermage.runes.active = RuneTracker::default();
@@ -10223,6 +10258,47 @@ mod tests {
                 },
             })
         );
+    }
+
+    #[test]
+    fn carries_universalite_turn_end_damage_bonus_to_next_turn() {
+        let mut request = transformation_request();
+        request.character["resources"] = serde_json::json!({"ap":6,"mp":3,"wp":2,"bq":500});
+        request.character["classState"] = serde_json::json!({
+            "huppermage": {
+                "runes": { "active": { "incandescent": true } },
+                "runeApGainsThisTurn": {},
+                "abundanceLevel": 0,
+                "feuFolletsActive": 0,
+                "feuFolletStoredRunes": [],
+                "feuFolletStoredLastRunes": [],
+                "usedSpellIds": [],
+                "activePassives": [],
+                "bqMax": 500,
+                "storedBq": 0,
+                "deckSpellLimit": 12,
+                "passiveLimit": 6
+            }
+        });
+        let candidate = OptimizerCandidateInput {
+            passive_ids: vec!["universalite".to_string()],
+            sublimation_ids: vec![],
+            plan: CandidatePlan {
+                turns: vec![
+                    CandidateTurn { actions: vec![] },
+                    CandidateTurn {
+                        actions: vec![action("hit")],
+                    },
+                ],
+            },
+            source_label: None,
+        };
+
+        let evaluation = evaluate_candidate(&request, &candidate, "candidate:universalite")
+            .expect("candidate should evaluate");
+
+        assert!(evaluation.valid, "{evaluation:?}");
+        assert_eq!(evaluation.total_damage, 23.0);
     }
 
     #[test]
