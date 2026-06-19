@@ -6387,9 +6387,6 @@ fn apply_heart_stats(
     heart: &HuppermageHeart,
     state: &HuppermageState,
 ) -> BaseStats {
-    if !has_passive(state, "altruisme-de-lame") {
-        stats.damage_inflicted_percent += 30.0;
-    }
     stats.heals_performed_percent += if has_passive(state, "altruisme-de-lame") {
         30.0
     } else {
@@ -13244,6 +13241,40 @@ mod tests {
         let state = apply_coeur_de_lumiere(state).expect("heart should activate");
 
         assert_eq!(state.active_heart, Some(HuppermageHeart::Water));
+    }
+
+    #[test]
+    fn coeur_de_lumiere_converts_best_mastery_without_damage_inflicted_bonus() {
+        let state = create_huppermage_state(
+            ResourcePool {
+                ap: 12.0,
+                mp: 6.0,
+                wp: 6.0,
+                bq: 500.0,
+            },
+            vec![],
+        );
+        let stats = BaseStats {
+            damage_inflicted_percent: 10.0,
+            heals_performed_percent: 0.0,
+            elemental_mastery: ElementalMastery {
+                fire: 50.0,
+                water: 0.0,
+                earth: 100.0,
+                air: 0.0,
+                light: 200.0,
+                neutral: 0.0,
+            },
+            ..BaseStats::default()
+        };
+
+        let result = apply_heart_stats(stats, &HuppermageHeart::Fire, &state);
+
+        assert_eq!(result.damage_inflicted_percent, 10.0);
+        assert_eq!(result.heals_performed_percent, 15.0);
+        assert_eq!(result.elemental_mastery.fire, 240.0);
+        assert_eq!(result.elemental_mastery.earth, 100.0);
+        assert_eq!(result.elemental_mastery.light, 200.0);
     }
 
     #[test]
