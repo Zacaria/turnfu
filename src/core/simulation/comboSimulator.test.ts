@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { cooldownTurns, cost, damage, normalizeCatalog, resourceDelta, screenshot, spell } from "../catalog/index.ts";
+import { cooldownTurns, cost, damage, normalizeCatalog, passive, resourceDelta, screenshot, spell } from "../catalog/index.ts";
 import { createResources, simulateCombo } from "./index.ts";
 import type { CatalogEntry } from "../catalog/types.ts";
 import type { SimulatedCharacter } from "./types.ts";
@@ -68,6 +68,13 @@ const catalog = normalizeCatalog([
     cost: cost({ ap: 1 }),
     effects: [damage({ element: "light", base: 10 })],
     constraints: [cooldownTurns(2)],
+    metadata: { status: "extracted", sources: [source] },
+  }),
+  passive("universalite", {
+    name: "Universalite",
+    level: 110,
+    effects: [],
+    constraints: [],
     metadata: { status: "extracted", sources: [source] },
   }),
 ]) as CatalogEntry[];
@@ -175,6 +182,34 @@ test("carries secondary elemental sublimation damage into the next turn", () => 
   assert.equal(result.turns[0].result.finalState.sublimationElementalCarryover.fire, 8);
   assert.equal(result.turns[1].initialCharacter.sublimationElementalCarryover?.fire, 8);
   assert.equal(result.turns[1].result.breakdown[0].damage, 10.8);
+});
+
+test("carries Universalite turn-end stat bonuses into the next turn", () => {
+  const result = simulateCombo({
+    catalog,
+    character: {
+      ...character,
+      resources: createResources({ ap: 6, mp: 3, wp: 2, bq: 500 }),
+      classState: {
+        huppermage: {
+          activePassives: ["universalite"],
+          runes: { incandescent: true },
+        },
+      },
+    },
+    combo: {
+      turns: [
+        { actions: [] },
+        { actions: [{ spellId: "fire-rune" }] },
+      ],
+    },
+  });
+
+  assert.equal(result.valid, true);
+  assert.equal(result.turns[0].result.finalState.statCarryover.damageInflictedPercent, 15);
+  assert.equal(result.turns[1].initialCharacter.stats.damageInflictedPercent, 15);
+  assert.equal(result.turns[1].result.breakdown[0].statsBefore.damageInflictedPercent, 15);
+  assert.equal(result.turns[1].result.breakdown[0].damage, 11.5);
 });
 
 test("carries persistent Huppermage state and expires active Heart between turns", () => {

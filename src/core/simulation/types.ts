@@ -92,6 +92,11 @@ export type BaseStats = {
   indirectDamagePercent?: number;
 };
 
+export type StatCarryover = Partial<Pick<
+  BaseStats,
+  "damageInflictedPercent" | "healsPerformedPercent" | "elementalResistance" | "range"
+>>;
+
 export type SimulatedCharacter = {
   id: string;
   className: "huppermage";
@@ -317,6 +322,7 @@ export type TurnState = {
   actionLog: ActionResult[];
   turnEndEffects: AppliedEffect[];
   resourceCarryover: Partial<ResourcePool>;
+  statCarryover: StatCarryover;
   sublimationElementalCarryover: ElementalCarryoverState;
   sublimationDamageElementsThisTurn: Element[];
   sublimationAlternancePreviousElement: Element | null;

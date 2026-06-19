@@ -80,13 +80,42 @@ function createNextTurnCharacter(baseCharacter: SimulatedCharacter, previousFina
   return {
     ...baseCharacter,
     resources,
-    stats: cloneStats(baseCharacter.stats),
+    stats: applyStatCarryover(cloneStats(baseCharacter.stats), previousFinalState.statCarryover),
     sublimationElementalCarryover: { ...previousFinalState.sublimationElementalCarryover },
     sublimationSpellCountCarryover: cloneSpellCountCarryover(previousFinalState.sublimationSpellCountCarryover),
     sublimationAlternancePreviousElement: previousFinalState.sublimationAlternancePreviousElement,
     sublimationSpentResourcesThisTurn: {},
     classState: createNextClassState(previousFinalState),
   };
+}
+
+function applyStatCarryover(stats: BaseStats, carryover: TurnState["statCarryover"]): BaseStats {
+  let nextStats = stats;
+  if (carryover.damageInflictedPercent !== undefined) {
+    nextStats = {
+      ...nextStats,
+      damageInflictedPercent: nextStats.damageInflictedPercent + carryover.damageInflictedPercent,
+    };
+  }
+  if (carryover.healsPerformedPercent !== undefined) {
+    nextStats = {
+      ...nextStats,
+      healsPerformedPercent: (nextStats.healsPerformedPercent ?? 0) + carryover.healsPerformedPercent,
+    };
+  }
+  if (carryover.elementalResistance !== undefined) {
+    nextStats = {
+      ...nextStats,
+      elementalResistance: (nextStats.elementalResistance ?? 0) + carryover.elementalResistance,
+    };
+  }
+  if (carryover.range !== undefined) {
+    nextStats = {
+      ...nextStats,
+      range: (nextStats.range ?? 0) + carryover.range,
+    };
+  }
+  return nextStats;
 }
 
 function createNextClassState(previousFinalState: TurnState): SimulatedCharacter["classState"] {
