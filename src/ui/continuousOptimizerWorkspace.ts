@@ -20,7 +20,9 @@ export type ContinuousOptimizerSessionSummary = {
   id: string;
   status: ContinuousOptimizerStatus;
   totalAttempts: number;
-  validRate: number;
+  admittedIndividuals: number;
+  discardedProposals: number;
+  fabricationAttempts: number;
   bestScore: number | null;
   workerCount: number;
   updatedAt: string | null;
@@ -29,7 +31,9 @@ export type ContinuousOptimizerSessionSummary = {
 export type ContinuousOptimizerCheckpointSummary = {
   totalAttempts: number;
   score: number;
-  validRate: number;
+  admittedIndividuals: number;
+  discardedProposals: number;
+  fabricationAttempts: number;
 };
 
 export type ContinuousOptimizerReuseTrialSummary = {
@@ -49,9 +53,14 @@ export type ContinuousOptimizerMotifSummary = {
 export type ContinuousOptimizerRunProgress = {
   totalAttempts: number;
   score: number;
-  validRate: number;
+  admittedIndividuals?: number;
+  discardedProposals?: number;
+  fabricationAttempts?: number;
+  projectionRepairs?: number;
+  factoryExhaustions?: number;
   validCandidates?: number;
   invalidCandidates?: number;
+  validRate?: number;
   attemptsPerSecond?: number;
 };
 
@@ -76,7 +85,9 @@ export type ContinuousOptimizerPageViewModel = {
   bestCombos: {
     bestScore: number | null;
     totalAttempts: number;
-    validRate: number;
+    admittedIndividuals: number;
+    discardedProposals: number;
+    fabricationAttempts: number;
     checkpoints: ContinuousOptimizerCheckpointSummary[];
   };
   learnedEvidence: {
@@ -137,7 +148,9 @@ export function createContinuousOptimizerPageViewModel(
     bestCombos: {
       bestScore: input.session?.bestScore ?? null,
       totalAttempts: input.session?.totalAttempts ?? 0,
-      validRate: input.session?.validRate ?? 0,
+      admittedIndividuals: input.session?.admittedIndividuals ?? 0,
+      discardedProposals: input.session?.discardedProposals ?? 0,
+      fabricationAttempts: input.session?.fabricationAttempts ?? input.session?.totalAttempts ?? 0,
       checkpoints: input.checkpoints.slice().sort((left, right) => left.totalAttempts - right.totalAttempts),
     },
     learnedEvidence: {
@@ -166,6 +179,8 @@ export function createContinuousOptimizerLaunchArgs(controls: ContinuousOptimize
     String(normalized.workerCount),
     "--chunk-size",
     String(normalized.chunkSize),
+    "--progress-interval-ms",
+    "2000",
     "--score-criterion",
     normalized.scoreCriterion,
   ];

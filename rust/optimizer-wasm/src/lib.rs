@@ -842,6 +842,21 @@ pub struct HybridPopulationEntry {
     pub valid: bool,
 }
 
+impl HybridPopulationEntry {
+    fn valid(id: String, candidate: OptimizerCandidateInput, score: f64) -> Self {
+        Self {
+            id,
+            candidate,
+            score,
+            valid: true,
+        }
+    }
+
+    fn is_admitted_valid(&self) -> bool {
+        self.valid && self.score.is_finite()
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct HybridImmigrant {
@@ -1268,6 +1283,7 @@ pub fn create_hybrid_population_config(iterations: u32) -> HybridPopulationConfi
 }
 
 pub fn rank_population(mut population: Vec<HybridPopulationEntry>) -> Vec<HybridPopulationEntry> {
+    population.retain(HybridPopulationEntry::is_admitted_valid);
     population.sort_by(compare_population_entries);
     population
 }
@@ -1279,7 +1295,7 @@ pub fn truncate_population(
     rank_population(
         population
             .into_iter()
-            .filter(|entry| entry.valid && entry.score.is_finite())
+            .filter(HybridPopulationEntry::is_admitted_valid)
             .collect(),
     )
     .into_iter()
@@ -6928,6 +6944,147 @@ struct HybridSearchAccumulator {
     resume_state: Option<HybridIslandResumeState>,
 }
 
+struct HybridProgressSink<'a> {
+    #[cfg(target_arch = "wasm32")]
+    callback: Option<&'a js_sys::Function>,
+    #[cfg(not(target_arch = "wasm32"))]
+    _marker: std::marker::PhantomData<&'a ()>,
+    interval_attempts: u32,
+    next_attempt: u32,
+    completed_attempts: u32,
+    completed_valid_candidates: u32,
+    completed_invalid_candidates: u32,
+    completed_population_size: u32,
+    completed_top_candidates: Vec<ScoredTopCandidateEntry>,
+    completed_metrics: BTreeMap<String, u32>,
+}
+
+impl<'a> HybridProgressSink<'a> {
+    fn disabled() -> Self {
+        Self {
+            #[cfg(target_arch = "wasm32")]
+            callback: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            _marker: std::marker::PhantomData,
+            interval_attempts: 0,
+            next_attempt: u32::MAX,
+            completed_attempts: 0,
+            completed_valid_candidates: 0,
+            completed_invalid_candidates: 0,
+            completed_population_size: 0,
+            completed_top_candidates: Vec::new(),
+            completed_metrics: BTreeMap::new(),
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn enabled(callback: &'a js_sys::Function, interval_attempts: u32) -> Self {
+        Self {
+            callback: Some(callback),
+            interval_attempts: interval_attempts.max(1),
+            next_attempt: interval_attempts.max(1),
+            completed_attempts: 0,
+            completed_valid_candidates: 0,
+            completed_invalid_candidates: 0,
+            completed_population_size: 0,
+            completed_top_candidates: Vec::new(),
+            completed_metrics: BTreeMap::new(),
+        }
+    }
+
+    fn set_completed(
+        &mut self,
+        attempts: u32,
+        valid_candidates: u32,
+        invalid_candidates: u32,
+        population_size: u32,
+        top_candidates: &[ScoredTopCandidateEntry],
+        metrics: &BTreeMap<String, u32>,
+    ) {
+        self.completed_attempts = attempts;
+        self.completed_valid_candidates = valid_candidates;
+        self.completed_invalid_candidates = invalid_candidates;
+        self.completed_population_size = population_size;
+        self.completed_top_candidates = top_candidates.to_vec();
+        self.completed_metrics = metrics.clone();
+        while self.next_attempt <= self.completed_attempts {
+            self.next_attempt = self.next_attempt.saturating_add(self.interval_attempts.max(1));
+        }
+    }
+
+    fn maybe_emit(
+        &mut self,
+        request: &OptimizerRequest,
+        accumulator: &HybridSearchAccumulator,
+        population: &[HybridPopulationEntry],
+        max_candidates: usize,
+        force: bool,
+    ) -> Result<(), String> {
+        if self.interval_attempts == 0 {
+            return Ok(());
+        }
+
+        let attempts = self.completed_attempts + accumulator.attempts;
+        if !force && attempts < self.next_attempt {
+            return Ok(());
+        }
+        while self.next_attempt <= attempts {
+            self.next_attempt = self.next_attempt.saturating_add(self.interval_attempts.max(1));
+        }
+
+        let mut metrics = self.completed_metrics.clone();
+        merge_metric_maps(&mut metrics, accumulator.metrics.clone());
+        metrics.insert(
+            "populationSize".to_string(),
+            self.completed_population_size + population.len() as u32,
+        );
+
+        let mut top_candidates = self.completed_top_candidates.clone();
+        for candidate in accumulator.top_candidates.iter().cloned() {
+            add_scored_top_candidate(&mut top_candidates, max_candidates, candidate);
+        }
+
+        let snapshot = HybridSearchResponse {
+            schema_version: request.schema_version,
+            backend: "rustWasm".to_string(),
+            supported: true,
+            engine: request.engine.clone(),
+            seed: request.seed.clone(),
+            attempts,
+            valid_candidates: self.completed_valid_candidates + accumulator.valid_candidates,
+            invalid_candidates: self.completed_invalid_candidates + accumulator.invalid_candidates,
+            top_candidates,
+            metrics,
+            seed_candidate_evaluations: Vec::new(),
+            resume_state: None,
+        };
+
+        self.emit_snapshot(&snapshot)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn emit_snapshot(&self, snapshot: &HybridSearchResponse) -> Result<(), String> {
+        let Some(callback) = self.callback else {
+            return Ok(());
+        };
+        let payload = serde_json::to_string(snapshot)
+            .map_err(|error| format!("Failed to serialize Rust hybrid progress: {error}"))?;
+        callback
+            .call1(&JsValue::NULL, &JsValue::from_str(&payload))
+            .map(|_| ())
+            .map_err(|error| {
+                error
+                    .as_string()
+                    .unwrap_or_else(|| "Rust hybrid progress callback failed.".to_string())
+            })
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn emit_snapshot(&self, _snapshot: &HybridSearchResponse) -> Result<(), String> {
+        Ok(())
+    }
+}
+
 struct HybridTrackedEvaluation {
     population_entry: Option<HybridPopulationEntry>,
     improved: bool,
@@ -6953,10 +7110,10 @@ impl DirectEvaluatorCache {
 
     fn get(&mut self, key: u128) -> Option<CandidateEvaluationResult> {
         if let Some(cached) = self.entries.get(&key).cloned() {
-            self.metrics.cache_hits += 1;
+            self.metrics.cache_hits = self.metrics.cache_hits.saturating_add(1);
             Some(cached)
         } else {
-            self.metrics.cache_misses += 1;
+            self.metrics.cache_misses = self.metrics.cache_misses.saturating_add(1);
             None
         }
     }
@@ -6969,7 +7126,8 @@ impl DirectEvaluatorCache {
             while self.entries.len() >= self.limit {
                 if let Some(oldest_key) = self.order.pop_front() {
                     if self.entries.remove(&oldest_key).is_some() {
-                        self.metrics.cache_evictions += 1;
+                        self.metrics.cache_evictions =
+                            self.metrics.cache_evictions.saturating_add(1);
                         break;
                     }
                 } else {
@@ -6990,7 +7148,8 @@ fn increment_metric(metrics: &mut BTreeMap<String, u32>, key: &str, amount: u32)
     if amount == 0 {
         return;
     }
-    *metrics.entry(key.to_string()).or_insert(0) += amount;
+    let value = metrics.entry(key.to_string()).or_insert(0);
+    *value = value.saturating_add(amount);
 }
 
 fn merge_metric_maps(target: &mut BTreeMap<String, u32>, source: BTreeMap<String, u32>) {
@@ -7004,6 +7163,7 @@ fn create_hybrid_fresh_candidate(
     catalog: &[SearchCatalogEntry],
     actions: &[CandidateAction],
     rng: &mut SeededRandom,
+    fabrication_temperature: u32,
     warmup_candidates: &[OptimizerCandidateInput],
     request_seed_warmup_count: usize,
     warmup_index: &mut usize,
@@ -7020,7 +7180,11 @@ fn create_hybrid_fresh_candidate(
         return candidate.clone();
     }
 
-    if rng.chance(get_hybrid_resource_aware_fresh_chance(request)) {
+    if fabrication_temperature >= 2 {
+        increment_metric(metrics, "factoryFallbacks", 1);
+        increment_metric(metrics, "hybridResourceAwareCandidates", 1);
+        create_resource_aware_candidate(request, catalog, actions, rng)
+    } else if rng.chance(get_hybrid_resource_aware_fresh_chance(request)) {
         increment_metric(metrics, "hybridResourceAwareCandidates", 1);
         create_resource_aware_candidate(request, catalog, actions, rng)
     } else {
@@ -7047,17 +7211,34 @@ fn create_hybrid_offspring_candidate(
     actions: &[CandidateAction],
     population: &[HybridPopulationEntry],
     rng: &mut SeededRandom,
+    fabrication_temperature: u32,
     warmup_candidates: &[OptimizerCandidateInput],
     request_seed_warmup_count: usize,
     warmup_index: &mut usize,
     metrics: &mut BTreeMap<String, u32>,
 ) -> Result<OptimizerCandidateInput, String> {
+    if fabrication_temperature >= 2 && rng.chance(0.28) {
+        increment_metric(metrics, "factoryFallbacks", 1);
+        return Ok(create_hybrid_fresh_candidate(
+            request,
+            catalog,
+            actions,
+            rng,
+            fabrication_temperature,
+            warmup_candidates,
+            request_seed_warmup_count,
+            warmup_index,
+            metrics,
+        ));
+    }
+
     if rng.chance(0.18) {
         return Ok(create_hybrid_fresh_candidate(
             request,
             catalog,
             actions,
             rng,
+            fabrication_temperature,
             warmup_candidates,
             request_seed_warmup_count,
             warmup_index,
@@ -7074,7 +7255,11 @@ fn create_hybrid_offspring_candidate(
         &parent_b.candidate,
         rng,
     )?;
-    mutate_candidate_with_catalog(request, catalog, actions, &child, rng)
+    let mut child = mutate_candidate_with_catalog(request, catalog, actions, &child, rng)?;
+    for _index in 0..fabrication_temperature.min(2) {
+        child = mutate_candidate_with_catalog(request, catalog, actions, &child, rng)?;
+    }
+    Ok(child)
 }
 
 fn should_skip_hybrid_elite_neighbor(
@@ -7143,6 +7328,7 @@ fn evaluate_and_track_hybrid_candidate(
     let previous_best = accumulator.top_candidates.first().cloned();
 
     accumulator.attempts += 1;
+    increment_metric(&mut accumulator.metrics, "fabricationAttempts", 1);
     increment_metric(&mut accumulator.metrics, "rustWasmGeneratedCandidates", 1);
     increment_metric(&mut accumulator.metrics, "rustWasmCandidateEvaluations", 1);
 
@@ -7199,18 +7385,18 @@ fn evaluate_and_track_hybrid_candidate(
                 );
             }
             return Ok(HybridTrackedEvaluation {
-                population_entry: Some(HybridPopulationEntry {
+                population_entry: Some(HybridPopulationEntry::valid(
                     id,
                     candidate,
-                    score: score.score + causal_bonus,
-                    valid: true,
-                }),
+                    score.score + causal_bonus,
+                )),
                 improved,
                 repair_candidate: None,
             });
         }
     } else {
         accumulator.invalid_candidates += 1;
+        increment_metric(&mut accumulator.metrics, "discardedProposals", 1);
     }
 
     if let Some(source_label) = source_label {
@@ -7223,12 +7409,223 @@ fn evaluate_and_track_hybrid_candidate(
         );
     }
 
+    if evaluation.valid {
+        increment_metric(&mut accumulator.metrics, "discardedProposals", 1);
+    }
+
     let repair_candidate = create_repair_candidate_from_evaluation(&candidate, &evaluation);
     Ok(HybridTrackedEvaluation {
         population_entry: None,
         improved: false,
         repair_candidate,
     })
+}
+
+fn normalize_hybrid_proposal_for_admission(
+    request: &OptimizerRequest,
+    catalog: &[SearchCatalogEntry],
+    proposal: OptimizerCandidateInput,
+) -> (OptimizerCandidateInput, u128) {
+    let mut candidate = normalize_candidate(proposal);
+    apply_locked_loadout(request, catalog, &mut candidate);
+    let candidate_hash = hash_candidate(&candidate);
+    (candidate, candidate_hash)
+}
+
+const DEFAULT_HYBRID_PROPOSAL_CACHE_LIMIT: usize = 250_000;
+
+#[derive(Clone, Debug)]
+struct HybridValidIndividualFactory {
+    temperature: u32,
+    consecutive_failures: u32,
+    attempted_proposal_hashes: HashSet<u128>,
+    attempted_proposal_order: VecDeque<u128>,
+    proposal_cache_limit: usize,
+}
+
+impl Default for HybridValidIndividualFactory {
+    fn default() -> Self {
+        Self::new(DEFAULT_HYBRID_PROPOSAL_CACHE_LIMIT)
+    }
+}
+
+impl HybridValidIndividualFactory {
+    fn new(proposal_cache_limit: usize) -> Self {
+        Self {
+            temperature: 0,
+            consecutive_failures: 0,
+            attempted_proposal_hashes: HashSet::new(),
+            attempted_proposal_order: VecDeque::new(),
+            proposal_cache_limit,
+        }
+    }
+}
+
+impl HybridValidIndividualFactory {
+    fn child_attempt_budget(&self, remaining_attempts: u32) -> u32 {
+        remaining_attempts.min(1 + self.temperature.min(2))
+    }
+
+    fn record_success(&mut self, metrics: &mut BTreeMap<String, u32>) {
+        self.consecutive_failures = 0;
+        if self.temperature > 0 {
+            self.temperature -= 1;
+            increment_metric(metrics, "factoryTemperatureDecreases", 1);
+        }
+    }
+
+    fn record_failure(&mut self, metrics: &mut BTreeMap<String, u32>) {
+        self.consecutive_failures += 1;
+        let next_temperature = if self.consecutive_failures >= 8 {
+            2
+        } else if self.consecutive_failures >= 3 {
+            1
+        } else {
+            0
+        };
+        if next_temperature > self.temperature {
+            self.temperature = next_temperature;
+            increment_metric(metrics, "operatorEscalations", 1);
+        }
+    }
+
+    fn admit_proposal_hash(
+        &mut self,
+        proposal_hash: u128,
+        metrics: &mut BTreeMap<String, u32>,
+    ) -> bool {
+        if self.proposal_cache_limit == 0 {
+            increment_metric(metrics, "uniqueFabricationProposals", 1);
+            return true;
+        }
+
+        if self.attempted_proposal_hashes.contains(&proposal_hash) {
+            increment_metric(metrics, "duplicateFabricationProposals", 1);
+            increment_metric(metrics, "discardedProposals", 1);
+            return false;
+        }
+
+        while self.attempted_proposal_hashes.len() >= self.proposal_cache_limit {
+            let Some(oldest_hash) = self.attempted_proposal_order.pop_front() else {
+                break;
+            };
+            if self.attempted_proposal_hashes.remove(&oldest_hash) {
+                increment_metric(metrics, "proposalCacheEvictions", 1);
+            }
+        }
+
+        self.attempted_proposal_hashes.insert(proposal_hash);
+        self.attempted_proposal_order.push_back(proposal_hash);
+        increment_metric(metrics, "uniqueFabricationProposals", 1);
+        true
+    }
+}
+
+fn fabricate_valid_hybrid_individual(
+    request: &OptimizerRequest,
+    proposal: OptimizerCandidateInput,
+    accumulator: &mut HybridSearchAccumulator,
+    max_candidates: usize,
+    catalog: &[SearchCatalogEntry],
+    spells_by_id: &BTreeMap<&str, &SearchCatalogEntry>,
+    cache: &mut DirectEvaluatorCache,
+    factory: &mut HybridValidIndividualFactory,
+) -> Result<HybridTrackedEvaluation, String> {
+    let mut next_proposal = Some(proposal);
+    let mut last_repair_candidate = None;
+    let mut tracked_result = HybridTrackedEvaluation {
+        population_entry: None,
+        improved: false,
+        repair_candidate: None,
+    };
+    let attempt_budget = factory.child_attempt_budget(request.iterations - accumulator.attempts);
+
+    for attempt_index in 0..attempt_budget {
+        let Some(proposal) = next_proposal.take() else {
+            break;
+        };
+        let (candidate, candidate_hash) =
+            normalize_hybrid_proposal_for_admission(request, catalog, proposal);
+        if !factory.admit_proposal_hash(candidate_hash, &mut accumulator.metrics) {
+            factory.record_failure(&mut accumulator.metrics);
+            break;
+        }
+
+        let tracked = evaluate_and_track_hybrid_candidate(
+            request,
+            candidate,
+            accumulator,
+            max_candidates,
+            catalog,
+            spells_by_id,
+            cache,
+        )?;
+        if tracked.population_entry.is_some() {
+            factory.record_success(&mut accumulator.metrics);
+            return Ok(tracked);
+        }
+
+        factory.record_failure(&mut accumulator.metrics);
+        last_repair_candidate = tracked.repair_candidate.clone();
+        tracked_result = tracked;
+        if attempt_index + 1 >= attempt_budget {
+            break;
+        }
+
+        if let Some(repair_candidate) = last_repair_candidate.clone() {
+            increment_metric(&mut accumulator.metrics, "projectionRepairs", 1);
+            next_proposal = Some(repair_candidate);
+        } else {
+            break;
+        }
+    }
+
+    increment_metric(&mut accumulator.metrics, "factoryExhaustions", 1);
+    tracked_result.repair_candidate = last_repair_candidate;
+    Ok(tracked_result)
+}
+
+fn revalidate_resume_population(
+    request: &OptimizerRequest,
+    population: Vec<HybridPopulationEntry>,
+    population_size: u32,
+    catalog: &[SearchCatalogEntry],
+    spells_by_id: &BTreeMap<&str, &SearchCatalogEntry>,
+    cache: &mut DirectEvaluatorCache,
+    metrics: &mut BTreeMap<String, u32>,
+) -> Result<Vec<HybridPopulationEntry>, String> {
+    let mut admitted = Vec::new();
+    for entry in population {
+        if !entry.is_admitted_valid() {
+            increment_metric(metrics, "discardedResumePopulationEntries", 1);
+            continue;
+        }
+
+        let mut candidate = normalize_candidate(entry.candidate);
+        apply_locked_loadout(request, catalog, &mut candidate);
+        let evaluation = evaluate_candidate_with_cache(
+            request,
+            &candidate,
+            hash_candidate(&candidate),
+            catalog,
+            spells_by_id,
+            cache,
+        )?;
+        increment_metric(metrics, "resumePopulationRevalidations", 1);
+        let Some(score) = evaluation.score else {
+            increment_metric(metrics, "discardedResumePopulationEntries", 1);
+            continue;
+        };
+        if !evaluation.valid {
+            increment_metric(metrics, "discardedResumePopulationEntries", 1);
+            continue;
+        }
+
+        let id = encode_candidate(&candidate);
+        admitted.push(HybridPopulationEntry::valid(id, candidate, score.score));
+    }
+
+    Ok(truncate_population(admitted, population_size))
 }
 
 fn record_seed_candidate_evaluation(
@@ -7360,6 +7757,7 @@ fn run_hybrid_island_search(
     cache: &mut DirectEvaluatorCache,
     restart_index_offset: u32,
     resume_state: Option<&HybridIslandResumeState>,
+    progress_sink: &mut HybridProgressSink<'_>,
 ) -> Result<HybridSearchAccumulator, String> {
     let config = create_hybrid_population_config(request.iterations);
     let mut accumulator = HybridSearchAccumulator {
@@ -7388,9 +7786,25 @@ fn run_hybrid_island_search(
             .skip(domain_warmup_offset),
     );
     let mut warmup_index = 0;
-    let mut population: Vec<HybridPopulationEntry> = resume_state
-        .map(|state| truncate_population(state.population.clone(), config.population_size))
-        .unwrap_or_default();
+    let mut factory = HybridValidIndividualFactory::default();
+    increment_metric(
+        &mut accumulator.metrics,
+        "proposalCacheLimit",
+        factory.proposal_cache_limit.min(u32::MAX as usize) as u32,
+    );
+    let mut population: Vec<HybridPopulationEntry> = if let Some(state) = resume_state {
+        revalidate_resume_population(
+            request,
+            state.population.clone(),
+            config.population_size,
+            catalog,
+            spells_by_id,
+            cache,
+            &mut accumulator.metrics,
+        )?
+    } else {
+        Vec::new()
+    };
     let mut elite_neighbor_queue: Vec<OptimizerCandidateInput> = resume_state
         .map(|state| state.elite_neighbor_queue.clone())
         .unwrap_or_default();
@@ -7422,12 +7836,13 @@ fn run_hybrid_island_search(
             catalog,
             actions,
             &mut rng,
+            factory.temperature,
             &warmup_candidates,
             request_seed_warmup_count,
             &mut warmup_index,
             &mut accumulator.metrics,
         );
-        let tracked = evaluate_and_track_hybrid_candidate(
+        let tracked = fabricate_valid_hybrid_individual(
             request,
             input,
             &mut accumulator,
@@ -7435,6 +7850,7 @@ fn run_hybrid_island_search(
             catalog,
             spells_by_id,
             cache,
+            &mut factory,
         )?;
         attempts_since_improvement = if tracked.improved {
             0
@@ -7461,6 +7877,7 @@ fn run_hybrid_island_search(
                 &mut accumulator.metrics,
             );
         }
+        progress_sink.maybe_emit(request, &accumulator, &population, max_candidates, false)?;
     }
 
     population = truncate_population(population, config.population_size);
@@ -7474,12 +7891,13 @@ fn run_hybrid_island_search(
                 catalog,
                 actions,
                 &mut rng,
+                factory.temperature,
                 &warmup_candidates,
                 request_seed_warmup_count,
                 &mut warmup_index,
                 &mut accumulator.metrics,
             );
-            let tracked = evaluate_and_track_hybrid_candidate(
+            let tracked = fabricate_valid_hybrid_individual(
                 request,
                 input,
                 &mut accumulator,
@@ -7487,6 +7905,7 @@ fn run_hybrid_island_search(
                 catalog,
                 spells_by_id,
                 cache,
+                &mut factory,
             )?;
             attempts_since_improvement = if tracked.improved {
                 0
@@ -7514,6 +7933,7 @@ fn run_hybrid_island_search(
                     &mut accumulator.metrics,
                 );
             }
+            progress_sink.maybe_emit(request, &accumulator, &population, max_candidates, false)?;
             continue;
         }
 
@@ -7533,7 +7953,7 @@ fn run_hybrid_island_search(
                 if accumulator.attempts >= request.iterations {
                     break;
                 }
-                let tracked = evaluate_and_track_hybrid_candidate(
+                let tracked = fabricate_valid_hybrid_individual(
                     request,
                     immigrant.candidate,
                     &mut accumulator,
@@ -7541,6 +7961,7 @@ fn run_hybrid_island_search(
                     catalog,
                     spells_by_id,
                     cache,
+                    &mut factory,
                 )?;
                 improved = improved || tracked.improved;
                 if let Some(entry) = tracked.population_entry {
@@ -7563,6 +7984,7 @@ fn run_hybrid_island_search(
                         &mut accumulator.metrics,
                     );
                 }
+                progress_sink.maybe_emit(request, &accumulator, &population, max_candidates, false)?;
             }
             population = truncate_population(population, config.population_size);
             attempts_since_improvement = if improved {
@@ -7639,6 +8061,7 @@ fn run_hybrid_island_search(
                 actions,
                 &population,
                 &mut rng,
+                factory.temperature,
                 &warmup_candidates,
                 request_seed_warmup_count,
                 &mut warmup_index,
@@ -7647,7 +8070,7 @@ fn run_hybrid_island_search(
         };
 
         let used_elite_neighbor = elite_neighbor.is_some();
-        let tracked = evaluate_and_track_hybrid_candidate(
+        let tracked = fabricate_valid_hybrid_individual(
             request,
             input,
             &mut accumulator,
@@ -7655,6 +8078,7 @@ fn run_hybrid_island_search(
             catalog,
             spells_by_id,
             cache,
+            &mut factory,
         )?;
         attempts_since_improvement = if tracked.improved {
             0
@@ -7688,6 +8112,7 @@ fn run_hybrid_island_search(
                 &mut accumulator.metrics,
             );
         }
+        progress_sink.maybe_emit(request, &accumulator, &population, max_candidates, false)?;
     }
 
     increment_metric(
@@ -8352,6 +8777,14 @@ fn huppermage_domain_seed_candidates() -> Vec<DomainSeedCandidate> {
 }
 
 pub fn run_hybrid_search(request: &OptimizerRequest) -> Result<HybridSearchResponse, String> {
+    let mut progress_sink = HybridProgressSink::disabled();
+    run_hybrid_search_with_progress(request, &mut progress_sink)
+}
+
+fn run_hybrid_search_with_progress(
+    request: &OptimizerRequest,
+    progress_sink: &mut HybridProgressSink<'_>,
+) -> Result<HybridSearchResponse, String> {
     let mut metrics = BTreeMap::new();
     let supported = request.engine == "hybrid";
     if !supported {
@@ -8390,9 +8823,18 @@ pub fn run_hybrid_search(request: &OptimizerRequest) -> Result<HybridSearchRespo
     let mut top_candidates = Vec::new();
     let mut resume_islands = Vec::new();
     let mut seed_candidate_evaluations = Vec::new();
+    let mut population_size = 0_u32;
 
     let island_count = schedule.islands.len().max(1);
     for (island_position, island) in schedule.islands.iter().enumerate() {
+        progress_sink.set_completed(
+            attempts,
+            valid_candidates,
+            invalid_candidates,
+            population_size,
+            &top_candidates,
+            &metrics,
+        );
         let mut island_request = request.clone();
         island_request.iterations = island.iterations;
         island_request.seed = island.rng_seed.clone();
@@ -8415,6 +8857,7 @@ pub fn run_hybrid_search(request: &OptimizerRequest) -> Result<HybridSearchRespo
             &mut cache,
             island.island_index,
             island_resume_state,
+            progress_sink,
         )?;
 
         attempts += island_result.attempts;
@@ -8423,6 +8866,7 @@ pub fn run_hybrid_search(request: &OptimizerRequest) -> Result<HybridSearchRespo
         seed_candidate_evaluations.extend(island_result.seed_candidate_evaluations);
         merge_metric_maps(&mut metrics, island_result.metrics);
         if let Some(resume_state) = island_result.resume_state {
+            population_size += resume_state.population.len() as u32;
             resume_islands.push(resume_state);
         }
         for candidate in island_result.top_candidates {
@@ -8431,6 +8875,7 @@ pub fn run_hybrid_search(request: &OptimizerRequest) -> Result<HybridSearchRespo
     }
 
     metrics.insert("hybridIslands".to_string(), schedule.island_count);
+    metrics.insert("populationSize".to_string(), population_size);
     let cache_metrics = cache.metrics();
     metrics.insert("cacheHits".to_string(), cache_metrics.cache_hits);
     metrics.insert("cacheMisses".to_string(), cache_metrics.cache_misses);
@@ -8449,7 +8894,16 @@ pub fn run_hybrid_search(request: &OptimizerRequest) -> Result<HybridSearchRespo
         DEFAULT_RUST_EVALUATION_CACHE_LIMIT as u32,
     );
 
-    Ok(HybridSearchResponse {
+    progress_sink.set_completed(
+        attempts,
+        valid_candidates,
+        invalid_candidates,
+        population_size,
+        &top_candidates,
+        &metrics,
+    );
+
+    let response = HybridSearchResponse {
         schema_version: request.schema_version,
         backend: "rustWasm".to_string(),
         supported,
@@ -8471,7 +8925,8 @@ pub fn run_hybrid_search(request: &OptimizerRequest) -> Result<HybridSearchRespo
                 + attempts as u64,
             islands: resume_islands,
         }),
-    })
+    };
+    Ok(response)
 }
 
 fn find_resume_island_state<'a>(
@@ -9606,6 +10061,26 @@ pub fn sample_seeded_random_json(seed: &str, count: u32) -> Result<String, JsVal
     })
 }
 
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn run_hybrid_search_stream_json(
+    request_json: &str,
+    progress_interval_attempts: u32,
+    progress_callback: js_sys::Function,
+) -> Result<String, JsValue> {
+    let request = parse_optimizer_request(request_json)
+        .map_err(|error| JsValue::from_str(&format!("Invalid optimizer request JSON: {error}")))?;
+    let mut progress_sink =
+        HybridProgressSink::enabled(&progress_callback, progress_interval_attempts.max(1));
+    let result =
+        run_hybrid_search_with_progress(&request, &mut progress_sink).map_err(|error| JsValue::from_str(&error))?;
+    serde_json::to_string(&result).map_err(|error| {
+        JsValue::from_str(&format!(
+            "Failed to serialize Rust hybrid search response: {error}"
+        ))
+    })
+}
+
 #[wasm_bindgen]
 pub fn sample_candidate_json(request_json: &str, mode: &str) -> Result<String, JsValue> {
     let request = parse_optimizer_request(request_json)
@@ -10133,6 +10608,284 @@ mod tests {
             accumulator.metrics.get("causalExplorationCandidates"),
             Some(&1)
         );
+    }
+
+    #[test]
+    fn invalid_proposal_is_not_admitted_to_hybrid_population() {
+        let request = transformation_request();
+        let catalog = read_search_catalog(&request).expect("catalog should parse");
+        let spells_by_id = catalog
+            .iter()
+            .filter(|entry| entry.kind == "spell")
+            .map(|entry| (entry.id.as_str(), entry))
+            .collect::<BTreeMap<_, _>>();
+        let mut cache = DirectEvaluatorCache::new(16);
+        let mut accumulator = HybridSearchAccumulator {
+            attempts: 0,
+            valid_candidates: 0,
+            invalid_candidates: 0,
+            top_candidates: vec![],
+            metrics: BTreeMap::new(),
+            seed_candidate_evaluations: Vec::new(),
+            resume_state: None,
+        };
+        let invalid_proposal = candidate_from_actions(vec!["burst", "burst", "burst"], vec![]);
+
+        let tracked = evaluate_and_track_hybrid_candidate(
+            &request,
+            invalid_proposal,
+            &mut accumulator,
+            10,
+            &catalog,
+            &spells_by_id,
+            &mut cache,
+        )
+        .expect("proposal should evaluate");
+
+        assert!(tracked.population_entry.is_none());
+        assert_eq!(accumulator.valid_candidates, 0);
+        assert_eq!(accumulator.invalid_candidates, 1);
+        assert_eq!(accumulator.metrics.get("fabricationAttempts"), Some(&1));
+        assert_eq!(accumulator.metrics.get("discardedProposals"), Some(&1));
+        assert!(tracked.repair_candidate.is_some());
+    }
+
+    #[test]
+    fn projection_repair_is_admitted_only_after_exact_validation() {
+        let request = transformation_request();
+        let catalog = read_search_catalog(&request).expect("catalog should parse");
+        let spells_by_id = catalog
+            .iter()
+            .filter(|entry| entry.kind == "spell")
+            .map(|entry| (entry.id.as_str(), entry))
+            .collect::<BTreeMap<_, _>>();
+        let mut cache = DirectEvaluatorCache::new(16);
+        let mut accumulator = HybridSearchAccumulator {
+            attempts: 0,
+            valid_candidates: 0,
+            invalid_candidates: 0,
+            top_candidates: vec![],
+            metrics: BTreeMap::new(),
+            seed_candidate_evaluations: Vec::new(),
+            resume_state: None,
+        };
+        let mut factory = HybridValidIndividualFactory {
+            temperature: 1,
+            consecutive_failures: 3,
+            ..HybridValidIndividualFactory::default()
+        };
+        let invalid_proposal = candidate_from_actions(vec!["burst", "burst", "burst"], vec![]);
+
+        let tracked = fabricate_valid_hybrid_individual(
+            &request,
+            invalid_proposal,
+            &mut accumulator,
+            10,
+            &catalog,
+            &spells_by_id,
+            &mut cache,
+            &mut factory,
+        )
+        .expect("factory should evaluate projection");
+        let admitted = tracked
+            .population_entry
+            .expect("projection should be revalidated and admitted");
+        let evaluation = evaluate_candidate(&request, &admitted.candidate, "projected")
+            .expect("admitted candidate should evaluate");
+
+        assert!(evaluation.valid, "{evaluation:?}");
+        assert_eq!(accumulator.valid_candidates, 1);
+        assert_eq!(accumulator.invalid_candidates, 1);
+        assert_eq!(accumulator.metrics.get("projectionRepairs"), Some(&1));
+        assert_eq!(accumulator.metrics.get("fabricationAttempts"), Some(&2));
+    }
+
+    #[test]
+    fn duplicate_proposal_is_rejected_before_simulator_evaluation() {
+        let request = transformation_request();
+        let catalog = read_search_catalog(&request).expect("catalog should parse");
+        let spells_by_id = catalog
+            .iter()
+            .filter(|entry| entry.kind == "spell")
+            .map(|entry| (entry.id.as_str(), entry))
+            .collect::<BTreeMap<_, _>>();
+        let mut cache = DirectEvaluatorCache::new(16);
+        let mut accumulator = HybridSearchAccumulator {
+            attempts: 0,
+            valid_candidates: 0,
+            invalid_candidates: 0,
+            top_candidates: vec![],
+            metrics: BTreeMap::new(),
+            seed_candidate_evaluations: Vec::new(),
+            resume_state: None,
+        };
+        let mut factory = HybridValidIndividualFactory::default();
+        let proposal = candidate_from_actions(vec!["hit"], vec![]);
+
+        let first = fabricate_valid_hybrid_individual(
+            &request,
+            proposal.clone(),
+            &mut accumulator,
+            10,
+            &catalog,
+            &spells_by_id,
+            &mut cache,
+            &mut factory,
+        )
+        .expect("first proposal should evaluate");
+        assert!(first.population_entry.is_some());
+        assert_eq!(accumulator.attempts, 1);
+
+        let duplicate = fabricate_valid_hybrid_individual(
+            &request,
+            proposal,
+            &mut accumulator,
+            10,
+            &catalog,
+            &spells_by_id,
+            &mut cache,
+            &mut factory,
+        )
+        .expect("duplicate proposal should be handled");
+
+        assert!(duplicate.population_entry.is_none());
+        assert_eq!(accumulator.attempts, 1);
+        assert_eq!(accumulator.valid_candidates, 1);
+        assert_eq!(accumulator.invalid_candidates, 0);
+        assert_eq!(
+            accumulator.metrics.get("uniqueFabricationProposals"),
+            Some(&1)
+        );
+        assert_eq!(
+            accumulator.metrics.get("duplicateFabricationProposals"),
+            Some(&1)
+        );
+        assert_eq!(accumulator.metrics.get("discardedProposals"), Some(&1));
+    }
+
+    #[test]
+    fn proposal_cache_evicts_old_hashes_at_bounded_capacity() {
+        let mut factory = HybridValidIndividualFactory::new(1);
+        let mut metrics = BTreeMap::new();
+
+        assert!(factory.admit_proposal_hash(1, &mut metrics));
+        assert!(factory.admit_proposal_hash(2, &mut metrics));
+        assert!(factory.admit_proposal_hash(1, &mut metrics));
+
+        assert_eq!(factory.attempted_proposal_hashes.len(), 1);
+        assert!(factory.attempted_proposal_hashes.contains(&1));
+        assert_eq!(metrics.get("uniqueFabricationProposals"), Some(&3));
+        assert_eq!(metrics.get("proposalCacheEvictions"), Some(&2));
+        assert_eq!(metrics.get("duplicateFabricationProposals"), None);
+    }
+
+    #[test]
+    fn resume_population_revalidation_filters_legacy_invalid_entries() {
+        let mut request = transformation_request();
+        request.iterations = 12;
+        let valid_candidate = candidate_from_actions(vec!["hit"], vec![]);
+        let invalid_candidate = candidate_from_actions(vec!["burst", "burst", "burst"], vec![]);
+        request.resume_state = Some(HybridSearchResumeState {
+            schema_version: 1,
+            total_attempts: 40,
+            islands: vec![HybridIslandResumeState {
+                island_index: 0,
+                seed: "legacy-resume".to_string(),
+                rng_state: SeededRandom::new("legacy-resume").state_snapshot(),
+                warmup_index: 0,
+                restart_index: 0,
+                attempts_since_improvement: 0,
+                consecutive_repair_attempts: 0,
+                consecutive_elite_neighbor_attempts: 0,
+                population: vec![
+                    HybridPopulationEntry {
+                        id: "legacy-valid".to_string(),
+                        candidate: valid_candidate.clone(),
+                        score: 1.0,
+                        valid: true,
+                    },
+                    HybridPopulationEntry {
+                        id: "legacy-invalid-candidate".to_string(),
+                        candidate: invalid_candidate,
+                        score: 999.0,
+                        valid: true,
+                    },
+                    HybridPopulationEntry {
+                        id: "legacy-invalid-flag".to_string(),
+                        candidate: valid_candidate,
+                        score: 999.0,
+                        valid: false,
+                    },
+                ],
+                repair_queue: vec![],
+                elite_neighbor_queue: vec![],
+            }],
+        });
+
+        let result = run_hybrid_search(&request).expect("resumed search should run");
+        let resume_population = &result
+            .resume_state
+            .as_ref()
+            .expect("resume should be returned")
+            .islands[0]
+            .population;
+
+        assert_eq!(
+            result.metrics.get("discardedResumePopulationEntries"),
+            Some(&2)
+        );
+        assert!(resume_population
+            .iter()
+            .all(HybridPopulationEntry::is_admitted_valid));
+        assert!(resume_population.iter().all(|entry| {
+            evaluate_candidate(&request, &entry.candidate, &entry.id)
+                .expect("resume entry should evaluate")
+                .valid
+        }));
+        assert!(resume_population
+            .iter()
+            .all(|entry| entry.id != "legacy-invalid-candidate"));
+        assert!(resume_population
+            .iter()
+            .all(|entry| entry.id != "legacy-invalid-flag"));
+    }
+
+    #[test]
+    fn hybrid_valid_factory_is_deterministic_for_fixed_seed() {
+        let mut request = transformation_request();
+        request.seed = "valid-factory-deterministic".to_string();
+        request.iterations = 80;
+        request.max_candidates = Some(5);
+
+        let first = run_hybrid_search(&request).expect("first hybrid search should run");
+        let second = run_hybrid_search(&request).expect("second hybrid search should run");
+
+        assert_eq!(first.top_candidates, second.top_candidates);
+        assert_eq!(first.metrics, second.metrics);
+        assert_eq!(first.resume_state, second.resume_state);
+    }
+
+    #[test]
+    fn hybrid_top_candidates_remain_simulator_validated() {
+        let mut request = transformation_request();
+        request.iterations = 100;
+        request.max_candidates = Some(5);
+
+        let result = run_hybrid_search(&request).expect("hybrid search should run");
+
+        assert!(!result.top_candidates.is_empty());
+        for top_candidate in result.top_candidates {
+            let candidate = OptimizerCandidateInput {
+                passive_ids: top_candidate.passive_ids,
+                sublimation_ids: top_candidate.sublimation_ids,
+                plan: top_candidate.plan,
+                source_label: None,
+            };
+            let evaluation = evaluate_candidate(&request, &candidate, &top_candidate.id)
+                .expect("top candidate should evaluate");
+            assert!(evaluation.valid, "{evaluation:?}");
+            assert!(evaluation.score.is_some());
+        }
     }
 
     #[test]

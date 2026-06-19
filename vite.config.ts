@@ -206,7 +206,7 @@ async function streamContinuousOptimizerRun(
         elapsedMs: Math.round(performance.now() - runStartedAt),
       });
     }
-  }, 1_000);
+  }, 2_000);
   heartbeat.unref?.();
 
   child.stdout.on("data", (chunk: Buffer) => {

@@ -137,6 +137,11 @@ export type RustWasmCandidateEvaluationResult = {
 export type RustWasmOptimizerWasmExports = {
   generate_hybrid_candidates_json: (requestJson: string) => string;
   run_hybrid_search_json?: (requestJson: string) => string;
+  run_hybrid_search_stream_json?: (
+    requestJson: string,
+    progressIntervalAttempts: number,
+    progressCallback: (snapshotJson: string) => void,
+  ) => string;
   evaluate_candidate_batch_json: (requestJson: string, candidatesJson: string) => string;
 };
 
