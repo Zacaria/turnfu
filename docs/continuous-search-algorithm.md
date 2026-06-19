@@ -18,6 +18,7 @@ The current default quality setting is:
 --learned-loadout-prior
 --learned-action-set-prior
 --contextual-adjacent-swaps
+--global-validity-guidance
 --plateau-order-chain-neighbors
 --plateau-trigger-rounds 1
 ```
@@ -143,6 +144,7 @@ Candidate pressure currently comes from:
 | Learned loadout prior | Restrict passive and sublimation search to a relevant pool without locking one fixed passive set. |
 | Learned action-set prior | Keep all Huppermage spells except the explicitly excluded low-relevance spells. |
 | Resource-aware fresh candidates | Generate affordable AP/MP/WP/BQ shapes instead of mostly invalid random plans. |
+| Global validity guidance | Default-on for the validated contextual preset; weights fresh candidate construction by whole-candidate feasibility signals while keeping non-zero probability for every available action. |
 | Local refinement | Mutate elite plans with small edits. |
 | Elite neighbor queue | Immediately test structured neighbors around a new island best. |
 | Contextual adjacent swaps | Swap adjacent actions only for validated spell-order pairs. |
@@ -243,6 +245,10 @@ Any proposed improvement must be validated against this contract:
 | Ranking | Final top candidates must pass TypeScript oracle validation. |
 | Acceptance | Improve final score, improve time-to-record without regression, or provide direct evidence for a promoted mechanism. |
 | Documentation | Record hypothesis, command shape, result, failure, and conclusion in the observation log. |
+
+For matched A/B validation, pass `--disable-global-validity-guidance` with the
+same seed, workers, chunk size, rounds, and oracle settings to compare against
+the previous validated-contextual proposal stream.
 
 The current accepted plateau result meets the time-to-record path: same final
 record as baseline, reached materially earlier, with direct telemetry showing
