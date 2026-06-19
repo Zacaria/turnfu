@@ -2124,6 +2124,132 @@ fn get_hybrid_resource_aware_fresh_chance(request: &OptimizerRequest) -> f64 {
         .clamp(0.0, 1.0)
 }
 
+#[derive(Clone, Debug)]
+struct GlobalValidityState {
+    base_resources: ResourcePool,
+    resources: ResourcePool,
+    casts_by_spell_id: BTreeMap<String, u32>,
+    target_casts_by_spell_id: BTreeMap<String, u32>,
+    cooldowns_by_spell_id: BTreeMap<String, u32>,
+}
+
+impl GlobalValidityState {
+    fn new(base_resources: ResourcePool) -> Self {
+        Self {
+            base_resources,
+            resources: base_resources,
+            casts_by_spell_id: BTreeMap::new(),
+            target_casts_by_spell_id: BTreeMap::new(),
+            cooldowns_by_spell_id: BTreeMap::new(),
+        }
+    }
+
+    fn start_turn(&mut self) {
+        self.resources.ap = self.base_resources.ap;
+        self.resources.mp = self.base_resources.mp;
+        self.casts_by_spell_id.clear();
+        self.target_casts_by_spell_id.clear();
+        self.cooldowns_by_spell_id = self
+            .cooldowns_by_spell_id
+            .iter()
+            .map(|(spell_id, turns)| (spell_id.clone(), turns.saturating_sub(1)))
+            .filter(|(_spell_id, turns)| *turns > 0)
+            .collect();
+    }
+}
+
+fn score_global_validity_action(
+    entry: &SearchCatalogEntry,
+    action: &CandidateAction,
+    state: &GlobalValidityState,
+) -> f64 {
+    if state
+        .cooldowns_by_spell_id
+        .get(action.spell_id.as_str())
+        .copied()
+        .unwrap_or(0)
+        > 0
+    {
+        return 0.02;
+    }
+    if entry.rules.max_casts_per_turn.is_some_and(|limit| {
+        state
+            .casts_by_spell_id
+            .get(action.spell_id.as_str())
+            .copied()
+            .unwrap_or(0)
+            >= limit
+    }) {
+        return 0.02;
+    }
+    if entry.rules.max_casts_per_target.is_some_and(|limit| {
+        counts_as_soft_target_cast(action)
+            && state
+                .target_casts_by_spell_id
+                .get(action.spell_id.as_str())
+                .copied()
+                .unwrap_or(0)
+                >= limit
+    }) {
+        return 0.02;
+    }
+    if can_afford_cost(state.resources, entry.cost) {
+        let base = get_action_search_weight(entry).max(0.01);
+        let resource_margin = (state.resources.ap - f64::from(entry.cost.ap.max(0))).max(0.0)
+            + (state.resources.mp - f64::from(entry.cost.mp.max(0))).max(0.0)
+            + (state.resources.wp - f64::from(entry.cost.wp.max(0))).max(0.0);
+        base * (1.0 + resource_margin.min(6.0) * 0.04)
+    } else {
+        0.05
+    }
+}
+
+fn apply_global_validity_action(
+    entry: &SearchCatalogEntry,
+    action: &CandidateAction,
+    state: &mut GlobalValidityState,
+) {
+    state.resources = apply_soft_action_resources(state.resources, entry);
+    *state
+        .casts_by_spell_id
+        .entry(action.spell_id.clone())
+        .or_insert(0) += 1;
+    if counts_as_soft_target_cast(action) {
+        *state
+            .target_casts_by_spell_id
+            .entry(action.spell_id.clone())
+            .or_insert(0) += 1;
+    }
+    if let Some(turns) = entry.rules.cooldown_turns.filter(|turns| *turns > 0) {
+        state
+            .cooldowns_by_spell_id
+            .insert(action.spell_id.clone(), turns);
+    }
+}
+
+fn pick_global_validity_weighted_action(
+    weighted_actions: &[(CandidateAction, f64)],
+    rng: &mut SeededRandom,
+) -> CandidateAction {
+    let total_weight = weighted_actions
+        .iter()
+        .map(|(_action, weight)| weight.max(0.02))
+        .sum::<f64>();
+    let mut cursor = rng.next() * total_weight;
+
+    for (action, weight) in weighted_actions {
+        cursor -= weight.max(0.02);
+        if cursor <= 0.0 {
+            return action.clone();
+        }
+    }
+
+    weighted_actions
+        .last()
+        .map(|(action, _weight)| action.clone())
+        .expect("global validity weighted action list should not be empty")
+}
+
 fn create_hybrid_diverse_immigrant_with_catalog(
     request: &OptimizerRequest,
     catalog: &[SearchCatalogEntry],
@@ -12145,6 +12271,106 @@ mod tests {
         assert!(!actions.is_empty());
         assert!(actions.len() <= 2);
         assert!(actions.iter().all(|action| action.spell_id == "cheap"));
+    }
+
+    #[test]
+    fn global_validity_guidance_prefers_affordable_actions_without_excluding_fallback() {
+        let request = parse_optimizer_request(
+            r#"{
+              "schemaVersion":1,
+              "engine":"hybrid",
+              "seed":"global-validity-sampler",
+              "duration":1,
+              "iterations":100,
+              "maxActionsPerTurn":4,
+              "maxPassiveCount":0,
+              "availableSpellIds":["cheap","expensive"],
+              "availablePassiveIds":[],
+              "catalog":[
+                {
+                  "kind":"spell",
+                  "id":"cheap",
+                  "cost":{"ap":1},
+                  "effects":[{"type":"damage","base":10,"element":"fire"}],
+                  "constraints":[],
+                  "tags":["utility"]
+                },
+                {
+                  "kind":"spell",
+                  "id":"expensive",
+                  "cost":{"ap":10},
+                  "effects":[{"type":"damage","base":100,"element":"fire"}],
+                  "constraints":[],
+                  "tags":["burst"]
+                }
+              ],
+              "character":{"id":"test","resources":{"ap":4,"mp":3,"wp":2,"bq":100}},
+              "hybridGlobalValidityGuidance":true
+            }"#,
+        )
+        .expect("request should parse");
+        let catalog = read_search_catalog(&request).expect("catalog should parse");
+        let actions = get_search_actions(&request, &catalog);
+        let entries_by_id = catalog
+            .iter()
+            .map(|entry| (entry.id.as_str(), entry))
+            .collect::<BTreeMap<_, _>>();
+        let cheap_action = actions
+            .iter()
+            .find(|action| action.spell_id == "cheap")
+            .expect("cheap action should exist")
+            .clone();
+        let expensive_action = actions
+            .iter()
+            .find(|action| action.spell_id == "expensive")
+            .expect("expensive action should exist")
+            .clone();
+        let mut state = GlobalValidityState::new(read_request_resources(&request.character));
+        state.start_turn();
+        let cheap_score = score_global_validity_action(
+            entries_by_id
+                .get("cheap")
+                .expect("cheap catalog entry should exist"),
+            &cheap_action,
+            &state,
+        );
+        let expensive_score = score_global_validity_action(
+            entries_by_id
+                .get("expensive")
+                .expect("expensive catalog entry should exist"),
+            &expensive_action,
+            &state,
+        );
+        assert!(cheap_score > expensive_score);
+        let picked_action = pick_global_validity_weighted_action(
+            &[(cheap_action.clone(), cheap_score), (expensive_action, expensive_score)],
+            &mut SeededRandom::new("global-validity-weighted-pick"),
+        );
+        assert!(picked_action.spell_id == "cheap" || picked_action.spell_id == "expensive");
+        apply_global_validity_action(
+            entries_by_id
+                .get(picked_action.spell_id.as_str())
+                .expect("picked catalog entry should exist"),
+            &picked_action,
+            &mut state,
+        );
+        assert!(state.casts_by_spell_id.contains_key(picked_action.spell_id.as_str()));
+        let mut rng = SeededRandom::new("global-validity-sampler");
+        let mut metrics = BTreeMap::new();
+
+        let candidate = create_global_validity_guided_candidate(
+            &request,
+            &catalog,
+            &actions,
+            &mut rng,
+            &mut metrics,
+        );
+
+        assert!(!candidate.plan.turns[0].actions.is_empty());
+        assert!(candidate.plan.turns[0]
+            .actions
+            .iter()
+            .any(|action| action.spell_id == "cheap"));
     }
 
     #[test]
