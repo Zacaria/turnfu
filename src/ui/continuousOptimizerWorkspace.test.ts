@@ -54,7 +54,7 @@ test("creates launch args for the validated Continuous quality preset", () => {
 test("creates launch args for a custom sustainable air Continuous run", () => {
   const args = createContinuousOptimizerLaunchArgs({
     ...createDefaultContinuousOptimizerControls(),
-    scenarioId: "t2-a8-p2",
+    scenarioId: "t2-full",
     qualityPreset: "manual",
     scoreCriterion: "element-damage",
     targetElement: "air",
@@ -67,7 +67,7 @@ test("creates launch args for a custom sustainable air Continuous run", () => {
     "--db",
     ".optimizer/rust-wasm-search.sqlite",
     "--scenario",
-    "t2-a8-p2",
+    "t2-full",
     "--workers",
     "10",
     "--chunk-size",
@@ -172,6 +172,42 @@ test("streams startup and heartbeat events before checkpoint progress", async ()
     "heartbeat:1200",
     "progress:500000",
     "complete",
+  ]);
+});
+
+test("surfaces Continuous runner stderr when a stream error arrives", async () => {
+  const originalFetch = globalThis.fetch;
+  const logs: string[] = [];
+  const body = [
+    "event: log\ndata: {\"stream\":\"stderr\",\"line\":\"Error: Session 'abc' fingerprint mismatch. Use --reset to discard persisted search state.\"}",
+    "event: error\ndata: {\"error\":\"Continuous optimizer exited with code 1.\"}",
+  ].join("\n\n") + "\n\n";
+
+  globalThis.fetch = async () => ({
+    ok: true,
+    body: new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(body));
+        controller.close();
+      },
+    }),
+  }) as Response;
+
+  try {
+    await assert.rejects(
+      streamContinuousOptimizerRun({
+        args: ["--session", "abc"],
+        onLog: (line) => logs.push(line),
+        onProgress: () => undefined,
+      }),
+      /fingerprint mismatch/,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.deepEqual(logs, [
+    "stderr: Error: Session 'abc' fingerprint mismatch. Use --reset to discard persisted search state.",
   ]);
 });
 

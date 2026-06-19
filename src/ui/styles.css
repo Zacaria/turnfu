@@ -2869,6 +2869,10 @@ button.setup-summary-open:focus-visible {
   color: #ffffff;
 }
 
+.optimizer-reset-button {
+  border-color: #38515a;
+}
+
 .optimizer-run-panel {
   margin-top: 14px;
 }
@@ -2894,6 +2898,99 @@ button.setup-summary-open:focus-visible {
   justify-content: flex-start;
   flex-wrap: wrap;
   color: #8fa39d;
+}
+
+.optimizer-run-error {
+  display: grid;
+  gap: 10px;
+  border: 1px solid #5f332f;
+  border-radius: 5px;
+  background: #1a1110;
+  padding: 12px;
+  color: #ffd8d2;
+}
+
+.optimizer-run-error h3 {
+  margin: 0 0 4px;
+  color: #fff2ef;
+  font-size: 0.95rem;
+}
+
+.optimizer-run-error p {
+  margin: 0;
+  color: #e7aca1;
+  font-size: 0.86rem;
+}
+
+.optimizer-run-error details {
+  display: grid;
+  gap: 8px;
+}
+
+.optimizer-run-error summary {
+  cursor: pointer;
+  color: #f2c1b8;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.optimizer-run-error pre {
+  overflow: auto;
+  max-height: 190px;
+  margin: 0;
+  border: 1px solid #352827;
+  border-radius: 4px;
+  background: #0e0b0a;
+  padding: 8px;
+  color: #d7b7b0;
+  font-size: 0.72rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.optimizer-run-error .secondary-button {
+  justify-self: start;
+}
+
+.optimizer-reset-modal-backdrop {
+  position: fixed;
+  z-index: 30;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(4, 8, 9, 0.72);
+  padding: 18px;
+}
+
+.optimizer-reset-modal {
+  display: grid;
+  width: min(520px, 100%);
+  gap: 14px;
+  border: 1px solid #314349;
+  border-radius: 6px;
+  background: #101719;
+  box-shadow: 0 22px 60px rgba(0, 0, 0, 0.48);
+  padding: 18px;
+}
+
+.optimizer-reset-modal h2 {
+  margin: 0;
+  color: #f4faf7;
+  font-size: 1.05rem;
+}
+
+.optimizer-reset-modal p {
+  margin: 0;
+  color: #a9bbb5;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.optimizer-reset-modal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
 }
 
 .run-criteria-summary {

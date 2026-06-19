@@ -287,7 +287,7 @@ test("renders oracle-verified Continuous candidates through the optimizer result
     rank: 1,
     run: {
       sessionId: "optimizer-setup-1-2t-air-sustainable",
-      scenarioId: "t2-a8-p2",
+      scenarioId: "t2-full",
       seed: "optimizer-ui",
       workerCount: 10,
       chunkSize: 50_000,
@@ -354,7 +354,7 @@ test("renders replay-invalid Continuous candidates so checkpoint results are vis
     verification: "replay-invalid",
     run: {
       sessionId: "optimizer-setup-1-2t-total-sustainable",
-      scenarioId: "t2-a8-p2",
+      scenarioId: "t2-full",
       seed: "optimizer-ui",
       workerCount: 10,
       chunkSize: 50_000,

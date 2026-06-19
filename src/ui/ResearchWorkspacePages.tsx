@@ -1,4 +1,4 @@
-import { ArrowLeft, BarChart3, Boxes, Check, Pencil, Pin, Play, Plus, Save, ScrollText, Search, Swords, Trash2, Wrench, X } from "lucide-react";
+import { ArrowLeft, BarChart3, Boxes, Check, Pencil, Pin, Play, Plus, RotateCcw, Save, ScrollText, Search, Swords, Trash2, Wrench, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CatalogEntry } from "../core/catalog/types.ts";
 import type {
@@ -91,6 +91,19 @@ export function createOptimizerWorkspaceSession(session: OptimizerWorkspaceSessi
     },
     runStatus: session.lastRun ? "stopped" : "idle",
   };
+}
+
+function isContinuousSessionMismatchError(error: string | null): boolean {
+  return Boolean(error?.includes("fingerprint mismatch") && error.includes("--reset"));
+}
+
+function createOptimizerRunDiagnosticLines(error: string | null, messages: string[]): string[] {
+  const lines = [
+    ...(error?.split("\n").slice(1) ?? []),
+    ...messages,
+  ].map((line) => line.trim()).filter((line) => line.length > 0);
+
+  return [...new Set(lines)].slice(0, 10);
 }
 
 export function ResearchLibraryPage({
@@ -461,6 +474,7 @@ export function ContinuousOptimizerPage({ onBack }: { onBack: () => void }) {
                 scenarioId: event.currentTarget.value as ContinuousOptimizerControls["scenarioId"],
               })}
             >
+              <option value="t2-full">t2-full</option>
               <option value="t2-a8-p2">t2-a8-p2</option>
               <option value="t3-a12-p3">t3-a12-p3</option>
               <option value="t3-full">t3-full</option>
@@ -1074,6 +1088,8 @@ export function OptimizerWorkspacePage({
     validCandidates: 0,
   });
   const [runError, setRunError] = useState<string | null>(() => initialSession?.runError ?? null);
+  const [runMessages, setRunMessages] = useState<string[]>([]);
+  const [resetConfirmationOpen, setResetConfirmationOpen] = useState(false);
   const [lastRun, setLastRun] = useState<OptimizerRunSnapshot | null>(() => initialSession?.lastRun ?? null);
   const runTimerRef = useRef<number | null>(null);
   const runSequenceRef = useRef(0);
@@ -1087,6 +1103,8 @@ export function OptimizerWorkspacePage({
   const controlsDirty = lastRun !== null && createOptimizerControlsKey(lastRun.controls) !== createOptimizerControlsKey(normalizedControls);
   const currentRunSaveKey = lastRun ? createOptimizerRunSaveKey(setup.id, lastRun.controls) : null;
   const currentRunSaved = currentRunSaveKey ? savedRunKeys.includes(currentRunSaveKey) : false;
+  const runDiagnosticLines = createOptimizerRunDiagnosticLines(runError, runMessages);
+  const isContinuousMethod = normalizedControls.searchMethod === "continuous";
 
   useEffect(() => () => {
     if (runTimerRef.current !== null) {
@@ -1118,7 +1136,7 @@ export function OptimizerWorkspacePage({
     setControls((current) => normalizeOptimizerControls({ ...current, ...patch }));
   }
 
-  async function launchOptimizerRun() {
+  async function launchOptimizerRun(options: { resetContinuousSession?: boolean } = {}) {
     if (isRunning) {
       return;
     }
@@ -1135,13 +1153,19 @@ export function OptimizerWorkspacePage({
 
     setPinnedIds([]);
     setRunError(null);
+    setRunMessages([]);
     setRunStatus("running");
     setLastRun({ controls: runControls, results: [] });
+    let latestRunProgress = {
+      attempts: 0,
+      invalidCandidates: 0,
+      validCandidates: 0,
+    };
     setRunProgress({
       attempts: 0,
       bestScore: undefined,
       invalidCandidates: 0,
-      label: "Préparation du run",
+      label: options.resetContinuousSession ? "Réinitialisation de la session" : "Préparation du run",
       percent: 1,
       validCandidates: 0,
     });
@@ -1152,11 +1176,6 @@ export function OptimizerWorkspacePage({
         return;
       }
 
-      let latestRunProgress = {
-        attempts: 0,
-        invalidCandidates: 0,
-        validCandidates: 0,
-      };
       const targetAttempts = runControls.iterationBudget;
       const results = await runOptimizerForControlsLive(setup, catalog, runControls, (progress) => {
         if (runSequenceRef.current !== runSequence) {
@@ -1180,7 +1199,16 @@ export function OptimizerWorkspacePage({
           percent,
           validCandidates: progress.validCandidates,
         });
-      }, abortController.signal);
+      }, abortController.signal, {
+        resetContinuousSession: options.resetContinuousSession,
+        onLog: (line) => {
+          if (runSequenceRef.current !== runSequence) {
+            return;
+          }
+
+          setRunMessages((current) => [line, ...current.filter((entry) => entry !== line)].slice(0, 8));
+        },
+      });
 
       if (runSequenceRef.current !== runSequence) {
         return;
@@ -1246,6 +1274,7 @@ export function OptimizerWorkspacePage({
   }
 
   return (
+    <>
     <main className="research-shell optimizer-shell">
       <PageBackButton onBack={onBack} label={build.name} />
       <section className="build-header">
@@ -1357,11 +1386,29 @@ export function OptimizerWorkspacePage({
         <button
           className={isRunning ? "secondary-button optimizer-run-button optimizer-stop-button" : "primary-button optimizer-run-button"}
           type="button"
-          onClick={isRunning ? stopOptimizerRun : launchOptimizerRun}
+          onClick={() => {
+            if (isRunning) {
+              stopOptimizerRun();
+              return;
+            }
+
+            void launchOptimizerRun();
+          }}
         >
           {isRunning ? <X size={16} /> : <Play size={16} />}
           {isRunning ? "Stopper" : lastRun ? "Relancer" : "Lancer l'optimisation"}
         </button>
+        {isContinuousMethod ? (
+          <button
+            className="secondary-button optimizer-reset-button"
+            type="button"
+            disabled={isRunning}
+            onClick={() => setResetConfirmationOpen(true)}
+          >
+            <RotateCcw size={16} />
+            Reset session
+          </button>
+        ) : null}
       </section>
 
       <section className="workspace-section optimizer-run-panel">
@@ -1390,7 +1437,21 @@ export function OptimizerWorkspacePage({
           </div>
         ) : null}
 
-        {runError ? <EmptyState title="Optimisation interrompue" body={runError} /> : null}
+        {runError ? (
+          <div className="optimizer-run-error" role="alert">
+            <div>
+              <h3>Optimisation interrompue</h3>
+              <p>{runError.split("\n")[0]}</p>
+            </div>
+            {runDiagnosticLines.length > 0 ? (
+              <details>
+                <summary>Détails du runner</summary>
+                <pre>{runDiagnosticLines.join("\n")}</pre>
+              </details>
+            ) : null}
+            {isContinuousSessionMismatchError(runError) ? <p>Utilise Reset session pour relancer avec l'état courant.</p> : null}
+          </div>
+        ) : null}
         {!lastRun && runStatus === "idle" ? <EmptyState title="Aucun run lancé" body="Choisis un objectif, puis lance l'optimisation." /> : null}
 
         {lastRun ? (
@@ -1452,6 +1513,39 @@ export function OptimizerWorkspacePage({
         ) : null}
       </section>
     </main>
+    {resetConfirmationOpen ? (
+      <div className="optimizer-reset-modal-backdrop" role="presentation">
+        <div
+          aria-labelledby="optimizer-reset-title"
+          aria-modal="true"
+          className="optimizer-reset-modal"
+          role="dialog"
+        >
+          <h2 id="optimizer-reset-title">Réinitialiser la session Continuous ?</h2>
+          <p>
+            L'état de recherche persisté pour cet objectif sera remplacé, puis le run redémarrera avec les sorts,
+            passifs, sublimations et contraintes actuellement sélectionnés.
+          </p>
+          <div className="optimizer-reset-modal-actions">
+            <button className="secondary-button" type="button" onClick={() => setResetConfirmationOpen(false)}>
+              Annuler
+            </button>
+            <button
+              className="primary-button"
+              type="button"
+              onClick={() => {
+                setResetConfirmationOpen(false);
+                void launchOptimizerRun({ resetContinuousSession: true });
+              }}
+            >
+              <RotateCcw size={16} />
+              Réinitialiser et relancer
+            </button>
+          </div>
+        </div>
+      </div>
+    ) : null}
+    </>
   );
 }
 

@@ -71,6 +71,11 @@ export type OptimizerLiveRunProgress = {
   results: OptimizerCandidateViewModel[];
 };
 
+export type OptimizerLiveRunOptions = {
+  onLog?: (line: string) => void;
+  resetContinuousSession?: boolean;
+};
+
 export type ContinuousVerifiedOptimizerCandidatePayload = {
   schemaVersion: 1;
   totalAttempts: number;
@@ -232,10 +237,11 @@ export async function runOptimizerForControlsLive(
   controls: OptimizerWorkspaceControls,
   onProgress: (progress: OptimizerLiveRunProgress) => void,
   signal?: AbortSignal,
+  options: OptimizerLiveRunOptions = {},
 ): Promise<OptimizerCandidateViewModel[]> {
   const normalizedControls = normalizeOptimizerControls(controls);
   if (normalizedControls.searchMethod === "continuous") {
-    return runContinuousOptimizerForControlsLive(setup, normalizedControls, onProgress, signal);
+    return runContinuousOptimizerForControlsLive(setup, normalizedControls, onProgress, signal, options);
   }
   if (normalizedControls.searchMethod === "hybrid") {
     try {
@@ -449,9 +455,14 @@ async function runContinuousOptimizerForControlsLive(
   controls: OptimizerWorkspaceControls,
   onProgress: (progress: OptimizerLiveRunProgress) => void,
   signal?: AbortSignal,
+  options: OptimizerLiveRunOptions = {},
 ): Promise<OptimizerCandidateViewModel[]> {
   const normalizedControls = normalizeOptimizerControls(controls);
   const continuousControls = createContinuousControlsForOptimizerRun(setup, normalizedControls);
+  const args = createContinuousOptimizerLaunchArgs(continuousControls);
+  if (options.resetContinuousSession) {
+    args.push("--reset");
+  }
   const candidates = new Map<string, OptimizerCandidateViewModel>();
   let latestResults: OptimizerCandidateViewModel[] = [];
   let progressBatch = 0;
@@ -461,8 +472,9 @@ async function runContinuousOptimizerForControlsLive(
   let latestCheckpointScore: number | undefined;
 
   await streamContinuousOptimizerRun({
-    args: createContinuousOptimizerLaunchArgs(continuousControls),
+    args,
     signal,
+    onLog: options.onLog,
     onStarted: () => {
       reportContinuousProgress("continuous · processus lancé");
     },
@@ -739,8 +751,8 @@ function createContinuousOptimizerSessionId(setup: SetupSnapshot, controls: Opti
   return `optimizer-${setup.id}-${controls.duration}t-${scoreKey}-${cycleKey}`;
 }
 
-function createContinuousScenarioId(controls: OptimizerWorkspaceControls): "t2-a8-p2" | "t3-full" {
-  return controls.duration <= 2 ? "t2-a8-p2" : "t3-full";
+function createContinuousScenarioId(controls: OptimizerWorkspaceControls): "t2-full" | "t3-full" {
+  return controls.duration <= 2 ? "t2-full" : "t3-full";
 }
 
 function isContinuousVerifiedOptimizerCandidatePayload(

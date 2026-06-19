@@ -3062,6 +3062,8 @@ function HuppermageStateTracker({
   snapshot: TimelineSnapshot | undefined;
 }) {
   const huppermage = snapshot?.classState.huppermage;
+  const damageInflictedBonus = (snapshot?.stats.damageInflictedPercent ?? initialConditionStats.damageInflictedPercent)
+    - initialConditionStats.damageInflictedPercent;
   const sublimationStateItems = createSublimationStateItems({
     appliedEffects: snapshot?.appliedEffects ?? [],
     build: activeSublimations,
@@ -3088,6 +3090,14 @@ function HuppermageStateTracker({
         <div>
           <dt>{t("huppermage.feuFollets")}</dt>
           <dd>{huppermage?.feuFolletsActive ?? 0}</dd>
+        </div>
+        <div>
+          <dt>{t("state.damageInflictedBonus")}</dt>
+          <dd>{formatSignedPercent(damageInflictedBonus)}</dd>
+        </div>
+        <div>
+          <dt>{t("state.abundance")}</dt>
+          <dd>{huppermage?.abundanceLevel ?? 0}</dd>
         </div>
         <div>
           <dt>{t("state.storedBq")}</dt>
@@ -3328,6 +3338,13 @@ function DamageBreakdown({ snapshot }: { snapshot: TimelineSnapshot | undefined 
       ))}
     </div>
   );
+}
+
+function formatSignedPercent(value: number): string {
+  if (value > 0) {
+    return `+${formatNumber(value)}%`;
+  }
+  return `${formatNumber(value)}%`;
 }
 
 function StatStepper({

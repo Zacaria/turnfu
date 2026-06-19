@@ -180,6 +180,7 @@ async function streamContinuousOptimizerRun(
   });
   let stdoutBuffer = "";
   let stderrBuffer = "";
+  const recentProcessLogs: string[] = [];
   let closed = false;
   const runStartedAt = performance.now();
 
@@ -230,6 +231,8 @@ async function streamContinuousOptimizerRun(
     for (const line of lines) {
       const trimmed = line.trim();
       if (trimmed.length > 0) {
+        recentProcessLogs.push(`stderr: ${trimmed}`);
+        recentProcessLogs.splice(0, Math.max(0, recentProcessLogs.length - 8));
         sendSse(response, "log", { stream: "stderr", line: trimmed });
       }
     }
@@ -253,6 +256,8 @@ async function streamContinuousOptimizerRun(
         }
       }
       if (stderrBuffer.trim().length > 0) {
+        recentProcessLogs.push(`stderr: ${stderrBuffer.trim()}`);
+        recentProcessLogs.splice(0, Math.max(0, recentProcessLogs.length - 8));
         sendSse(response, "log", { stream: "stderr", line: stderrBuffer.trim() });
       }
       if (code === 0) {
@@ -260,13 +265,35 @@ async function streamContinuousOptimizerRun(
       } else if (signal === "SIGTERM") {
         sendSse(response, "stopped", { signal });
       } else {
-        sendSse(response, "error", { error: `Continuous optimizer exited with code ${code ?? "unknown"}.`, code, signal });
+        sendSse(response, "error", {
+          error: formatContinuousProcessError(
+            `Continuous optimizer exited with code ${code ?? "unknown"}.`,
+            recentProcessLogs,
+          ),
+          code,
+          signal,
+        });
       }
       resolveStream();
     });
   });
 
   response.end();
+}
+
+function formatContinuousProcessError(error: string, recentLogs: string[]): string {
+  const meaningfulLog = recentLogs.find((line) => line.includes("fingerprint mismatch"))
+    ?? recentLogs.find((line) => line.startsWith("stderr: Error:"))
+    ?? recentLogs.find((line) => line.includes("Error:"));
+  const primary = meaningfulLog
+    ? meaningfulLog.replace(/^stderr:\s*/, "").replace(/^Error:\s*/, "")
+    : error;
+  const details = [error, ...recentLogs]
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && line !== primary && line !== `Error: ${primary}`)
+    .slice(0, 8);
+
+  return [primary, ...details].join("\n");
 }
 
 function sendContinuousOptimizerResumeEvents(response: ServerResponse, args: string[]): void {

@@ -5,7 +5,7 @@ export type ContinuousOptimizerTargetElement = "fire" | "water" | "earth" | "air
 
 export type ContinuousOptimizerControls = {
   sessionId: string;
-  scenarioId: "t2-a8-p2" | "t3-a12-p3" | "t3-full";
+  scenarioId: "t2-a8-p2" | "t2-full" | "t3-a12-p3" | "t3-full";
   workerCount: number;
   chunkSize: number;
   dbPath: string;
@@ -108,7 +108,7 @@ export function normalizeContinuousOptimizerControls(
   const defaults = createDefaultContinuousOptimizerControls();
   return {
     sessionId: normalizeSessionId(controls.sessionId ?? defaults.sessionId),
-    scenarioId: controls.scenarioId ?? defaults.scenarioId,
+    scenarioId: normalizeScenarioId(controls.scenarioId ?? defaults.scenarioId),
     workerCount: clampInteger(controls.workerCount ?? defaults.workerCount, 1, 32),
     chunkSize: clampInteger(controls.chunkSize ?? defaults.chunkSize, 1_000, 10_000_000),
     dbPath: (controls.dbPath ?? defaults.dbPath).trim() || defaults.dbPath,
@@ -232,6 +232,7 @@ export async function streamContinuousOptimizerRun({
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  const recentLogs: string[] = [];
 
   try {
     while (true) {
@@ -261,13 +262,19 @@ export async function streamContinuousOptimizerRun({
         } else if (event.event === "stopped") {
           onStopped?.();
         } else if (event.event === "log") {
-          const parsed = JSON.parse(event.data) as { line?: string };
+          const parsed = JSON.parse(event.data) as { line?: string; stream?: string };
           if (parsed.line) {
-            onLog?.(parsed.line);
+            const line = parsed.stream ? `${parsed.stream}: ${parsed.line}` : parsed.line;
+            recentLogs.push(line);
+            recentLogs.splice(0, Math.max(0, recentLogs.length - 8));
+            onLog?.(line);
           }
         } else if (event.event === "error") {
           const parsed = JSON.parse(event.data) as { error?: string };
-          throw new Error(parsed.error ?? "Continuous optimizer stream failed.");
+          throw new Error(formatContinuousOptimizerError(
+            parsed.error ?? "Continuous optimizer stream failed.",
+            recentLogs,
+          ));
         }
       }
     }
@@ -278,6 +285,30 @@ export async function streamContinuousOptimizerRun({
     }
     throw error;
   }
+}
+
+function formatContinuousOptimizerError(error: string, recentLogs: string[]): string {
+  const meaningfulLog = recentLogs.find((line) => line.includes("fingerprint mismatch"))
+    ?? recentLogs.find((line) => line.startsWith("stderr: Error:"))
+    ?? recentLogs.find((line) => line.includes("Error:"));
+  const primary = meaningfulLog
+    ? meaningfulLog.replace(/^stderr:\s*/, "").replace(/^Error:\s*/, "")
+    : error;
+  const details = [error, ...recentLogs]
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && line !== primary && line !== `Error: ${primary}`)
+    .slice(0, 8);
+
+  return [primary, ...details].join("\n");
+}
+
+function normalizeScenarioId(scenarioId: ContinuousOptimizerControls["scenarioId"]): ContinuousOptimizerControls["scenarioId"] {
+  return scenarioId === "t2-a8-p2"
+    || scenarioId === "t2-full"
+    || scenarioId === "t3-a12-p3"
+    || scenarioId === "t3-full"
+    ? scenarioId
+    : "t3-full";
 }
 
 function normalizeSessionId(value: string): string {
