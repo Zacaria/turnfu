@@ -51,6 +51,9 @@ test("creates launch args for the validated Continuous quality preset", () => {
     "--learned-action-set-prior",
     "--contextual-adjacent-swaps",
     "--global-validity-guidance",
+    "--plateau-order-chain-neighbors",
+    "--plateau-trigger-rounds",
+    "1",
   ]);
 });
 
