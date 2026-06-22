@@ -202,6 +202,9 @@ export function createContinuousOptimizerLaunchArgs(controls: ContinuousOptimize
       "--learned-action-set-prior",
       "--contextual-adjacent-swaps",
       "--global-validity-guidance",
+      "--plateau-order-chain-neighbors",
+      "--plateau-trigger-rounds",
+      "1",
     );
   }
 
