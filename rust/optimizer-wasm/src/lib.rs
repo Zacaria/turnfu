@@ -6150,6 +6150,21 @@ pub fn validate_huppermage_class_action(
         });
     }
 
+    if spell_id == "halo-chatoyant" && huppermage_state.halo_chatoyant_marks > 0 {
+        return Some(SimulationViolation {
+            violation_type: "invalidClassStateAction".to_string(),
+            action_index,
+            spell_id: Some(spell_id.to_string()),
+            required: None,
+            available: None,
+            scope: None,
+            message: format!(
+                "Spell '{}' cannot apply Halo Chatoyant while the target already has one.",
+                spell_id
+            ),
+        });
+    }
+
     if !is_feu_follet_spell_id(spell_id) {
         return None;
     }
@@ -11365,7 +11380,7 @@ mod tests {
     }
 
     #[test]
-    fn candidate_evaluation_applies_halo_chatoyant_mark_triggers() {
+    fn candidate_evaluation_rejects_halo_chatoyant_on_existing_mark() {
         let request = parse_optimizer_request(
             r#"{
               "schemaVersion":1,
@@ -11429,21 +11444,24 @@ mod tests {
         let evaluation = evaluate_candidate(&request, &candidate, "candidate:halo")
             .expect("candidate should evaluate");
 
-        assert!(evaluation.valid);
-        assert_eq!(evaluation.total_damage, 186.3);
-        assert_eq!(evaluation.final_huppermage.halo_chatoyant_marks, 0);
-        assert!(!evaluation.final_huppermage.runes.active.aerial);
+        assert!(!evaluation.valid);
+        assert_eq!(evaluation.total_damage, 0.0);
+        assert_eq!(evaluation.final_huppermage.halo_chatoyant_marks, 1);
+        assert!(evaluation.final_huppermage.runes.active.aerial);
         assert_eq!(evaluation.final_huppermage.abundance_level, 15);
         assert_eq!(
-            evaluation.score,
-            Some(CandidateScoreBreakdown {
-                score: 186.3,
-                total_damage: 186.3,
-                damage_by_resolved_element: DamageByElement {
-                    fire: 186.3,
-                    ..DamageByElement::default()
-                },
-            })
+            evaluation
+                .first_violation
+                .as_ref()
+                .map(|violation| violation.violation_type.as_str()),
+            Some("invalidClassStateAction")
+        );
+        assert_eq!(
+            evaluation
+                .first_violation
+                .as_ref()
+                .and_then(|violation| violation.spell_id.as_deref()),
+            Some("halo-chatoyant")
         );
     }
 

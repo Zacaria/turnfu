@@ -971,12 +971,23 @@ function validateHuppermageClassAction(
     };
   }
 
+  const huppermageState = getHuppermageState(state.classState);
+
+  if (spell.id === "halo-chatoyant" && huppermageState.haloChatoyantMarks > 0) {
+    return {
+      type: "invalidClassStateAction" as const,
+      actionIndex,
+      spellId: spell.id,
+      message: `Spell '${spell.id}' cannot apply Halo Chatoyant while the target already has one.`,
+      source: spell.metadata.sources[0],
+    };
+  }
+
   if (!isFeuFolletSpell(spell)) {
     return undefined;
   }
 
   const targetKind = action.target?.kind;
-  const huppermageState = getHuppermageState(state.classState);
 
   if (targetKind === "emptyCell" && getActiveRuneCount(huppermageState) <= 0) {
     return {

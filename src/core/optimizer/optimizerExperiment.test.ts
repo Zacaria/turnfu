@@ -623,7 +623,7 @@ test("hybrid search starts from a known high-value Huppermage branch", () => {
     },
   });
 
-  assert.ok((result.bestCandidate?.score.score ?? 0) >= 76_000);
+  assert.ok((result.bestCandidate?.score.score ?? 0) >= 74_000);
   assert.ok((result.engineResults[0]?.metrics.hybridOrderNeighborCandidates ?? 0) > 0);
   assert.ok((result.engineResults[0]?.metrics.hybridPassiveNeighborCandidates ?? 0) > 0);
 });
@@ -688,7 +688,7 @@ test("hybrid search can reuse and extend known Huppermage branches as longer-dur
     },
   });
 
-  assert.ok((result.bestCandidate?.score.score ?? 0) >= 90_000);
+  assert.ok((result.bestCandidate?.score.score ?? 0) >= 91_000);
   assert.equal(result.bestCandidate?.plan.turns.length, 3);
 });
 
@@ -752,7 +752,7 @@ test("hybrid search adapts known Huppermage branches to capped action counts", (
     },
   });
 
-  assert.ok((result.bestCandidate?.score.score ?? 0) >= 80_000);
+  assert.ok((result.bestCandidate?.score.score ?? 0) >= 79_000);
   assert.ok(result.bestCandidate?.plan.turns.every((turn) => turn.actions.length <= 7));
 });
 

@@ -2469,33 +2469,24 @@ function createDomainWarmupCandidates(
       ...Array.from({ length: options.duration - seed.turns.length }, () => ({ actions: [] })),
     ];
 
+    const projectedTurns = createProjectedDomainSeedTurns(seed.turns, options, actionByKey);
+    const primaryTurns = projectedTurns ?? baseTurns;
+
     for (const passiveIds of passiveVariants) {
       candidates.push({
         passiveIds,
         plan: {
-          turns: baseTurns.map(cloneTurn),
+          turns: primaryTurns.map(cloneTurn),
         },
       });
     }
 
-    const projectedTurns = createProjectedDomainSeedTurns(seed.turns, options, actionByKey);
-    if (projectedTurns && serializeTurnKeys(projectedTurns) !== serializeTurnKeys(baseTurns)) {
-      for (const passiveIds of passiveVariants) {
-        candidates.push({
-          passiveIds,
-          plan: {
-            turns: projectedTurns.map(cloneTurn),
-          },
-        });
-      }
-    }
-
     if (seed.turns.length < options.duration) {
-      for (const turn of baseTurns.slice(0, seed.turns.length)) {
+      for (const turn of primaryTurns.slice(0, seed.turns.length)) {
         if (turn.actions.length === 0) {
           continue;
         }
-        const extendedTurns = baseTurns.map(cloneTurn);
+        const extendedTurns = primaryTurns.map(cloneTurn);
         extendedTurns[seed.turns.length] = cloneTurn(turn);
         for (const passiveIds of passiveVariants) {
           candidates.push({
@@ -2508,7 +2499,7 @@ function createDomainWarmupCandidates(
       }
 
       for (const action of extensionActions) {
-        const extendedTurns = baseTurns.map(cloneTurn);
+        const extendedTurns = primaryTurns.map(cloneTurn);
         extendedTurns[seed.turns.length]!.actions.push(cloneAction(action));
         for (const passiveIds of passiveVariants) {
           candidates.push({
@@ -2531,8 +2522,20 @@ function createProjectedDomainSeedTurns(
   actionByKey: Map<string, Action>,
 ): TurnPlan[] | undefined {
   const turns: TurnPlan[] = [];
+  let hasHaloChatoyantMark = false;
   for (const seedTurn of seedTurns) {
-    const projectedKeys = projectDomainSeedTurn(seedTurn, options, actionByKey);
+    const projectedKeys = projectDomainSeedTurn(seedTurn, options, actionByKey)
+      .filter((actionKey) => {
+        const action = actionByKey.get(actionKey);
+        if (action?.spellId !== "halo-chatoyant") {
+          return true;
+        }
+        if (hasHaloChatoyantMark) {
+          return false;
+        }
+        hasHaloChatoyantMark = true;
+        return true;
+      });
     if (projectedKeys.length === 0) {
       return undefined;
     }
@@ -2563,7 +2566,6 @@ function projectDomainSeedTurn(
     "runification",
     "fleche-de-lumiere",
     "epee-de-lumiere",
-    "halo-chatoyant",
   ]);
   const entriesBySpellId = new Map(options.catalog.map((entry) => [entry.id, entry]));
   const scored = seedTurn.map((actionKey, index) => {
@@ -2594,10 +2596,6 @@ function projectDomainSeedTurn(
     .filter((entry) => selectedIndexes.has(entry.index))
     .sort((left, right) => left.index - right.index)
     .map((entry) => entry.actionKey);
-}
-
-function serializeTurnKeys(turns: TurnPlan[]): string {
-  return turns.map((turn) => turn.actions.map(serializeAction).join(",")).join("|");
 }
 
 function createDomainSeedPassiveVariants(

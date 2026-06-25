@@ -3024,7 +3024,6 @@ test("tracks and triggers Halo Chatoyant marks", () => {
     sequence: {
       actions: [
         { spellId: "halo-chatoyant" },
-        { spellId: "halo-chatoyant" },
       ],
     },
   });
@@ -3032,8 +3031,6 @@ test("tracks and triggers Halo Chatoyant marks", () => {
   assert.equal(result.valid, true);
   assert.equal(result.breakdown[0].damage, 0);
   assert.equal(result.breakdown[0].classStateAfter.huppermage?.haloChatoyantMarks, 1);
-  assert.equal(result.breakdown[1].damage, 222.75);
-  assert.equal(result.breakdown[1].classStateAfter.huppermage?.haloChatoyantMarks, 1);
 
   const aerialResult = simulateTurn({
     catalog: testCatalog,
@@ -3056,14 +3053,14 @@ test("tracks and triggers Halo Chatoyant marks", () => {
   assert.equal(aerialResult.finalState.classState.huppermage?.runes.active.aerial, false);
 });
 
-test("caps existing Halo Chatoyant triggers to one mark in single-target simulation", () => {
+test("rejects Halo Chatoyant when the target already has a mark", () => {
   const result = simulateTurn({
     catalog: testCatalog,
     character: {
       ...character,
       classState: {
         huppermage: {
-          haloChatoyantMarks: 2,
+          haloChatoyantMarks: 1,
           runes: {
             aerial: true,
           },
@@ -3073,10 +3070,11 @@ test("caps existing Halo Chatoyant triggers to one mark in single-target simulat
     sequence: { actions: [{ spellId: "halo-chatoyant" }] },
   });
 
-  assert.equal(result.valid, true);
-  assert.equal(result.totalDamage, 445.5);
-  assert.equal(result.finalState.classState.huppermage?.haloChatoyantMarks, 0);
-  assert.equal(result.finalState.classState.huppermage?.runes.active.aerial, false);
+  assert.equal(result.valid, false);
+  assert.equal(result.totalDamage, 0);
+  assert.equal(result.finalState.classState.huppermage?.haloChatoyantMarks, 1);
+  assert.equal(result.finalState.classState.huppermage?.runes.active.aerial, true);
+  assert.equal(result.violations[0].type, "invalidClassStateAction");
 });
 
 test("evolves caster stats during the turn from supported stat modifiers", () => {
