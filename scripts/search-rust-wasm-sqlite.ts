@@ -39,6 +39,7 @@ import {
   recordContinuousSearchMotif,
   recordContinuousSearchReuseTrial,
   resetContinuousSearchSession,
+  updateContinuousSearchSessionProgress,
 } from "./continuous-search-store.ts";
 
 type HybridSearchScenario = {
@@ -98,6 +99,14 @@ type MotifSeedCandidate = {
   bestScore: number;
 };
 
+type ValidityRescueSeedCandidate = {
+  sourceCandidateId: number;
+  strategy: string;
+  sourceLabel: string;
+  candidate: RustWasmOptimizerCandidateInput;
+  sourceScore: number;
+};
+
 type VerifiedContinuousTopCandidate = {
   rustCandidate: RustWasmOptimizerScoredCandidate;
   payload: {
@@ -134,6 +143,8 @@ const workerCount = readIntegerOption("--workers", Math.min(6, availableParallel
 const chunkSize = readIntegerOption("--chunk-size", 100_000);
 const maxRounds = readIntegerOption("--max-rounds", 0);
 const timeboxMs = readIntegerOption("--timebox-ms", 0);
+const minRoundValidCandidates = readNonNegativeIntegerOption("--min-round-valid-candidates", 0);
+const maxRoundAttemptMultiplier = readIntegerOption("--max-round-attempt-multiplier", 1);
 const reset = process.argv.includes("--reset");
 const reuseTrialsEnabled = process.argv.includes("--reuse-trials");
 const reuseTrialsPerWorker = readIntegerOption("--reuse-trials-per-worker", 1);
@@ -141,6 +152,9 @@ const reusePolicyMode = readReusePolicyMode(readOption("--reuse-policy") ?? "ada
 const reusePolicyMinEvaluated = readIntegerOption("--reuse-policy-min-evaluated", 3);
 const motifSeedsEnabled = process.argv.includes("--motif-seeds");
 const motifSeedsPerWorker = readIntegerOption("--motif-seeds-per-worker", 1);
+const validityRescueEnabled = process.argv.includes("--validity-rescue");
+const validityRescueSeedsPerWorker = readIntegerOption("--validity-rescue-seeds-per-worker", 6);
+const validityRescueEvidenceMultiplier = readIntegerOption("--validity-rescue-evidence-multiplier", 8);
 const resourceAwareFreshChance = readOptionalNumberOption("--resource-aware-fresh-chance");
 const contextualAdjacentSwapsEnabled = process.argv.includes("--contextual-adjacent-swaps");
 const globalValidityGuidanceRequested = process.argv.includes("--global-validity-guidance");
@@ -270,9 +284,29 @@ const baseRequest = createRustWasmOptimizerRequest({
   maxActionsPerTurn: scenario.maxActionsPerTurn,
   maxPassiveCount: scenario.maxPassiveCount,
   maxSublimationCount: scenario.maxSublimationCount,
-  availableSpellIds: learnedActionSetPriorEnabled ? learnedActionSetSpellIds : undefined,
-  availablePassiveIds: learnedLoadoutPriorEnabled ? learnedLoadoutPassiveIds : availablePassiveIds,
-  availableSublimationIds: learnedLoadoutPriorEnabled ? learnedLoadoutSublimationIds : availableSublimationIds,
+  availableSpellIds: undefined,
+  availablePassiveIds,
+  availableSublimationIds,
+  criterion,
+  requireSustainableCycle,
+  defaultActionContext,
+  maxCandidates: 5,
+});
+const legacyLearnedRestrictionRequest = createRustWasmOptimizerRequest({
+  catalog: huppermageCatalog,
+  character,
+  duration: scenario.duration,
+  engines: ["hybrid"],
+  backend: "rustWasm",
+  rustWasmOracle: "disabled",
+  seed: `search-${scenario.id}-${seed}`,
+  budget: { iterations: chunkSize },
+  maxActionsPerTurn: scenario.maxActionsPerTurn,
+  maxPassiveCount: scenario.maxPassiveCount,
+  maxSublimationCount: scenario.maxSublimationCount,
+  availableSpellIds: learnedActionSetSpellIds,
+  availablePassiveIds: learnedLoadoutPassiveIds,
+  availableSublimationIds: learnedLoadoutSublimationIds,
   criterion,
   requireSustainableCycle,
   defaultActionContext,
@@ -280,18 +314,31 @@ const baseRequest = createRustWasmOptimizerRequest({
 });
 if (resourceAwareFreshChance !== undefined) {
   baseRequest.hybridResourceAwareFreshChance = clamp(resourceAwareFreshChance, 0, 1);
+  legacyLearnedRestrictionRequest.hybridResourceAwareFreshChance = baseRequest.hybridResourceAwareFreshChance;
 }
 if (contextualAdjacentSwapsEnabled) {
   baseRequest.hybridContextualAdjacentSwaps = true;
+  legacyLearnedRestrictionRequest.hybridContextualAdjacentSwaps = true;
 }
 if (globalValidityGuidanceEnabled) {
   baseRequest.hybridGlobalValidityGuidance = true;
+  legacyLearnedRestrictionRequest.hybridGlobalValidityGuidance = true;
 }
 const fingerprint = createFingerprint({
   algorithm: "rust-wasm-resume-v2-empty-cell-target-rules",
   scenario,
   workerCount,
   request: { ...baseRequest, iterations: 0 },
+  plateauOrderChainNeighbors: {
+    enabled: plateauOrderChainNeighborsEnabled,
+    triggerRounds: plateauTriggerRounds,
+  },
+});
+const legacyLearnedRestrictionFingerprint = createFingerprint({
+  algorithm: "rust-wasm-resume-v2-empty-cell-target-rules",
+  scenario,
+  workerCount,
+  request: { ...legacyLearnedRestrictionRequest, iterations: 0 },
   plateauOrderChainNeighbors: {
     enabled: plateauOrderChainNeighborsEnabled,
     triggerRounds: plateauTriggerRounds,
@@ -311,16 +358,18 @@ const workerSource = `
 
 mkdirSync(dirname(dbPath), { recursive: true });
 const db = new DatabaseSync(dbPath);
+db.exec("PRAGMA busy_timeout = 5000");
 createSchema(db);
 createContinuousSearchSchema(db);
 if (reset) {
   resetSession(db, sessionId);
   resetContinuousSearchSession(db, sessionId);
 }
-const session = ensureSession(db, sessionId, fingerprint);
+const session = ensureSession(db, sessionId, fingerprint, [legacyLearnedRestrictionFingerprint]);
 ensureContinuousSearchSession(db, {
   id: sessionId,
   fingerprint,
+  compatibleFingerprints: [legacyLearnedRestrictionFingerprint],
   scenarioId,
   setupHash: fingerprint,
   seed,
@@ -344,6 +393,10 @@ while (!stopRequested) {
   }
 
   const workerStates = readWorkerStates(db, sessionId);
+  const previousValidCandidates = [...workerStates.values()]
+    .reduce((total, state) => total + state.valid_candidates, 0);
+  const previousInvalidCandidates = [...workerStates.values()]
+    .reduce((total, state) => total + state.invalid_candidates, 0);
   const previousBest = session.best_candidate_json
     ? JSON.parse(session.best_candidate_json) as RustWasmOptimizerScoredCandidate
     : undefined;
@@ -375,6 +428,17 @@ while (!stopRequested) {
         scenario,
       )
     : [];
+  const validityRescueCandidates = validityRescueEnabled
+    ? createValidityRescueSeedCandidates(
+        listContinuousSearchCandidateEvidence(
+          db,
+          sessionId,
+          workerCount * validityRescueSeedsPerWorker * validityRescueEvidenceMultiplier,
+        ),
+        workerCount * validityRescueSeedsPerWorker * Math.max(1, maxRoundAttemptMultiplier),
+        scenario,
+      )
+    : [];
   const workerReuseTrialSelections = Array.from({ length: workerCount }, (_, workerIndex) =>
     selectWorkerReuseTrialCandidates(reuseTrialCandidates, workerIndex, workerCount, reuseTrialsPerWorker)
   );
@@ -383,7 +447,20 @@ while (!stopRequested) {
   );
   const selectedReuseTrials = workerReuseTrialSelections.flatMap((selection) => selection.trials);
   const selectedMotifSeeds = workerMotifSeedSelections.flatMap((selection) => selection.seeds);
+  const selectedValidityRescueSeeds: ValidityRescueSeedCandidate[] = [];
   const roundStart = performance.now();
+  const workerResumeStates = Array.from({ length: workerCount }, (_, workerIndex) =>
+    workerStates.get(workerIndex)?.resume_state_json
+      ? JSON.parse(workerStates.get(workerIndex)!.resume_state_json!) as RustWasmHybridSearchResumeState
+      : undefined
+  );
+  const roundResults: Array<{ workerIndex: number; result: WorkerSearchResponse }> = [];
+  const maxRoundAttempts = Math.max(workerCount * chunkSize, workerCount * chunkSize * maxRoundAttemptMultiplier);
+  let attempts = 0;
+  let roundValidCandidates = 0;
+  let roundInvalidCandidates = 0;
+  let roundBatchCount = 0;
+  let validityRescueModeBatches = 0;
   const progressResults = new Map<number, WorkerSearchResponse>();
   let lastProgressEmitMs = 0;
   const emitLiveProgress = () => {
@@ -394,43 +471,82 @@ while (!stopRequested) {
     lastProgressEmitMs = now;
     console.log(JSON.stringify(createContinuousProgressSummary(
       Array.from(progressResults.values()).map(sanitizeContinuousWorkerResult),
-      session.total_attempts,
+      session.total_attempts + attempts,
       roundStart,
       roundIndex,
     )));
   };
-  const rawResults = await Promise.all(Array.from({ length: workerCount }, (_, workerIndex) => {
-    const resumeState = workerStates.get(workerIndex)?.resume_state_json
-      ? JSON.parse(workerStates.get(workerIndex)!.resume_state_json!) as RustWasmHybridSearchResumeState
-      : undefined;
-    const seedCandidates = [
-      ...workerReuseTrialSelections[workerIndex].candidates,
-      ...workerMotifSeedSelections[workerIndex].candidates,
-    ];
-    const request: RustWasmOptimizerRequest = {
-      ...baseRequest,
-      seed: `${baseRequest.seed}:worker:${workerIndex}`,
-      iterations: chunkSize,
-      hybridContextualAdjacentSwaps: contextualAdjacentSwapsEnabled,
-      hybridGlobalValidityGuidance: globalValidityGuidanceEnabled,
-      hybridPlateauOrderChainNeighbors: plateauModeActive,
-      seedCandidates: seedCandidates.length > 0 ? seedCandidates : undefined,
-      resumeState,
-    };
-    return runWorker(request, (progress) => {
-      progressResults.set(workerIndex, progress);
-      emitLiveProgress();
-    });
-  }));
-  const results = rawResults.map(sanitizeContinuousWorkerResult);
+  while (!stopRequested) {
+    if (timeboxMs > 0 && performance.now() - startedAt >= timeboxMs) {
+      break;
+    }
+    if (roundBatchCount > 0
+      && roundValidCandidates >= minRoundValidCandidates) {
+      break;
+    }
+    if (roundBatchCount > 0 && attempts >= maxRoundAttempts) {
+      break;
+    }
+
+    const batchIndex = roundBatchCount;
+    progressResults.clear();
+    const validityRescueModeActive = validityRescueEnabled
+      && minRoundValidCandidates > 0
+      && batchIndex > 0
+      && roundValidCandidates < minRoundValidCandidates;
+    if (validityRescueModeActive) {
+      validityRescueModeBatches += 1;
+    }
+    const batchResults = await Promise.all(Array.from({ length: workerCount }, async (_, workerIndex) => {
+      const validityRescueSelection = validityRescueModeActive
+        ? selectWorkerValidityRescueSeedCandidates(
+            validityRescueCandidates,
+            workerIndex,
+            workerCount,
+            validityRescueSeedsPerWorker,
+            batchIndex - 1,
+          )
+        : { seeds: [], candidates: [] };
+      selectedValidityRescueSeeds.push(...validityRescueSelection.seeds);
+      const seedCandidates = batchIndex === 0
+        ? [
+            ...workerReuseTrialSelections[workerIndex].candidates,
+            ...workerMotifSeedSelections[workerIndex].candidates,
+          ]
+        : validityRescueSelection.candidates;
+      const request: RustWasmOptimizerRequest = {
+        ...baseRequest,
+        seed: `${baseRequest.seed}:worker:${workerIndex}`,
+        iterations: chunkSize,
+        hybridContextualAdjacentSwaps: contextualAdjacentSwapsEnabled,
+        hybridGlobalValidityGuidance: globalValidityGuidanceEnabled,
+        hybridPlateauOrderChainNeighbors: plateauModeActive,
+        seedCandidates: seedCandidates.length > 0 ? seedCandidates : undefined,
+        resumeState: workerResumeStates[workerIndex],
+      };
+      const result = await runWorker(request, (progress) => {
+        progressResults.set(workerIndex, progress);
+        emitLiveProgress();
+      });
+      return { workerIndex, result: sanitizeContinuousWorkerResult(result) };
+    }));
+    roundBatchCount += 1;
+    for (const entry of batchResults) {
+      roundResults.push(entry);
+      workerResumeStates[entry.workerIndex] = entry.result.resumeState;
+      attempts += entry.result.attempts;
+      roundValidCandidates += entry.result.validCandidates;
+      roundInvalidCandidates += entry.result.invalidCandidates;
+    }
+  }
+  const results = roundResults.map((entry) => entry.result);
 
   const proposedTopCandidates = [
     ...results.flatMap((result) => result.topCandidates),
     ...(previousBest ? [previousBest] : []),
   ].sort(compareRustCandidates).slice(0, 5);
-  const attempts = results.reduce((total, result) => total + result.attempts, 0);
-  const validCandidates = results.reduce((total, result) => total + result.validCandidates, 0);
-  const invalidCandidates = results.reduce((total, result) => total + result.invalidCandidates, 0);
+  const validCandidates = previousValidCandidates + roundValidCandidates;
+  const invalidCandidates = previousInvalidCandidates + roundInvalidCandidates;
   const metrics = mergeMetrics(results.map((result) => result.metrics));
   const fabricationAttempts = metrics.fabricationAttempts ?? attempts;
   const admittedIndividuals = metrics.continuousRustAdmittedIndividuals ?? validCandidates;
@@ -458,6 +574,14 @@ while (!stopRequested) {
   const evaluatedMotifSeeds = selectedMotifSeeds
     .map((seedCandidate) => motifSeedEvaluationByLabel.get(seedCandidate.sourceLabel))
     .filter((evaluation): evaluation is RustWasmSeedCandidateEvaluation => evaluation !== undefined);
+  const validityRescueEvaluationByLabel = new Map(
+    seedCandidateEvaluations
+      .filter((evaluation) => evaluation.sourceLabel.startsWith("rescue:"))
+      .map((evaluation) => [evaluation.sourceLabel, evaluation] as const),
+  );
+  const evaluatedValidityRescueSeeds = selectedValidityRescueSeeds
+    .map((seedCandidate) => validityRescueEvaluationByLabel.get(seedCandidate.sourceLabel))
+    .filter((evaluation): evaluation is RustWasmSeedCandidateEvaluation => evaluation !== undefined);
   const elapsedMs = performance.now() - roundStart;
   const totalAttempts = session.total_attempts + attempts;
   const verifiedTopCandidates = createVerifiedContinuousTopCandidates(proposedTopCandidates, totalAttempts);
@@ -478,14 +602,21 @@ while (!stopRequested) {
     attemptsPerSecond: round(attempts / Math.max(0.001, elapsedMs / 1_000)),
     attempts,
     totalAttempts,
+    roundBatchCount,
+    minRoundValidCandidates,
+    maxRoundAttempts,
+    roundValidCandidates,
+    roundInvalidCandidates,
+    roundValidRate: round(roundValidCandidates / Math.max(1, attempts), 4),
+    validCandidates,
+    invalidCandidates,
+    validRate: round(validCandidates / Math.max(1, totalAttempts), 4),
     admittedIndividuals,
     populationSize: metrics.populationSize ?? admittedIndividuals,
     fabricationAttempts,
     discardedProposals,
     projectionRepairs,
     factoryExhaustions,
-    validCandidates,
-    invalidCandidates,
     score: round(bestCandidate?.score.score ?? 0),
     resourceAwareFreshChance: baseRequest.hybridResourceAwareFreshChance ?? 0.12,
     contextualAdjacentSwapsEnabled,
@@ -548,6 +679,20 @@ while (!stopRequested) {
     globalImprovedMotifSeedCandidates: evaluatedMotifSeeds.filter((evaluation) =>
       evaluation.score !== undefined && evaluation.score > previousBestScore
     ).length,
+    validityRescueEnabled,
+    validityRescueSeedsPerWorker,
+    validityRescueSeedCandidates: validityRescueCandidates.length,
+    validityRescueModeBatches,
+    validityRescueTriggered: validityRescueModeBatches > 0,
+    usedValidityRescueCandidates: selectedValidityRescueSeeds.length,
+    evaluatedValidityRescueCandidates: evaluatedValidityRescueSeeds.length,
+    validValidityRescueCandidates: evaluatedValidityRescueSeeds.filter((evaluation) => evaluation.valid).length,
+    islandImprovedValidityRescueCandidates: evaluatedValidityRescueSeeds.filter((evaluation) =>
+      evaluation.improvedIslandBest === true
+    ).length,
+    globalImprovedValidityRescueCandidates: evaluatedValidityRescueSeeds.filter((evaluation) =>
+      evaluation.score !== undefined && evaluation.score > previousBestScore
+    ).length,
     verifiedCandidates,
     metrics,
   };
@@ -573,7 +718,7 @@ while (!stopRequested) {
 
   db.exec("BEGIN IMMEDIATE");
   try {
-    for (const [workerIndex, result] of results.entries()) {
+    for (const { workerIndex, result } of roundResults) {
       upsertWorkerState(db, sessionId, workerIndex, result);
     }
     const topCandidateScoreByKey = new Map(
@@ -603,7 +748,16 @@ while (!stopRequested) {
       sessionId,
       totalAttempts,
       score: bestCandidate?.score.score ?? 0,
-      validRate: validCandidates / Math.max(1, attempts),
+      validRate: validCandidates / Math.max(1, totalAttempts),
+      bestCandidateId: persistedTopCandidateIds[0] ?? null,
+      summary,
+    });
+    updateContinuousSearchSessionProgress(db, {
+      sessionId,
+      totalAttempts,
+      validCandidates,
+      invalidCandidates,
+      bestScore: bestCandidate?.score.score ?? null,
       bestCandidateId: persistedTopCandidateIds[0] ?? null,
       summary,
     });
@@ -772,13 +926,27 @@ function resetSession(database: DatabaseSync, id: string): void {
   database.prepare("DELETE FROM sessions WHERE id = ?").run(id);
 }
 
-function ensureSession(database: DatabaseSync, id: string, expectedFingerprint: string): SessionRow {
+function ensureSession(
+  database: DatabaseSync,
+  id: string,
+  expectedFingerprint: string,
+  compatibleFingerprints: string[] = [],
+): SessionRow {
   const existing = database
     .prepare("SELECT id, fingerprint, total_attempts, best_candidate_json FROM sessions WHERE id = ?")
     .get(id) as SessionRow | undefined;
   if (existing) {
-    if (existing.fingerprint !== expectedFingerprint) {
+    const compatible = new Set([expectedFingerprint, ...compatibleFingerprints]);
+    if (!compatible.has(existing.fingerprint)) {
       throw new Error(`Session '${id}' fingerprint mismatch. Use --reset to discard persisted search state.`);
+    }
+    if (existing.fingerprint !== expectedFingerprint) {
+      database.prepare(`
+        UPDATE sessions
+        SET fingerprint = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).run(expectedFingerprint, id);
+      existing.fingerprint = expectedFingerprint;
     }
     return existing;
   }
@@ -1050,6 +1218,63 @@ function createMotifSeedCandidates(
   return seeds;
 }
 
+function createValidityRescueSeedCandidates(
+  evidenceRows: ContinuousSearchCandidateEvidence[],
+  limit: number,
+  scenario: HybridSearchScenario,
+): ValidityRescueSeedCandidate[] {
+  const seeds: ValidityRescueSeedCandidate[] = [];
+  const seen = new Set<string>();
+  for (const evidence of evidenceRows) {
+    const sourceCandidate = toRustWasmCandidateInput(evidence.candidate);
+    if (!sourceCandidate) {
+      continue;
+    }
+    addValidityRescueSeedCandidate(seeds, seen, evidence, "elite-replay", sourceCandidate);
+    for (const trial of createValidityRescueMutations(sourceCandidate, scenario)) {
+      addValidityRescueSeedCandidate(seeds, seen, evidence, trial.strategy, trial.candidate);
+    }
+    if (seeds.length >= limit) {
+      break;
+    }
+  }
+  return seeds.slice(0, limit);
+}
+
+function addValidityRescueSeedCandidate(
+  seeds: ValidityRescueSeedCandidate[],
+  seen: Set<string>,
+  evidence: ContinuousSearchCandidateEvidence,
+  strategy: string,
+  candidate: RustWasmOptimizerCandidateInput,
+): void {
+  const normalized = normalizeCandidateForScenario(candidate, scenario);
+  const key = stableStringify(normalized);
+  if (seen.has(key)) {
+    return;
+  }
+  seen.add(key);
+  const sourceLabel = `rescue:${strategy}:${evidence.id}:${createFingerprint(normalized).slice(0, 12)}`;
+  seeds.push({
+    sourceCandidateId: evidence.id,
+    strategy,
+    sourceLabel,
+    candidate: { ...normalized, sourceLabel },
+    sourceScore: evidence.score,
+  });
+}
+
+function createValidityRescueMutations(
+  candidate: RustWasmOptimizerCandidateInput,
+  scenario: HybridSearchScenario,
+): Array<{ strategy: string; candidate: RustWasmOptimizerCandidateInput }> {
+  return [
+    ...mutateCandidateForReuseTrials(candidate, scenario.maxActionsPerTurn),
+    dropLastAction(candidate),
+    trimLongestTurn(candidate),
+  ].filter((trial): trial is { strategy: string; candidate: RustWasmOptimizerCandidateInput } => trial !== null);
+}
+
 function motifToSeedCandidate(
   motifRow: ContinuousSearchMotifEvidence,
   scenario: HybridSearchScenario,
@@ -1159,6 +1384,44 @@ function moveFirstActionLater(
   return null;
 }
 
+function dropLastAction(candidate: RustWasmOptimizerCandidateInput): { strategy: string; candidate: RustWasmOptimizerCandidateInput } | null {
+  const next = cloneCandidateInput(candidate);
+  for (let index = next.plan.turns.length - 1; index >= 0; index -= 1) {
+    const turn = next.plan.turns[index];
+    if (turn.actions.length === 0) {
+      continue;
+    }
+    turn.actions.pop();
+    return { strategy: "drop-last-action", candidate: next };
+  }
+  return null;
+}
+
+function trimLongestTurn(candidate: RustWasmOptimizerCandidateInput): { strategy: string; candidate: RustWasmOptimizerCandidateInput } | null {
+  const next = cloneCandidateInput(candidate);
+  const longestTurn = next.plan.turns
+    .map((turn, index) => ({ turn, index }))
+    .sort((left, right) => right.turn.actions.length - left.turn.actions.length || left.index - right.index)[0];
+  if (!longestTurn || longestTurn.turn.actions.length === 0) {
+    return null;
+  }
+  longestTurn.turn.actions.pop();
+  return { strategy: "trim-longest-turn", candidate: next };
+}
+
+function normalizeCandidateForScenario(
+  candidate: RustWasmOptimizerCandidateInput,
+  scenario: HybridSearchScenario,
+): RustWasmOptimizerCandidateInput {
+  const normalized = cloneCandidateInput(candidate);
+  normalized.passiveIds = normalized.passiveIds.slice(0, scenario.maxPassiveCount);
+  normalized.sublimationIds = normalized.sublimationIds.slice(0, scenario.maxSublimationCount);
+  normalized.plan.turns = Array.from({ length: scenario.duration }, (_, index) => ({
+    actions: (normalized.plan.turns[index]?.actions ?? []).slice(0, scenario.maxActionsPerTurn),
+  }));
+  return normalized;
+}
+
 function cloneCandidateInput(candidate: RustWasmOptimizerCandidateInput): RustWasmOptimizerCandidateInput {
   return JSON.parse(JSON.stringify(candidate)) as RustWasmOptimizerCandidateInput;
 }
@@ -1209,10 +1472,52 @@ function selectWorkerMotifSeedCandidates(
   };
 }
 
+function selectWorkerValidityRescueSeedCandidates(
+  seeds: ValidityRescueSeedCandidate[],
+  workerIndex: number,
+  workerCount: number,
+  limit: number,
+  rescueBatchIndex: number,
+): { seeds: ValidityRescueSeedCandidate[]; candidates: RustWasmOptimizerCandidateInput[] } {
+  const selected: ValidityRescueSeedCandidate[] = [];
+  const seen = new Set<string>();
+  if (seeds.length === 0) {
+    return { seeds: [], candidates: [] };
+  }
+  const startIndex = workerIndex + rescueBatchIndex * workerCount * limit;
+  for (let offset = 0; offset < seeds.length && selected.length < limit; offset += 1) {
+    const seed = seeds[(startIndex + offset * workerCount) % seeds.length];
+    addValidityRescueSelection(selected, seen, seed);
+  }
+  for (const seed of seeds) {
+    if (selected.length >= limit) {
+      break;
+    }
+    addValidityRescueSelection(selected, seen, seed);
+  }
+  return {
+    seeds: selected,
+    candidates: selected.map((seed) => seed.candidate),
+  };
+}
+
 function addMotifSeedCandidate(
   selected: MotifSeedCandidate[],
   seen: Set<string>,
   seedCandidate: MotifSeedCandidate,
+): void {
+  const key = stableStringify(removeCandidateSourceLabel(seedCandidate.candidate));
+  if (seen.has(key)) {
+    return;
+  }
+  seen.add(key);
+  selected.push(seedCandidate);
+}
+
+function addValidityRescueSelection(
+  selected: ValidityRescueSeedCandidate[],
+  seen: Set<string>,
+  seedCandidate: ValidityRescueSeedCandidate,
 ): void {
   const key = stableStringify(removeCandidateSourceLabel(seedCandidate.candidate));
   if (seen.has(key)) {

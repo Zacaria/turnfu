@@ -19,6 +19,7 @@ export type ContinuousSearchSession = {
 export type EnsureContinuousSearchSessionInput = {
   id: string;
   fingerprint: string;
+  compatibleFingerprints?: string[];
   scenarioId: string;
   setupHash: string;
   seed: string;
@@ -41,6 +42,16 @@ export type RecordContinuousSearchCheckpointInput = {
   totalAttempts: number;
   score: number;
   validRate: number;
+  bestCandidateId: number | null;
+  summary: unknown;
+};
+
+export type UpdateContinuousSearchSessionProgressInput = {
+  sessionId: string;
+  totalAttempts: number;
+  validCandidates: number;
+  invalidCandidates: number;
+  bestScore: number | null;
   bestCandidateId: number | null;
   summary: unknown;
 };
@@ -239,8 +250,16 @@ export function ensureContinuousSearchSession(
   `).get(input.id) as Record<string, unknown> | undefined;
 
   if (row) {
-    if (row.fingerprint !== input.fingerprint) {
+    const compatibleFingerprints = new Set([input.fingerprint, ...(input.compatibleFingerprints ?? [])]);
+    if (!compatibleFingerprints.has(String(row.fingerprint))) {
       throw new Error(`Session '${input.id}' fingerprint mismatch. Use --reset to discard persisted search state.`);
+    }
+    if (row.fingerprint !== input.fingerprint) {
+      database.prepare(`
+        UPDATE continuous_sessions
+        SET fingerprint = ?, setup_hash = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).run(input.fingerprint, input.setupHash, input.id);
     }
     return mapSessionRow(row);
   }
@@ -278,6 +297,31 @@ export function recordContinuousSearchCheckpoint(
     input.validRate,
     input.bestCandidateId,
     JSON.stringify(input.summary),
+  );
+}
+
+export function updateContinuousSearchSessionProgress(
+  database: DatabaseSync,
+  input: UpdateContinuousSearchSessionProgressInput,
+): void {
+  database.prepare(`
+    UPDATE continuous_sessions
+    SET total_attempts = ?,
+        valid_candidates = ?,
+        invalid_candidates = ?,
+        best_score = ?,
+        best_candidate_id = ?,
+        last_summary_json = ?,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(
+    input.totalAttempts,
+    input.validCandidates,
+    input.invalidCandidates,
+    input.bestScore,
+    input.bestCandidateId,
+    JSON.stringify(input.summary),
+    input.sessionId,
   );
 }
 
