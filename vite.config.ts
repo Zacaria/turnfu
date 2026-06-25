@@ -324,18 +324,138 @@ function sendContinuousOptimizerResumeEvents(response: ServerResponse, args: str
 
   const db = new DatabaseSync(dbPath);
   try {
-    const row = db.prepare("SELECT last_summary_json FROM sessions WHERE id = ?").get(sessionId) as
-      | { last_summary_json: string | null }
-      | undefined;
-    if (!row?.last_summary_json) {
+    db.exec("PRAGMA busy_timeout = 5000");
+    const summary = readContinuousOptimizerStoredSummary(db, sessionId);
+    if (!summary) {
       return;
     }
-    sendContinuousOptimizerSummaryEvents(response, JSON.parse(row.last_summary_json) as unknown);
+    sendContinuousOptimizerSummaryEvents(
+      response,
+      withContinuousOptimizerStoredCandidates(db, sessionId, summary),
+    );
   } catch {
     return;
   } finally {
     db.close();
   }
+}
+
+function readContinuousOptimizerStoredSummary(
+  db: DatabaseSync,
+  sessionId: string,
+): unknown | null {
+  const continuousRow = db.prepare("SELECT last_summary_json FROM continuous_sessions WHERE id = ?").get(sessionId) as
+    | { last_summary_json: string | null }
+    | undefined;
+  if (continuousRow?.last_summary_json) {
+    return JSON.parse(continuousRow.last_summary_json) as unknown;
+  }
+
+  const legacyRow = db.prepare("SELECT last_summary_json FROM sessions WHERE id = ?").get(sessionId) as
+    | { last_summary_json: string | null }
+    | undefined;
+  return legacyRow?.last_summary_json ? JSON.parse(legacyRow.last_summary_json) as unknown : null;
+}
+
+function withContinuousOptimizerStoredCandidates(
+  db: DatabaseSync,
+  sessionId: string,
+  summary: unknown,
+): unknown {
+  if (!summary || typeof summary !== "object") {
+    return summary;
+  }
+
+  const record = summary as Record<string, unknown>;
+  const storedCandidates = readContinuousOptimizerStoredCandidatePayloads(db, sessionId, record, 20);
+  if (storedCandidates.length === 0) {
+    return summary;
+  }
+
+  const summaryCandidates = Array.isArray(record.verifiedCandidates) ? record.verifiedCandidates : [];
+  const byId = new Map<string, unknown>();
+  for (const candidate of [...storedCandidates, ...summaryCandidates]) {
+    const id = readContinuousOptimizerCandidatePayloadId(candidate);
+    if (id) {
+      byId.set(id, candidate);
+    }
+  }
+
+  return {
+    ...record,
+    verifiedCandidates: [...byId.values()],
+  };
+}
+
+function readContinuousOptimizerStoredCandidatePayloads(
+  db: DatabaseSync,
+  sessionId: string,
+  summary: Record<string, unknown>,
+  limit: number,
+): unknown[] {
+  const rows = db.prepare(`
+    SELECT candidate_json, score, attempt
+    FROM continuous_candidate_evaluations
+    WHERE session_id = ? AND valid = 1
+    ORDER BY score DESC, attempt DESC, id ASC
+    LIMIT ?
+  `).all(sessionId, limit) as Array<{ candidate_json: string; score: number; attempt: number }>;
+
+  return rows
+    .map((row, index) => createContinuousOptimizerCandidatePayloadFromStoredRow(row, summary, index + 1))
+    .filter((payload): payload is NonNullable<typeof payload> => payload !== null);
+}
+
+function createContinuousOptimizerCandidatePayloadFromStoredRow(
+  row: { candidate_json: string; score: number; attempt: number },
+  summary: Record<string, unknown>,
+  rank: number,
+): unknown | null {
+  const candidate = JSON.parse(row.candidate_json) as unknown;
+  if (!isContinuousOptimizerDisplayCandidate(candidate)) {
+    return null;
+  }
+
+  return {
+    schemaVersion: 1,
+    totalAttempts: Number(summary.totalAttempts ?? row.attempt),
+    rank,
+    run: {
+      sessionId: String(summary.session ?? ""),
+      scenarioId: String(summary.scenario ?? ""),
+      seed: String(summary.seed ?? "continuous"),
+      workerCount: Number(summary.workerCount ?? 0),
+      chunkSize: Number(summary.chunkSize ?? 0),
+      scoreCriterion: summary.scoreCriterion === "element-damage" ? "element-damage" : "total-damage",
+      targetElement: summary.targetElement ?? null,
+      requireSustainableCycle: Boolean(summary.requireSustainableCycle),
+    },
+    candidate,
+  };
+}
+
+function isContinuousOptimizerDisplayCandidate(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const record = value as Record<string, unknown>;
+  return Boolean(record.plan)
+    && Boolean(record.simulation)
+    && Boolean(record.score)
+    && Boolean(record.sustainability);
+}
+
+function readContinuousOptimizerCandidatePayloadId(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+  const candidate = (payload as Record<string, unknown>).candidate;
+  if (!candidate || typeof candidate !== "object") {
+    return null;
+  }
+  const id = (candidate as Record<string, unknown>).id;
+  return typeof id === "string" ? id : null;
 }
 
 function sendContinuousOptimizerSummaryEvents(response: ServerResponse, summary: unknown): void {
