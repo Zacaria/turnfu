@@ -7214,7 +7214,9 @@ impl<'a> HybridProgressSink<'a> {
         self.completed_top_candidates = top_candidates.to_vec();
         self.completed_metrics = metrics.clone();
         while self.next_attempt <= self.completed_attempts {
-            self.next_attempt = self.next_attempt.saturating_add(self.interval_attempts.max(1));
+            self.next_attempt = self
+                .next_attempt
+                .saturating_add(self.interval_attempts.max(1));
         }
     }
 
@@ -7235,7 +7237,9 @@ impl<'a> HybridProgressSink<'a> {
             return Ok(());
         }
         while self.next_attempt <= attempts {
-            self.next_attempt = self.next_attempt.saturating_add(self.interval_attempts.max(1));
+            self.next_attempt = self
+                .next_attempt
+                .saturating_add(self.interval_attempts.max(1));
         }
 
         let mut metrics = self.completed_metrics.clone();
@@ -8056,8 +8060,10 @@ fn run_hybrid_island_search(
     let mut restart_index = resume_state
         .map(|state| state.restart_index)
         .unwrap_or(restart_index_offset);
+    let mut factory_invocations = 0;
 
     while accumulator.attempts < request.iterations
+        && factory_invocations < request.iterations
         && population.len() < config.population_size as usize
     {
         let input = create_hybrid_fresh_candidate(
@@ -8071,6 +8077,7 @@ fn run_hybrid_island_search(
             &mut warmup_index,
             &mut accumulator.metrics,
         );
+        factory_invocations += 1;
         let tracked = fabricate_valid_hybrid_individual(
             request,
             input,
@@ -8111,7 +8118,7 @@ fn run_hybrid_island_search(
 
     population = truncate_population(population, config.population_size);
 
-    while accumulator.attempts < request.iterations {
+    while accumulator.attempts < request.iterations && factory_invocations < request.iterations {
         if population.len() < 2 {
             consecutive_repair_attempts = 0;
             consecutive_elite_neighbor_attempts = 0;
@@ -8126,6 +8133,7 @@ fn run_hybrid_island_search(
                 &mut warmup_index,
                 &mut accumulator.metrics,
             );
+            factory_invocations += 1;
             let tracked = fabricate_valid_hybrid_individual(
                 request,
                 input,
@@ -8179,9 +8187,12 @@ fn run_hybrid_island_search(
             population = restart.retained_elites;
             let mut improved = false;
             for immigrant in restart.immigrants {
-                if accumulator.attempts >= request.iterations {
+                if accumulator.attempts >= request.iterations
+                    || factory_invocations >= request.iterations
+                {
                     break;
                 }
+                factory_invocations += 1;
                 let tracked = fabricate_valid_hybrid_individual(
                     request,
                     immigrant.candidate,
@@ -8213,7 +8224,13 @@ fn run_hybrid_island_search(
                         &mut accumulator.metrics,
                     );
                 }
-                progress_sink.maybe_emit(request, &accumulator, &population, max_candidates, false)?;
+                progress_sink.maybe_emit(
+                    request,
+                    &accumulator,
+                    &population,
+                    max_candidates,
+                    false,
+                )?;
             }
             population = truncate_population(population, config.population_size);
             attempts_since_improvement = if improved {
@@ -8299,6 +8316,7 @@ fn run_hybrid_island_search(
         };
 
         let used_elite_neighbor = elite_neighbor.is_some();
+        factory_invocations += 1;
         let tracked = fabricate_valid_hybrid_individual(
             request,
             input,
@@ -10301,8 +10319,8 @@ pub fn run_hybrid_search_stream_json(
         .map_err(|error| JsValue::from_str(&format!("Invalid optimizer request JSON: {error}")))?;
     let mut progress_sink =
         HybridProgressSink::enabled(&progress_callback, progress_interval_attempts.max(1));
-    let result =
-        run_hybrid_search_with_progress(&request, &mut progress_sink).map_err(|error| JsValue::from_str(&error))?;
+    let result = run_hybrid_search_with_progress(&request, &mut progress_sink)
+        .map_err(|error| JsValue::from_str(&error))?;
     serde_json::to_string(&result).map_err(|error| {
         JsValue::from_str(&format!(
             "Failed to serialize Rust hybrid search response: {error}"
@@ -12435,7 +12453,10 @@ mod tests {
         );
         assert!(cheap_score > expensive_score);
         let picked_action = pick_global_validity_weighted_action(
-            &[(cheap_action.clone(), cheap_score), (expensive_action, expensive_score)],
+            &[
+                (cheap_action.clone(), cheap_score),
+                (expensive_action, expensive_score),
+            ],
             &mut SeededRandom::new("global-validity-weighted-pick"),
         );
         assert!(picked_action.spell_id == "cheap" || picked_action.spell_id == "expensive");
@@ -12446,7 +12467,9 @@ mod tests {
             &picked_action,
             &mut state,
         );
-        assert!(state.casts_by_spell_id.contains_key(picked_action.spell_id.as_str()));
+        assert!(state
+            .casts_by_spell_id
+            .contains_key(picked_action.spell_id.as_str()));
         let mut rng = SeededRandom::new("global-validity-sampler");
         let mut metrics = BTreeMap::new();
 
@@ -12510,7 +12533,7 @@ mod tests {
     }
 
     #[test]
-    fn global_validity_guidance_marks_fresh_candidates() {
+    fn global_validity_guidance_exhausts_bounded_fabrication_after_duplicates() {
         let mut request = parse_optimizer_request(
             r#"{
               "schemaVersion":1,
@@ -12550,18 +12573,38 @@ mod tests {
 
         let result = run_hybrid_search(&request).expect("hybrid search should run");
 
-        assert!(result
-            .metrics
-            .get("hybridGlobalValidityGuidedCandidates")
-            .copied()
-            .unwrap_or(0)
-            > 0);
-        assert!(result
-            .metrics
-            .get("hybridResourceAwareCandidates")
-            .copied()
-            .unwrap_or(0)
-            > 0);
+        assert!(
+            result
+                .metrics
+                .get("hybridGlobalValidityGuidedCandidates")
+                .copied()
+                .unwrap_or(0)
+                > 0
+        );
+        assert!(
+            result
+                .metrics
+                .get("hybridResourceAwareCandidates")
+                .copied()
+                .unwrap_or(0)
+                > 0
+        );
+        assert!(
+            result
+                .metrics
+                .get("duplicateFabricationProposals")
+                .copied()
+                .unwrap_or(0)
+                > 0
+        );
+        assert!(
+            result
+                .metrics
+                .get("factoryExhaustions")
+                .copied()
+                .unwrap_or(0)
+                > 0
+        );
     }
 
     #[test]
